@@ -1,0 +1,246 @@
+"""
+Asset Management for Git-Safe Workflows
+
+Prevents asset/ directory from polluting Git history:
+- Auto-gitignore assets/ folder
+- Prune unused asset files
+- Track asset references in notebooks
+"""
+
+import os
+import re
+import hashlib
+from pathlib import Path
+from typing import Set, List, Dict
+import nbformat
+
+
+def ensure_assets_gitignored(assets_dir: str) -> bool:
+    """
+    Ensure assets/ directory is in .gitignore.
+    
+    Called automatically by sanitize_outputs() to prevent
+    accidental commits of 100+ PNG files.
+    
+    Args:
+        assets_dir: Path to assets directory
+    
+    Returns:
+        True if gitignore was updated, False if already present
+    """
+    assets_path = Path(assets_dir)
+    repo_root = assets_path.parent
+    gitignore_path = repo_root / ".gitignore"
+    
+    # Pattern to match (handle both assets/ and assets with trailing slash)
+    ignore_pattern = "assets/"
+    
+    content = ""  # Initialize content
+    
+    # Check if already present
+    if gitignore_path.exists():
+        with open(gitignore_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            # Check for exact match or variations
+            if re.search(r'^assets/?$', content, re.MULTILINE):
+                return False  # Already present
+    
+    # Append to .gitignore
+    with open(gitignore_path, 'a', encoding='utf-8') as f:
+        if content and not content.endswith('\n'):
+            f.write('\n')
+        f.write('\n# Auto-generated: Prevent notebook assets from polluting Git history\n')
+        f.write('assets/\n')
+    
+    return True
+
+
+def get_referenced_assets(notebook_path: str) -> Set[str]:
+    """
+    Extract all asset filenames referenced in notebook outputs.
+    
+    Scans notebook for asset references in:
+    - Image outputs (markdown/HTML img tags)
+    - File links (markdown/HTML links)
+    - Output data (image/png, image/jpeg, etc.)
+    
+    Args:
+        notebook_path: Path to notebook file
+    
+    Returns:
+        Set of asset filenames referenced in notebook
+    """
+    path = Path(notebook_path)
+    if not path.exists():
+        return set()
+    
+    referenced = set()
+    
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            nb = nbformat.read(f, as_version=4)
+        
+        # Pattern to match asset references
+        # Matches: assets/abc123.png, ./assets/def456.pdf, etc.
+        asset_pattern = re.compile(r'assets/([a-f0-9]{32}\.[a-z]+)')
+        
+        for cell in nb.cells:
+            # Check cell source (markdown cells with images)
+            if hasattr(cell, 'source'):
+                for match in asset_pattern.finditer(cell.source):
+                    referenced.add(match.group(1))
+            
+            # Check cell outputs (code cells)
+            if cell.cell_type == 'code' and hasattr(cell, 'outputs'):
+                for output in cell.outputs:
+                    # Check text/html outputs
+                    if hasattr(output, 'data') and 'text/html' in output.data:
+                        html = output.data['text/html']
+                        if isinstance(html, str):
+                            for match in asset_pattern.finditer(html):
+                                referenced.add(match.group(1))
+                    
+                    # Check text/markdown outputs
+                    if hasattr(output, 'data') and 'text/markdown' in output.data:
+                        md = output.data['text/markdown']
+                        if isinstance(md, str):
+                            for match in asset_pattern.finditer(md):
+                                referenced.add(match.group(1))
+                    
+                    # Check text/plain outputs (might contain file paths)
+                    if hasattr(output, 'text'):
+                        text = output.text
+                        if isinstance(text, str):
+                            for match in asset_pattern.finditer(text):
+                                referenced.add(match.group(1))
+                        elif isinstance(text, list):
+                            for line in text:
+                                for match in asset_pattern.finditer(line):
+                                    referenced.add(match.group(1))
+    
+    except Exception:
+        # If notebook is corrupted or unreadable, return empty set
+        pass
+    
+    return referenced
+
+
+def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, any]:
+    """
+    Delete asset files not referenced in notebook outputs.
+    
+    Scans notebook for asset references, deletes orphaned files.
+    Safe to run periodically to clean up after cell deletions.
+    
+    Args:
+        notebook_path: Path to notebook file
+        dry_run: If True, only report what would be deleted (don't actually delete)
+    
+    Returns:
+        Dict with:
+        - deleted: List of deleted filenames
+        - kept: List of kept filenames
+        - total_size_freed: Bytes freed (or would be freed in dry_run)
+    """
+    path = Path(notebook_path)
+    assets_dir = path.parent / "assets"
+    
+    if not assets_dir.exists():
+        return {
+            "deleted": [],
+            "kept": [],
+            "total_size_freed": 0,
+            "message": f"No assets directory found at {assets_dir}"
+        }
+    
+    # Get referenced assets from notebook
+    referenced = get_referenced_assets(str(path))
+    
+    # Get all asset files
+    all_assets = [f.name for f in assets_dir.iterdir() if f.is_file()]
+    
+    # Find orphaned assets
+    orphaned = [f for f in all_assets if f not in referenced]
+    kept = [f for f in all_assets if f in referenced]
+    
+    total_size_freed = 0
+    deleted = []
+    
+    if not dry_run:
+        for filename in orphaned:
+            file_path = assets_dir / filename
+            try:
+                size = file_path.stat().st_size
+                file_path.unlink()
+                total_size_freed += size
+                deleted.append(filename)
+            except Exception:
+                # Skip files that can't be deleted
+                pass
+    else:
+        # Dry run - just calculate size
+        for filename in orphaned:
+            file_path = assets_dir / filename
+            try:
+                total_size_freed += file_path.stat().st_size
+                deleted.append(filename)
+            except Exception:
+                pass
+    
+    # Format size in human-readable format
+    if total_size_freed < 1024:
+        size_str = f"{total_size_freed} bytes"
+    elif total_size_freed < 1024 * 1024:
+        size_str = f"{total_size_freed / 1024:.1f} KB"
+    else:
+        size_str = f"{total_size_freed / (1024 * 1024):.1f} MB"
+    
+    message = f"{'Would delete' if dry_run else 'Deleted'} {len(deleted)} orphaned assets ({size_str}), kept {len(kept)} referenced assets"
+    
+    return {
+        "deleted": deleted,
+        "kept": kept,
+        "total_size_freed": total_size_freed,
+        "message": message
+    }
+
+
+def get_assets_summary(notebook_path: str) -> Dict[str, any]:
+    """
+    Get summary of asset usage for a notebook.
+    
+    Useful for agents to understand storage impact before/after cleanup.
+    
+    Args:
+        notebook_path: Path to notebook file
+    
+    Returns:
+        Dict with asset counts and sizes
+    """
+    path = Path(notebook_path)
+    assets_dir = path.parent / "assets"
+    
+    if not assets_dir.exists():
+        return {
+            "total_assets": 0,
+            "referenced_assets": 0,
+            "orphaned_assets": 0,
+            "total_size": 0,
+            "message": "No assets directory"
+        }
+    
+    referenced = get_referenced_assets(str(path))
+    all_assets = [f for f in assets_dir.iterdir() if f.is_file()]
+    
+    total_size = sum(f.stat().st_size for f in all_assets)
+    orphaned = [f for f in all_assets if f.name not in referenced]
+    orphaned_size = sum(f.stat().st_size for f in orphaned)
+    
+    return {
+        "total_assets": len(all_assets),
+        "referenced_assets": len(referenced),
+        "orphaned_assets": len(orphaned),
+        "total_size": total_size,
+        "orphaned_size": orphaned_size,
+        "message": f"{len(all_assets)} total assets, {len(referenced)} referenced, {len(orphaned)} orphaned"
+    }

@@ -1,0 +1,91 @@
+{
+  "name": "mcp-agent-kernel",
+  "displayName": "MCP Agent Kernel",
+  "description": "Jupyter notebook kernel powered by MCP server for AI agent collaboration",
+  "version": "0.1.0",
+  "publisher": "warshawsky-research",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/warshawsky-research/mcp-agent-kernel"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Notebooks",
+    "Data Science"
+  ],
+  "activationEvents": [
+    "onNotebook:jupyter-notebook"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "MCP Agent Kernel",
+      "properties": {
+        "mcp-jupyter.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the MCP server directory. Leave empty for auto-detection."
+        },
+        "mcp-jupyter.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to Python executable for MCP server. Leave empty for auto-detection."
+        },
+        "mcp-jupyter.pollingInterval": {
+          "type": "number",
+          "default": 500,
+          "description": "Polling interval in milliseconds for cell execution status."
+        },
+        "mcp-jupyter.autoRestart": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically restart MCP server on crash."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "mcp-jupyter.selectEnvironment",
+        "title": "MCP Jupyter: Select Python Environment"
+      },
+      {
+        "command": "mcp-jupyter.restartServer",
+        "title": "MCP Jupyter: Restart Server"
+      },
+      {
+        "command": "mcp-jupyter.showServerLogs",
+        "title": "MCP Jupyter: Show Server Logs"
+      },
+      {
+        "command": "mcp-jupyter.syncNotebook",
+        "title": "MCP Jupyter: Sync Notebook from Disk"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run bundle-python && npm run compile",
+    "bundle-python": "node scripts/copy-python-server.js",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js",
+    "lint": "eslint src --ext ts",
+    "package": "npm run vscode:prepublish && npx @vscode/vsce package"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.x",
+    "@types/node": "^20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^6.x",
+    "@typescript-eslint/parser": "^6.x",
+    "@vscode/test-electron": "^2.3.x",
+    "@vscode/vsce": "^3.7.1",
+    "eslint": "^8.x",
+    "glob": "^13.0.0",
+    "mocha": "^10.x",
+    "typescript": "^5.3.0"
+  }
+}

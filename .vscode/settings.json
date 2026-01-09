@@ -1,0 +1,15 @@
+{
+    "mcpServers": {
+        "jupyter": {
+            "command": "uv",
+            "args": [
+                "run",
+                "mcp-server-jupyter"
+            ],
+            "cwd": "${workspaceFolder}/tools/mcp-server-jupyter",
+            "env": {
+                "PYTHONUNBUFFERED": "1"
+            }
+        }
+    }
+}

@@ -1,0 +1,51 @@
+[tool.poetry]
+name = "mcp-server-jupyter"
+version = "0.1.0"
+description = "A MCP server for executing Jupyter Notebooks"
+authors = ["Antigravity <antigravity@example.com>"]
+readme = "README.md"
+packages = [{include = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+mcp = "^1.0.0"
+jupyter_client = "^8.0.0"
+nbformat = "^5.0.0"
+ipykernel = "^6.0.0"
+psutil = "^5.9.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+pytest-xdist = "^3.5.0"
+black = "^24.0.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = [
+    "optional: marks tests as optional (heavy integration tests requiring matplotlib/pandas)"
+]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
