@@ -387,9 +387,11 @@ export class McpClient {
     } catch (e) {
         vscode.window.showErrorMessage(`Failed to present diff: ${e}`);
     } finally {
-        // cleanup temp files? 
-        // If we delete them too fast, diff editor might break?
-        // Let's rely on OS temp cleanup or delete after a delay.
+        // cleanup temp files after a short delay to allow editor to close
+        setTimeout(() => {
+            if (fs.existsSync(leftPath)) fs.unlinkSync(leftPath);
+            if (fs.existsSync(rightPath)) fs.unlinkSync(rightPath);
+        }, 5000); 
     }
   }
 

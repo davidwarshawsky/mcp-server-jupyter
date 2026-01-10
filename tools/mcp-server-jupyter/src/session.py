@@ -489,65 +489,6 @@ except ImportError:
 
 # [PHASE 4: Smart Error Recovery]
 # Inject a custom exception handler to provide context-aware error reports
-try:
-    from IPython.core.interactiveshell import InteractiveShell
-    
-    def _mcp_custom_exception_handler(self, etype, value, tb, tb_offset=None):
-        # 1. Standard traceback printing (so user sees it in logs)
-        self.showtraceback((etype, value, tb), tb_offset=tb_offset)
-        
-        # 2. Extract Local Context for the Agent
-        try:
-            import traceback
-            import json
-            
-            # Find the stack frame corresponding to the user's code
-            # We skip system frames (ipython internals)
-            stack = traceback.extract_tb(tb)
-            last_frame = None
-            locals_dump = {}
-            
-            # Walk stack to find the last frame in the user's cell (usually <ipython-input-X-Y>)
-            # Note: tb object navigation is required for locals, extract_tb only gives text
-            curr = tb
-            while curr:
-                frame = curr.tb_frame
-                code = frame.f_code
-                filename = code.co_filename
-                if filename.startswith("<ipython-input-"):
-                    last_frame = frame
-                curr = curr.tb_next
-
-            if last_frame:
-                # Capture safe locals (primitives + types)
-                for k, v in last_frame.f_locals.items():
-                    if k.startswith("_"): continue
-                    if isinstance(v, (int, float, bool, str, type(None))):
-                        locals_dump[k] = str(v)[:200]
-                    else:
-                        locals_dump[k] = f"<{type(v).__name__}>"
-            
-            # Print a special hidden JSON block that the MCP server can parse
-            # This is "Sidecar Data" embedded in the stdout stream
-            err_info = {
-                "_mcp_error_context": True,
-                "error_type": etype.__name__,
-                "error_message": str(value),
-                "locals": locals_dump,
-                "hint": "Check the locals values above to debug the logic."
-            }
-            print(f"\\n__MCP_ERROR_CONTEXT_START__\\n{json.dumps(err_info, default=str)}\\n__MCP_ERROR_CONTEXT_END__")
-            
-        except Exception:
-            pass # Don't crash the error handler
-
-    # Register the handler
-    InteractiveShell.set_customexc = _mcp_custom_exception_handler
-    # Note: set_customexc is deprecated in newer IPython, but showtraceback override is complex.
-    # Alternative: use get_ipython().set_custom_exc((Exception,), _mcp_handler)
-    
-    def _mcp_handler(shell, etype, value, tb, tb_offset=None):
-        _mcp_custom_exception_handler(shell, etype, value, tb, tb_offset)
         
     get_ipython().set_custom_exc((Exception,), _mcp_handler)
 
