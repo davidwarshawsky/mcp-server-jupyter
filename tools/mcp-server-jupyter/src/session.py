@@ -273,7 +273,7 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None):
+    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None):
         abs_path = str(Path(nb_path).resolve())
         # Determine the Notebook's directory to set as CWD
         notebook_dir = str(Path(nb_path).parent.resolve())
@@ -283,8 +283,46 @@ class SessionManager:
         
         km = AsyncKernelManager()
         
-        # 1. Handle Environment
-        py_exe = sys.executable
+        if docker_image:
+             # [PHASE 4: Docker Support]
+             # Strategy: Use docker run to launch the kernel
+             # We must mount:
+             # 1. The workspace (so imports work)
+             # 2. The connection file (so we can talk to it)
+             
+             # Locate workspace root (Simple heuristic: look for .git or go up logic)
+             # For now, we mount the notebook directory. 
+             # TODO: More robust root detection
+             mount_source = notebook_dir
+             mount_target = "/workspace"
+             
+             # Construct Docker Command
+             # We use {connection_file} which Jupyter substitutes with the host path
+             # We map Host Path -> Container Path (/kernel.json)
+             # Then tell ipykernel to read /kernel.json
+             
+             cmd = [
+                 'docker', 'run', 
+                 '--rm',                     # Cleanup container on exit
+                 '-i',                       # Interactive (keeps stdin open)
+                 '-u', str(os.getuid()),     # Run as current user (avoid root file issues)
+                 '-v', f'{mount_source}:{mount_target}',
+                 '-v', '{connection_file}:/kernel.json',
+                 '-w', mount_target,
+                 docker_image,
+                 'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
+             ]
+             
+             km.kernel_cmd = cmd
+             logger.info(f"Configured Docker kernel: {cmd}")
+             
+             # We explicitly do NOT activate local envs if using Docker
+             # Docker image is the environment
+             kernel_env = {} 
+        
+        else:
+            # 1. Handle Environment (Local)
+            py_exe = sys.executable
         env_name = "system"
         kernel_env = os.environ.copy()  # Default: inherit current environment
         

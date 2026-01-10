@@ -23,14 +23,19 @@ session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
 
 @mcp.tool()
-async def start_kernel(notebook_path: str, venv_path: str = ""):
+async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = ""):
     """
     Boot a background process.
     Windows Logic: Looks for venv_path/Scripts/python.exe.
     Ubuntu Logic: Looks for venv_path/bin/python.
+    Docker Logic: If docker_image is set, runs kernel securely in container.
     Output: "Kernel started (PID: 1234). Ready for execution."
     """
-    return await session_manager.start_kernel(notebook_path, venv_path if venv_path else None)
+    return await session_manager.start_kernel(
+        notebook_path, 
+        venv_path if venv_path else None,
+        docker_image if docker_image else None
+    )
 
 @mcp.tool()
 async def stop_kernel(notebook_path: str):
