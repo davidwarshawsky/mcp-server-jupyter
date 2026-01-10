@@ -99,6 +99,7 @@ class SessionManager:
         
         # Reference to MCP server for notifications
         self.mcp_server = None
+        self.server_session = None
         
         # Session persistence directory
         self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
@@ -107,6 +108,28 @@ class SessionManager:
     def set_mcp_server(self, mcp_server):
         """Set the MCP server instance to enable notifications."""
         self.mcp_server = mcp_server
+
+    def register_session(self, session):
+        """Register the active ServerSession for sending notifications."""
+        self.server_session = session
+
+    async def _send_notification(self, method: str, params: Any):
+        """Helper to send notifications via available channel."""
+        # Wrap custom notification to satisfy MCP SDK interface
+        class CustomNotification:
+            def __init__(self, method, params):
+                self.method = method
+                self.params = params
+            def model_dump(self, **kwargs):
+                return {"method": self.method, "params": self.params}
+
+        notification = CustomNotification(method, params)
+
+        if self.server_session:
+            await self.server_session.send_notification(notification)
+        elif self.mcp_server and hasattr(self.mcp_server, "send_notification"):
+            await self.mcp_server.send_notification(notification)
+
     
     def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
         """
@@ -361,7 +384,7 @@ class SessionManager:
         
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
         # Execute startup setup (fire-and-forget for reliability)
-        startup_code = """
+        startup_code = '''
 %load_ext autoreload
 %autoreload 2
 
@@ -547,7 +570,7 @@ try:
     os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg'
 except ImportError:
     pass  # bokeh not installed, skip
-"""
+'''
         try:
             kc.execute(startup_code, silent=True)
             # Give it a moment to take effect
@@ -638,15 +661,14 @@ except ImportError:
                         self._finalize_execution(nb_path, exec_data)
                         
                         # [PRIORITY 2] Emit Completion Notification
-                        if self.mcp_server:
-                             try:
-                                await self.mcp_server.send_notification("notebook/status", {
-                                    "notebook_path": nb_path,
-                                    "exec_id": exec_data.get('id'),
-                                    "status": exec_data['status']
-                                })
-                             except Exception as e:
-                                logger.warning(f"Failed to send status notification: {e}")
+                        try:
+                            await self._send_notification("notebook/status", {
+                                "notebook_path": nb_path,
+                                "exec_id": exec_data.get('id'),
+                                "status": exec_data['status']
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to send status notification: {e}")
 
                 elif msg_type == 'clear_output':
                     # [PHASE 3.1] Handle progress bars and dynamic updates (tqdm, etc.)
@@ -681,17 +703,16 @@ except ImportError:
                         exec_data['last_activity'] = asyncio.get_event_loop().time()
                         
                         # [PRIORITY 2] Emit MCP Notification (Event-Driven Architecture)
-                        if self.mcp_server:
-                            try:
-                                await self.mcp_server.send_notification("notebook/output", {
-                                    "notebook_path": nb_path,
-                                    "exec_id": exec_data.get('id'),
-                                    "type": msg_type,
-                                    "content": content
-                                })
-                            except Exception as e:
-                                # Don't crash the listener if notification fails
-                                logger.warning(f"Failed to send MCP notification: {e}")
+                        try:
+                            await self._send_notification("notebook/output", {
+                                "notebook_path": nb_path,
+                                "exec_id": exec_data.get('id'),
+                                "type": msg_type,
+                                "content": content
+                            })
+                        except Exception as e:
+                            # Don't crash the listener if notification fails
+                            logger.warning(f"Failed to send MCP notification: {e}")
 
         except asyncio.CancelledError:
             logger.info(f"Listener cancelled for {nb_path}")

@@ -31,6 +31,15 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
     Docker Logic: If docker_image is set, runs kernel securely in container.
     Output: "Kernel started (PID: 1234). Ready for execution."
     """
+    # Capture the active session for notifications
+    try:
+        ctx = mcp.get_context()
+        if ctx and ctx.request_context:
+            session_manager.register_session(ctx.request_context.session)
+    except:
+         # Ignore if context not available (e.g. testing)
+         pass
+
     return await session_manager.start_kernel(
         notebook_path, 
         venv_path if venv_path else None,
@@ -219,9 +228,6 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "message": "Edit proposed. Client must apply changes.",
         # SIGNAL PROTOCOL
         "_mcp_action": "apply_edit" 
-    }) 
-        "proposal": proposal,
-        "message": "Edit proposed. Client must apply changes."
     })
 
 
