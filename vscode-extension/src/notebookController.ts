@@ -235,21 +235,32 @@ export class McpNotebookController {
 
     // Check if we need to sync state from disk (handoff protocol)
     try {
-      const syncNeeded = await this.mcpClient.detectSyncNeeded(notebookPath);
+      const syncCheck = await this.mcpClient.detectSyncNeeded(notebookPath);
+      // Handle both raw boolean (legacy) or detailed object response
+      const syncNeeded = typeof syncCheck === 'string' ? JSON.parse(syncCheck).sync_needed : syncCheck;
+      
       if (syncNeeded) {
-        await vscode.window.withProgress(
-          {
-            location: vscode.ProgressLocation.Notification,
-            title: 'Syncing notebook state...',
-            cancellable: false,
-          },
-          async () => {
-            await this.mcpClient.syncStateFromDisk(notebookPath);
-          }
-        );
+         const selection = await vscode.window.showWarningMessage(
+             "Notebook State Sync Required: The Agent's kernel state is older than the disk/buffer.",
+             "Sync State Now",
+             "Ignore"
+         );
+         
+         if (selection === "Sync State Now") {
+            await vscode.window.withProgress(
+              {
+                location: vscode.ProgressLocation.Notification,
+                title: 'Syncing notebook state...',
+                cancellable: false,
+              },
+              async () => {
+                await this.mcpClient.syncStateFromDisk(notebookPath);
+              }
+            );
+         }
       }
     } catch (error) {
-      // Sync detection failed, continue with normal startup
+      // Sync detection failed, but we shouldn't block startup
       console.warn('Failed to detect sync:', error);
     }
 

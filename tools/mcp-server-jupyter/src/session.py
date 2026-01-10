@@ -821,7 +821,25 @@ try:
 except ImportError:
     print("Error: 'dill' is not installed in the kernel environment. Please run '!pip install dill' first.")
 except Exception as e:
-    print(f"Checkpoint error: {{e}}")
+    # Granular Error Diagnosis
+    print("Checkpoint Failed. Analyzing unpicklable variables...")
+    import dilled_failsafe
+    bad_vars = []
+    ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
+    
+    # Check strict globals first
+    for k, v in list(globals().items()):
+        if k.startswith('_') or k in ignored: continue
+        try:
+            dill.dumps(v)
+        except:
+            bad_vars.append(f"{{k}} ({{type(v).__name__}})")
+            
+    if bad_vars:
+        print(f"FAILED: The following variables cannot be saved: {{', '.join(bad_vars)}}")
+        print("Suggestion: Delete these variables (del var_name) or recreate them after reload.")
+    else:
+        print(f"Checkpoint error: {{e}}")
 """
         # Use -1 index for internal commands
         await self.execute_cell_async(notebook_path, -1, code)

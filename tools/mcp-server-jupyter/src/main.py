@@ -180,12 +180,19 @@ def set_stop_on_error(notebook_path: str, enabled: bool):
     return f"stop_on_error set to {enabled} for {notebook_path}"
 
 @mcp.tool()
-def get_notebook_outline(notebook_path: str):
+def get_notebook_outline(notebook_path: str, structure_override: Optional[List[dict]] = None):
     """
     Low-token overview of the file.
-    Output: JSON list: [{index: 0, type: "code", source_preview: "import pandas...", state: "executed"}].
+    Args:
+        structure_override: Optional list of cell metadata pushed from VS Code buffer.
+                           Prevents "Index Blindness" where Agent reads stale disk state.
     """
-    return notebook.get_notebook_outline(notebook_path)
+    if structure_override:
+        # Use the real-time buffer state from VS Code
+        return notebook.format_outline(structure_override)
+    else:
+        # Fallback to disk (risk of stale data)
+        return notebook.get_notebook_outline(notebook_path)
 
 @mcp.tool()
 def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
@@ -227,12 +234,17 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "timestamp": str(datetime.datetime.now())
     }
     
-    # In a full Notifcation-based architecture, we would send this via
-    # ctx.session.send_notification("notebook/edit_proposal", proposal)
-    # For now, we return it so the Agent or VS Code Extension can act on it.
+    # We return a specific structure that the Client (mcpClient.ts) listens for.
+    # By convention, if the tool result contains this structure, the client
+    # will trigger a WorkspaceEdit.
     
     return json.dumps({
         "status": "proposal_created", 
+        "proposal": proposal,
+        "message": "Edit proposed. Client must apply changes.",
+        # SIGNAL PROTOCOL
+        "_mcp_action": "apply_edit" 
+    }) 
         "proposal": proposal,
         "message": "Edit proposed. Client must apply changes."
     })

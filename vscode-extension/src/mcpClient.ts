@@ -246,9 +246,46 @@ export class McpClient {
     if (response.error) {
       pending.reject(new Error(`MCP error: ${response.error.message}`));
     } else {
+      // INTERCEPT PROTOCOL: Check for action signals
+      try {
+        if (response.result && typeof response.result === 'string') {
+           try {
+              const parsed = JSON.parse(response.result);
+               if (parsed._mcp_action === 'apply_edit' && parsed.proposal) {
+                   this.handleApplyEdit(parsed.proposal);
+               }
+           } catch (e) { /* Not JSON */ }
+        }
+      } catch (e) {
+         console.error('Error handling edit action:', e);
+      }
+      
       pending.resolve(response.result);
     }
   }
+
+  private async handleApplyEdit(proposal: any) {
+    if (proposal.action !== 'edit_cell') return;
+
+    const uri = vscode.Uri.file(proposal.notebook_path);
+    const edit = new vscode.WorkspaceEdit();
+    
+    // We need to find the notebook document
+    const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === uri.fsPath);
+    if (!notebook) return;
+
+    const cell = notebook.cellAt(proposal.index);
+    if (!cell) return;
+
+    // Replace the cell content
+    const range = new vscode.Range(0, 0, cell.document.lineCount, 0);
+    edit.replace(cell.document.uri, range, proposal.new_content);
+
+    // Apply the edit
+    await vscode.workspace.applyEdit(edit);
+    vscode.window.showInformationMessage(`Agent edited Cell ${proposal.index + 1}`);
+  }
+
 
   /**
    * Handle process exit

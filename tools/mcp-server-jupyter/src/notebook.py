@@ -181,6 +181,28 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
     
     return outline
 
+def format_outline(structure_override: List[Dict]) -> List[Dict]:
+    """
+    Format a structure override from VS Code into the standard outline format.
+    Checks consistency and applies standard formatting.
+    """
+    outline = []
+    for i, item in enumerate(structure_override):
+        source = item.get('source', '')
+        source_preview = source[:50] + "..." if len(source) > 50 else source
+        
+        # Infer state if not provided
+        state = item.get('state', 'fresh')
+        
+        outline.append({
+            "index": i,
+            "id": item.get('id', f"buffer-{i}"),
+            "type": item.get('cell_type', item.get('kind', 'code')), # VSCode uses 'kind', nbformat uses 'cell_type'
+            "source_preview": source_preview.replace("\n", "\\n"),
+            "state": state
+        })
+    return outline
+
 def append_cell(notebook_path: str, content: str, cell_type: str = "code") -> str:
     """Adds new logic to the end. Automatically clears output."""
     path = Path(notebook_path)
