@@ -552,11 +552,16 @@ async def inspect_variable(notebook_path: str, variable_name: str):
     
     Returns: Markdown-formatted summary suitable for LLM consumption
     """
+    # 1. Input Validation (Prevent Injection)
+    if not variable_name.isidentifier():
+        return f"Error: '{variable_name}' is not a valid Python identifier. Cannot inspect."
+
     # SECURITY FIX: Use safe dictionary lookup instead of eval()
     # This prevents code injection via inspect_variable(path, "os.system('rm -rf /')")
     code = f"""
 import pandas as pd
 import numpy as np
+import builtins
 
 def _safe_inspect():
     var_name = '{variable_name}'
@@ -573,10 +578,15 @@ def _safe_inspect():
         t_name = type(obj).__name__
         output = [f"### Type: {{t_name}}"]
         
-        if isinstance(obj, pd.DataFrame):
+        # Safe Primitives
+        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
+             output.append(f"- Value: {{str(obj)[:500]}}")
+
+        elif isinstance(obj, pd.DataFrame):
             output.append(f"- Shape: {{obj.shape}}")
             output.append(f"- Columns: {{list(obj.columns)}}")
-            mem_mb = obj.memory_usage(deep=True).sum() / 1024**2
+            # Deep memory usage can be slow/execute code for custom objects
+            mem_mb = obj.memory_usage(deep=False).sum() / 1024**2
             output.append(f"- Memory: {{mem_mb:.2f}} MB")
             output.append("\\n#### Head (3 rows):")
             output.append(obj.head(3).to_markdown(index=False))
@@ -589,13 +599,22 @@ def _safe_inspect():
             
         elif isinstance(obj, (list, tuple)):
             output.append(f"- Length: {{len(obj)}}")
-            output.append(f"- Sample (first 5): {{obj[:5]}}")
+            # Only show safe representation of items if they are primitives
+            sample = []
+            for item in obj[:5]:
+                if isinstance(item, (int, float, bool, str, bytes, type(None))):
+                    sample.append(item)
+                else:
+                    sample.append(f"<{type(item).__name__}>")
+            output.append(f"- Sample (first 5): {{sample}}")
             
         elif isinstance(obj, dict):
             output.append(f"- Keys: {{list(obj.keys())[:10]}}")
             output.append(f"- Sample (first 3 items):")
             for k, v in list(obj.items())[:3]:
-                output.append(f"  - {{k}}: {{str(v)[:100]}}")
+                # Avoid calling str(v) on unknown objects
+                val_str = str(v)[:100] if isinstance(v, (int, float, bool, str, bytes, type(None))) else f"<{type(v).__name__}>"
+                output.append(f"  - {{k}}: {{val_str}}")
                 
         elif hasattr(obj, 'shape') and hasattr(obj, 'dtype'):  # Numpy
             output.append(f"- Shape: {{obj.shape}}")
