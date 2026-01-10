@@ -823,7 +823,7 @@ except ImportError:
 except Exception as e:
     # Granular Error Diagnosis
     print("Checkpoint Failed. Analyzing unpicklable variables...")
-    import dilled_failsafe
+    # import dilled_failsafe  <-- REMOVED
     bad_vars = []
     ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
     

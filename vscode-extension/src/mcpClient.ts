@@ -186,6 +186,33 @@ export class McpClient {
       throw new Error('MCP server not started');
     }
 
+    // --- INTEROCEPTOR: Argument Injection ---
+    // Fix "Index Blindness" by injecting the VS Code buffer structure into get_notebook_outline
+    if (toolName === 'get_notebook_outline' && args.notebook_path && !args.structure_override) {
+        // Find the active notebook document
+        const nbDoc = vscode.workspace.notebookDocuments.find(
+            nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
+        );
+        
+        if (nbDoc) {
+            // Construct structure_override from the buffer
+            const structure = nbDoc.getCells().map((cell, index) => ({
+                index: index,
+                // We don't have stable IDs in the buffer unless we track them, 
+                // but we can generate transient ones or read them if available in metadata
+                id: (cell.metadata as any)?.custom?.id || `buffer-${index}`,
+                cell_type: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
+                source: cell.document.getText(),
+                // Best effort state guess
+                state: (cell as any).executionSummary?.executionOrder ? 'executed' : 'fresh'
+            }));
+            
+            args.structure_override = structure;
+            // console.log(`[MCP] Injected ${structure.length} cells into get_notebook_outline`);
+        }
+    }
+    // ----------------------------------------
+
     const id = ++this.requestId;
     const request: McpRequest = {
       jsonrpc: '2.0',
