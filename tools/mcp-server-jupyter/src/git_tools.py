@@ -309,22 +309,48 @@ def commit_agent_work(
             )
         
         # Add specified files
-        # Resolving files relative to the repo root is tricky if repo_path is just ".", 
-        # but GitPython handles paths relative to working tree usually.
-        # We'll assert files exist first.
         repo_root = Path(repo.working_dir)
         files_to_add = []
         for file in files:
-            file_path = repo_root / file
-            # If path was absolute, join might fail to produce what we expect if we aren't careful, 
-            # but usually 'files' are relative.
-            if not file_path.exists():
-                 # Try resolving purely
-                 if Path(file).is_absolute() and Path(file).exists():
-                     pass # It exists
-                 elif not (Path(os.getcwd()) / file).exists():
+            file_path = Path(file)
+            
+            # Check if absolute path is inside repo
+            if file_path.is_absolute():
+                try:
+                    # Verify it is relative to repo root
+                    # Note: working_dir can be None for bare repos, but we checked earlier
+                    file_path.relative_to(repo.working_dir)
+                    # For gitpython add/index, providing the absolute path usually works if in repo
+                    files_to_add.append(str(file_path))
+                except ValueError:
+                    return f"Error: File {file} is outside the repository {repo.working_dir}"
+            else:
+                # Relative path.
+                # If the current working directory is the repo root, this is fine.
+                # If CWD != repo root, we must be careful. 
+                # Assuming relative to repo root is the safest convention for Git tools.
+                # However, if the agent says "src/main.py", it usually means relative to CWD.
+                # Let's verify existence.
+                
+                # Try relative to CWD first? Or Repo Root?
+                # Standard Git CLI operates relative to CWD.
+                # GitPython `repo.index.add` expects paths relative to CWD? Or absolute?
+                # Documentation says: "paths are generally relative to the repository root", BUT
+                # absolute paths work too.
+                
+                # Check absolute resolution against CWD
+                abs_from_cwd = Path(os.getcwd()) / file
+                if abs_from_cwd.exists() and str(abs_from_cwd).startswith(str(repo_root)):
+                     files_to_add.append(str(abs_from_cwd))
+                elif (repo_root / file).exists():
+                     files_to_add.append(str(repo_root / file))
+                else:
                      return f"Error: File not found: {file}"
-            files_to_add.append(str(file))
+
+        # Verify existence (double check processed list)
+        for f in files_to_add:
+            if not Path(f).exists():
+                 return f"Error: File path resolution failed for: {f}"
             
         repo.index.add(files_to_add)
         

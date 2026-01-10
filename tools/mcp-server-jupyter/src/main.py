@@ -35,9 +35,17 @@ async def start_kernel(notebook_path: str, venv_path: str = ""):
 @mcp.tool()
 async def stop_kernel(notebook_path: str):
     """
-    Kill the process to free RAM.
-    Output: "Kernel shutdown."
+    Kill the process to free RAM and clean up assets.
     """
+    # 1. Prune assets before stopping
+    from src.asset_manager import prune_unused_assets
+    try:
+        # Run cleanup. This ensures that if I delete a cell and close the notebook,
+        # the orphaned image is deleted.
+        prune_unused_assets(notebook_path, dry_run=False)
+    except Exception as e:
+        logger.warning(f"Asset cleanup failed: {e}")
+
     return await session_manager.stop_kernel(notebook_path)
 
 @mcp.tool()

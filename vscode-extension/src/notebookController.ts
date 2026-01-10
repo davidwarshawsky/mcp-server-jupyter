@@ -142,17 +142,33 @@ export class McpNotebookController {
         taskId
       );
 
-      // Wait for completion (Event-Driven)
-      // We also set a safety timeout or keep the polling as a fallback?
-      // "Priorities 2: Optimize Communication ... Eliminate polling loop."
-      // We will rely purely on notifications for now.
-      const success = await completionPromise;
+      // SAFETY TIMEOUT: Don't let the UI hang forever
+      const timeoutPromise = new Promise<boolean>((_, reject) => {
+        // 10 minutes hard timeout (adjust based on config)
+        setTimeout(() => reject(new Error("Execution timed out (Client Safety Limit)")), 600000);
+      });
 
-      if (success) {
-         await this.addExecutionMetadata(cell, 'human', Date.now());
-         execution.end(true, Date.now());
-      } else {
-         execution.end(false, Date.now());
+      // Wait for completion (Event-Driven) or safety timeout
+      try {
+          const success = await Promise.race([completionPromise, timeoutPromise]);
+    
+          if (success) {
+             await this.addExecutionMetadata(cell, 'human', Date.now());
+             execution.end(true, Date.now());
+          } else {
+             execution.end(false, Date.now());
+          }
+      } catch (error) {
+          // Handle timeout or other errors
+          const msg = error instanceof Error ? error.message : String(error);
+          await execution.replaceOutput([
+              new vscode.NotebookCellOutput([
+                  vscode.NotebookCellOutputItem.error({ name: 'TimeoutError', message: msg })
+              ])
+          ]);
+          execution.end(false, Date.now());
+      } finally {
+          this.completionResolvers.delete(taskId);
       }
 
     } catch (error) {

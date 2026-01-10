@@ -359,11 +359,77 @@ builtins.input = _mcp_blocked_input
 # Python 2 compatibility (though ipykernel requires Python 3)
 builtins.raw_input = _mcp_blocked_input
 
+
 # [SECURITY] Safe Inspection Helper
 # Pre-compile inspection logic to avoid sending large code blocks
+# Must be consistent with _mcp_inspect in session.py
+INSPECT_HELPER_CODE = """
 def _mcp_inspect(var_name):
     import builtins
     import sys
+    
+    # Safe lookup: Check locals then globals
+    # Note: In ipykernel, user variables are in globals()
+    ns = globals()
+    if var_name not in ns:
+        return f"Variable '{var_name}' not found."
+    
+    obj = ns[var_name]
+    
+    try:
+        t_name = type(obj).__name__
+        output = [f"### Type: {t_name}"]
+        
+        # Check for pandas/numpy without importing if not already imported
+        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
+        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
+        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
+        
+        # Safe Primitives
+        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
+             output.append(f"- Value: {str(obj)[:500]}")
+
+        elif is_pd_df:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Columns: {list(obj.columns)}")
+            output.append("\\n#### Head (3 rows):")
+            # to_markdown requires tabulate, fallback to string if fails
+            try:
+                output.append(obj.head(3).to_markdown(index=False))
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_pd_series:
+            output.append(f"- Length: {len(obj)}")
+            try:
+                output.append(obj.head(3).to_markdown())
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_numpy:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Dtype: {obj.dtype}")
+            
+        elif isinstance(obj, (list, tuple, set)):
+             output.append(f"- Length: {len(obj)}")
+             output.append(f"- Sample: {str(list(obj)[:3])}")
+             
+        elif isinstance(obj, dict):
+             output.append(f"- Keys ({len(obj)}): {list(obj.keys())[:5]}")
+             
+        elif hasattr(obj, '__dict__'):
+             output.append(f"- Attributes: {list(obj.__dict__.keys())[:5]}")
+             
+        return "\\n".join(output)
+            
+    except Exception as e:
+        return f"Error inspecting '{var_name}': {str(e)}"
+"""
+
+def _mcp_inspect(var_name):
+    import builtins
+    import sys
+
     
     # Safe lookup: Check locals then globals
     # Note: In ipykernel, user variables are in globals()
@@ -810,6 +876,11 @@ except ImportError:
             return None
             
         session = self.sessions[abs_path]
+        
+        # HEAL CHECK: If this is an inspection or system tool, ensure helper exists
+        # If the kernel restarted, we might not know, so we ensure it's available.
+        if "_mcp_inspect" in code and "def _mcp_inspect" not in code:
+             code = INSPECT_HELPER_CODE + "\n" + code
         
         # Generate execution ID if not provided
         if not exec_id:
