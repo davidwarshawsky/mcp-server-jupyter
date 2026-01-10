@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
-from src.provenance import ProvenanceManager
 from src.cell_id_manager import get_cell_id_at_index
 
 # Configure logging
@@ -53,23 +52,15 @@ def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[st
     
     # For conda, we need to run activation and capture environment
     try:
-        # Detect OS and construct activation command
-        if sys.platform == "win32":
-            # Windows: conda activate is batch command
-            activate_cmd = f'call conda activate "{venv_path}" && python -c "import os, json; print(json.dumps(dict(os.environ)))"'
-            shell = True
-            executable = "cmd.exe"
-        else:
-            # Unix: source the activation script
-            activate_cmd = f'eval "$(conda shell.bash hook)" && conda activate "{venv_path}" && python -c "import os, json; print(json.dumps(dict(os.environ)))"'
-            shell = True
-            executable = "/bin/bash"
+        # Safer approach: Use 'conda run' which manages activation internally
+        # without shell injection risks
+        cmd = ["conda", "run", "-p", str(venv_path_obj), "python", "-c", "import os, json; print(json.dumps(dict(os.environ)))"]
         
         # Run activation and capture environment
         result = subprocess.run(
-            activate_cmd,
-            shell=shell,
-            executable=executable if not sys.platform == "win32" else None,
+            cmd,
+            shell=False, # SECURITY FIX: No shell=True
+            check=False,
             capture_output=True,
             text=True,
             timeout=30
@@ -77,7 +68,13 @@ def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[st
         
         if result.returncode == 0:
             # Parse the JSON output
-            env_dict = json.loads(result.stdout.strip())
+            # Some versions of conda run output extra text, locate the JSON
+            stdout = result.stdout.strip()
+            # Find the JSON part if there is noise
+            if stdout.find('{') != -1:
+                 stdout = stdout[stdout.find('{'):]
+            
+            env_dict = json.loads(stdout)
             logger.info(f"Successfully activated conda env: {venv_path}")
             return env_dict
         else:
@@ -117,9 +114,16 @@ class SessionManager:
         # Global timeout for cell executions (in seconds)
         self.execution_timeout = 300  # 5 minutes
         
+        # Reference to MCP server for notifications
+        self.mcp_server = None
+        
         # Session persistence directory
         self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        
+    def set_mcp_server(self, mcp_server):
+        """Set the MCP server instance to enable notifications."""
+        self.mcp_server = mcp_server
     
     def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
         """
@@ -355,6 +359,87 @@ builtins.input = _mcp_blocked_input
 # Python 2 compatibility (though ipykernel requires Python 3)
 builtins.raw_input = _mcp_blocked_input
 
+# [SECURITY] Safe Inspection Helper
+# Pre-compile inspection logic to avoid sending large code blocks
+def _mcp_inspect(var_name):
+    import builtins
+    import sys
+    
+    # Safe lookup: Check locals then globals
+    # Note: In ipykernel, user variables are in globals()
+    ns = globals()
+    if var_name not in ns:
+        return f"Variable '{var_name}' not found."
+    
+    obj = ns[var_name]
+    
+    try:
+        t_name = type(obj).__name__
+        output = [f"### Type: {t_name}"]
+        
+        # Check for pandas/numpy without importing if not already imported
+        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
+        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
+        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
+        
+        # Safe Primitives
+        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
+             output.append(f"- Value: {str(obj)[:500]}")
+
+        elif is_pd_df:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Columns: {list(obj.columns)}")
+            output.append("\\n#### Head (3 rows):")
+            # to_markdown requires tabulate, fallback to string if fails
+            try:
+                output.append(obj.head(3).to_markdown(index=False))
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_pd_series:
+            output.append(f"- Length: {len(obj)}")
+            output.append(f"- Dtype: {obj.dtype}")
+            output.append("\\n#### Head (5 items):")
+            try:
+                output.append(obj.head(5).to_markdown())
+            except:
+                output.append(str(obj.head(5)))
+            
+        elif isinstance(obj, (list, tuple)):
+            output.append(f"- Length: {len(obj)}")
+            sample = []
+            for item in obj[:5]:
+                if isinstance(item, (int, float, bool, str, bytes, type(None))):
+                    sample.append(item)
+                else:
+                    sample.append(f"<{type(item).__name__}>")
+            output.append(f"- Sample (first 5): {sample}")
+            
+        elif isinstance(obj, dict):
+            output.append(f"- Keys: {list(obj.keys())[:10]}")
+            output.append(f"- Sample (first 3 items):")
+            for k, v in list(obj.items())[:3]:
+                val_str = str(v)[:100] if isinstance(v, (int, float, bool, str, bytes, type(None))) else f"<{type(v).__name__}>"
+                output.append(f"  - {k}: {val_str}")
+                
+        elif is_numpy:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Dtype: {obj.dtype}")
+            try:
+               output.append(f"- Sample: {list(obj.flat[:10])}")
+            except:
+               pass
+            
+        else:
+            # Fallback for generic objects
+            # output.append(f"- String Representation: {str(obj)[:500]}")
+            # Ensure we don't trigger malicious __str__
+            pass 
+            
+        return "\\n".join(output)
+    except Exception as e:
+        return f"Error inspecting variable: {str(e)}"
+
 # [PHASE 3.3] Force static rendering for interactive visualization libraries
 # This allows AI agents to "see" plots that would otherwise be JavaScript-based
 import os
@@ -474,6 +559,17 @@ except ImportError:
                             exec_data['status'] = 'completed'
                         # Finalize: Save to disk
                         self._finalize_execution(nb_path, exec_data)
+                        
+                        # [PRIORITY 2] Emit Completion Notification
+                        if self.mcp_server:
+                             try:
+                                await self.mcp_server.send_notification("notebook/status", {
+                                    "notebook_path": nb_path,
+                                    "exec_id": exec_data.get('id'),
+                                    "status": exec_data['status']
+                                })
+                             except Exception as e:
+                                logger.warning(f"Failed to send status notification: {e}")
 
                 elif msg_type == 'clear_output':
                     # [PHASE 3.1] Handle progress bars and dynamic updates (tqdm, etc.)
@@ -506,6 +602,19 @@ except ImportError:
                         # [PHASE 3.1] Update streaming metadata
                         exec_data['output_count'] = len(exec_data['outputs'])
                         exec_data['last_activity'] = asyncio.get_event_loop().time()
+                        
+                        # [PRIORITY 2] Emit MCP Notification (Event-Driven Architecture)
+                        if self.mcp_server:
+                            try:
+                                await self.mcp_server.send_notification("notebook/output", {
+                                    "notebook_path": nb_path,
+                                    "exec_id": exec_data.get('id'),
+                                    "type": msg_type,
+                                    "content": content
+                                })
+                            except Exception as e:
+                                # Don't crash the listener if notification fails
+                                logger.warning(f"Failed to send MCP notification: {e}")
 
         except asyncio.CancelledError:
             logger.info(f"Listener cancelled for {nb_path}")
@@ -647,55 +756,54 @@ except ImportError:
             text_summary = utils.sanitize_outputs(exec_data['outputs'], assets_dir)
             exec_data['text_summary'] = text_summary
             
-            # 2. Get Cell ID for provenance tracking
+            # 2. Get Cell content for content hashing
             abs_path = str(Path(nb_path).resolve())
+            execution_hash = None
             
             try:
-                # Load notebook to get Cell ID
+                # Load notebook to get Cell info
                 with open(nb_path, 'r', encoding='utf-8') as f:
                     nb = nbformat.read(f, as_version=4)
                 
-                cell_id = get_cell_id_at_index(nb, exec_data['cell_index'])
-                if not cell_id:
-                    logger.warning(f"Cell at index {exec_data['cell_index']} has no ID - skipping provenance")
-                    cell_id = None
+                # Verify index is valid
+                if 0 <= exec_data['cell_index'] < len(nb.cells):
+                    cell = nb.cells[exec_data['cell_index']]
+                    execution_hash = utils.get_cell_hash(cell.source)
+                else:
+                    logger.warning(f"Cell index {exec_data['cell_index']} out of range")
+                    
             except Exception as e:
-                logger.warning(f"Could not get Cell ID for provenance: {e}")
-                cell_id = None
+                logger.warning(f"Could not compute hash: {e}")
             
-            # 3. Save provenance to sidecar (not in notebook JSON!)
-            if cell_id:
+            # 3. Prepare metadata for injection into .ipynb
+            metadata_update = {}
+            if execution_hash:
                 try:
-                    env_info = self.sessions[abs_path]['env_info']
+                    env_info = self.sessions[abs_path].get('env_info', {})
                     
-                    provenance = {
+                    metadata_update = {
+                        "execution_hash": execution_hash,
                         "execution_timestamp": datetime.datetime.now().isoformat(),
-                        "kernel_env_name": env_info['env_name'],
-                        "kernel_python_path": env_info['python_path'],
-                        "kernel_start_time": env_info['start_time'],
-                        "agent_tool": "mcp-jupyter"
+                        "kernel_env_name": env_info.get('env_name', 'unknown'),
+                        "agent_run_id": str(uuid.uuid4())
                     }
-                    
-                    prov_manager = ProvenanceManager(nb_path)
-                    prov_manager.save_execution(cell_id, provenance)
-                    logger.info(f"Saved provenance for cell {cell_id[:8]}... to sidecar")
                 except Exception as e:
-                    logger.warning(f"Failed to save provenance: {e}")
+                    logger.warning(f"Failed to prepare metadata: {e}")
             
-            # 4. Write to Notebook File WITHOUT metadata injection (Git-safe!)
+            # 4. Write to Notebook File WITH metadata injection
             notebook.save_cell_execution(
                 nb_path, 
                 exec_data['cell_index'], 
                 exec_data['outputs'], 
                 exec_data.get('execution_count'),
-                metadata_update=None  # No metadata injection - using sidecar instead
+                metadata_update=metadata_update if metadata_update else None
             )
         except Exception as e:
             exec_data['status'] = 'failed_save'
             exec_data['error'] = str(e)
             logger.error(f"Failed to finalize execution: {e}")
 
-    async def execute_cell_async(self, nb_path: str, cell_index: int, code: str) -> Optional[str]:
+    async def execute_cell_async(self, nb_path: str, cell_index: int, code: str, exec_id: Optional[str] = None) -> Optional[str]:
         """Submits execution to the queue and returns an ID immediately."""
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
@@ -703,8 +811,9 @@ except ImportError:
             
         session = self.sessions[abs_path]
         
-        # Generate execution ID
-        exec_id = str(uuid.uuid4())
+        # Generate execution ID if not provided
+        if not exec_id:
+            exec_id = str(uuid.uuid4())
         
         # Track as queued immediately (fixes race condition with status checks)
         session['queued_executions'][exec_id] = {
@@ -811,35 +920,41 @@ print(_get_var_info())
         path_str = str(ckpt_path).replace("\\", "\\\\")
         
         code = f"""
+import dill
+import os
+import pickle
+
 try:
-    import dill
-    import os
     os.makedirs(os.path.dirname(r'{path_str}'), exist_ok=True)
+    
+    safe_state = {{}}
+    excluded_vars = []
+    ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
+
+    # Iterate over user variables only (skip system dunders)
+    user_vars = {{k:v for k,v in globals().items() if not k.startswith('_') and k not in ignored}}
+
+    for k, v in user_vars.items():
+        try:
+            # Test pickleability in memory first
+            dill.dumps(v)
+            safe_state[k] = v
+        except:
+            excluded_vars.append(k)
+
+    # Save only the safe state
     with open(r'{path_str}', 'wb') as f:
-        dill.dump_session(f)
-    print("Checkpoint saved")
+        dill.dump(safe_state, f)
+
+    msg = f"Checkpoint saved. Preserved {{len(safe_state)}} variables."
+    if excluded_vars:
+        msg += f" Skipped {{len(excluded_vars)}} complex objects: {{', '.join(excluded_vars)}}"
+    print(msg)
+
 except ImportError:
     print("Error: 'dill' is not installed in the kernel environment. Please run '!pip install dill' first.")
 except Exception as e:
-    # Granular Error Diagnosis
-    print("Checkpoint Failed. Analyzing unpicklable variables...")
-    # import dilled_failsafe  <-- REMOVED
-    bad_vars = []
-    ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
-    
-    # Check strict globals first
-    for k, v in list(globals().items()):
-        if k.startswith('_') or k in ignored: continue
-        try:
-            dill.dumps(v)
-        except:
-            bad_vars.append(f"{{k}} ({{type(v).__name__}})")
-            
-    if bad_vars:
-        print(f"FAILED: The following variables cannot be saved: {{', '.join(bad_vars)}}")
-        print("Suggestion: Delete these variables (del var_name) or recreate them after reload.")
-    else:
-        print(f"Checkpoint error: {{e}}")
+    print(f"Checkpoint error: {{e}}")
 """
         # Use -1 index for internal commands
         await self.execute_cell_async(notebook_path, -1, code)
@@ -853,9 +968,15 @@ except Exception as e:
         code = f"""
 try:
     import dill
-    with open(r'{path_str}', 'rb') as f:
-        dill.load_session(f)
-    print("State restored")
+    if not os.path.exists(r'{path_str}'):
+        print(f"Checkpoint not found: {path_str}")
+    else:
+        with open(r'{path_str}', 'rb') as f:
+            # We used plain dump, so we load a dict
+            state_dict = dill.load(f)
+            # Update globals with the loaded state
+            globals().update(state_dict)
+        print(f"State restored ({{len(state_dict)}} variables)")
 except Exception as e:
     print(f"Restore error: {{e}}")
 """

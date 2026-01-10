@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
+session_manager.set_mcp_server(mcp)
 
 @mcp.tool()
 async def start_kernel(notebook_path: str, venv_path: str = ""):
@@ -68,31 +69,19 @@ def detect_sync_needed(notebook_path: str):
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk.
     
     **Purpose**: Before the agent starts work, check if a human has modified the notebook
-    since the last agent execution. This prevents "KeyError" or "NameError" crashes when
-    the agent assumes variables exist that were never executed in the current kernel.
+    since the last agent execution.
     
     **How It Works**:
-    1. Reads notebook metadata for last agent execution timestamp
-    2. Compares with file modification time
-    3. Counts cells without mcp_trace metadata (= human-added cells)
-    4. Checks if kernel execution_count matches disk cell execution_counts
+    1. Reads notebook from disk.
+    2. Calculates SHA-256 hash of each cell's content.
+    3. Compares with 'execution_hash' stored in cell metadata.
+    4. If hashes mismatch, sync is required.
     
     Returns:
         JSON with:
-        - sync_needed: boolean (true if sync recommended)
-        - reason: Why sync is needed (if applicable)
-        - human_cells: List of cell indices without agent metadata
-        - last_agent_execution: Timestamp of last agent activity
-        - disk_modified: File modification timestamp
-        - recommendation: Action to take ("sync_state_from_disk" or "proceed")
-    
-    Agent Workflow:
-        status = detect_sync_needed(path)
-        if status['sync_needed']:
-            print(f"Sync required: {status['reason']}")
-            sync_state_from_disk(path)
-        else:
-            print("State is synced. Proceeding with work.")
+        - sync_needed: boolean
+        - reason: Description of mismatch
+        - changed_cells: List of cell indices that changed
     """
     import os
     from pathlib import Path
@@ -110,59 +99,32 @@ def detect_sync_needed(notebook_path: str):
     # Read notebook from disk
     try:
         nb = nbformat.read(notebook_path, as_version=4)
-        file_stat = os.stat(notebook_path)
-        disk_modified = file_stat.st_mtime
     except Exception as e:
         return json.dumps({
             "error": f"Failed to read notebook: {e}"
         })
     
-    # Check for human-added cells (no mcp_trace)
-    human_cells = []
-    last_agent_time = None
+    changed_cells = []
     
     for idx, cell in enumerate(nb.cells):
         if cell.cell_type == 'code':
-            metadata = cell.metadata.get('mcp_trace', {})
-            if not metadata:
-                human_cells.append(idx)
-            else:
-                # Track most recent agent execution
-                exec_time = metadata.get('execution_timestamp', '')
-                if exec_time and (not last_agent_time or exec_time > last_agent_time):
-                    last_agent_time = exec_time
+            current_hash = utils.get_cell_hash(cell.source)
+            # Check both new 'mcp' and legacy 'mcp_trace' metadata locations
+            mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+            last_hash = mcp_meta.get('execution_hash')
+            
+            # If no hash exists (never executed by agent) or hash mismatch (content changed)
+            if not last_hash or current_hash != last_hash:
+                changed_cells.append(idx)
     
-    # Determine if sync is needed
-    sync_needed = False
-    reason = None
-    
-    if len(human_cells) > 0:
-        sync_needed = True
-        reason = f"Found {len(human_cells)} cells without agent metadata (likely human-added)"
-    
-    # Check if file was modified after kernel start
-    kernel_start_time = session.get('env_info', {}).get('start_time', '')
-    if kernel_start_time:
-        from datetime import datetime
-        try:
-            kernel_dt = datetime.fromisoformat(kernel_start_time)
-            disk_dt = datetime.fromtimestamp(disk_modified)
-            if disk_dt > kernel_dt:
-                sync_needed = True
-                reason = f"File modified at {disk_dt} after kernel started at {kernel_dt}"
-        except:
-            pass
+    sync_needed = len(changed_cells) > 0
     
     return json.dumps({
         'sync_needed': sync_needed,
-        'reason': reason if sync_needed else "Kernel state appears synced with disk",
-        'human_cells': human_cells,
-        'human_cell_count': len(human_cells),
-        'total_code_cells': sum(1 for c in nb.cells if c.cell_type == 'code'),
-        'last_agent_execution': last_agent_time,
-        'kernel_start_time': kernel_start_time,
+        'reason': f"Content mismatch in {len(changed_cells)} cells" if sync_needed else "Content matches execution history",
+        'changed_cells': changed_cells,
         'recommendation': 'sync_state_from_disk' if sync_needed else 'proceed',
-        'sync_strategy': 'full'  # Always full sync for correctness
+        'sync_strategy': 'full'
     }, indent=2)
 
 @mcp.tool()
@@ -291,7 +253,7 @@ async def get_kernel_info(notebook_path: str):
 # --- NEW ASYNC TOOLS ---
 
 @mcp.tool()
-async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None):
+async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
     """
     Submits a cell for execution in the background.
     
@@ -300,6 +262,7 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
         index: Cell index
         code_override: Optional explicit code to run (bypass disk read). 
                       Crucial for "File vs Buffer" race conditions.
+        task_id_override: Optional client-generated ID to prevent race conditions.
     
     Returns: A Task ID (e.g., "b4f2...").
     Use `get_execution_status(task_id)` to check progress.
@@ -320,11 +283,14 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
             return f"Error reading cell: {e}"
     
     # 2. Submit
-    exec_id = await session_manager.execute_cell_async(notebook_path, index, code)
+    exec_id = await session_manager.execute_cell_async(notebook_path, index, code, exec_id=task_id_override)
     if not exec_id:
         return "Error starting execution."
         
-    return f"Execution started. Task ID: {exec_id}"
+    return json.dumps({
+        "task_id": exec_id,
+        "message": "Execution started"
+    })
 
 @mcp.tool()
 def get_execution_status(notebook_path: str, task_id: str):
@@ -620,81 +586,14 @@ async def inspect_variable(notebook_path: str, variable_name: str):
     if not variable_name.isidentifier():
         return f"Error: '{variable_name}' is not a valid Python identifier. Cannot inspect."
 
-    # SECURITY FIX: Use safe dictionary lookup instead of eval()
-    # This prevents code injection via inspect_variable(path, "os.system('rm -rf /')")
-    code = f"""
-import pandas as pd
-import numpy as np
-import builtins
-
-def _safe_inspect():
-    var_name = '{variable_name}'
+    # SECURITY FIX: Use pre-defined helper function instead of sending code blocks
+    # Logic is defined in session.py startup_code as _mcp_inspect(name)
+    code = f"_mcp_inspect('{variable_name}')"
+    # Note: run_simple_code executes the expression and returns the result (relying on displayhook or print?)
+    # SessionManager.run_simple_code runs using execute_cell logic which captures output.
+    # _mcp_inspect returns a string. To get it as output, we might need to print it or rely on it being the last expression.
+    # Jupyter usually displays the last expression.
     
-    # Safe lookup: Check locals then globals
-    if var_name in locals():
-        obj = locals()[var_name]
-    elif var_name in globals():
-        obj = globals()[var_name]
-    else:
-        return f"Variable '{{var_name}}' not found in current scope."
-    
-    try:
-        t_name = type(obj).__name__
-        output = [f"### Type: {{t_name}}"]
-        
-        # Safe Primitives
-        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
-             output.append(f"- Value: {{str(obj)[:500]}}")
-
-        elif isinstance(obj, pd.DataFrame):
-            output.append(f"- Shape: {{obj.shape}}")
-            output.append(f"- Columns: {{list(obj.columns)}}")
-            # Deep memory usage can be slow/execute code for custom objects
-            mem_mb = obj.memory_usage(deep=False).sum() / 1024**2
-            output.append(f"- Memory: {{mem_mb:.2f}} MB")
-            output.append("\\n#### Head (3 rows):")
-            output.append(obj.head(3).to_markdown(index=False))
-            
-        elif isinstance(obj, pd.Series):
-            output.append(f"- Length: {{len(obj)}}")
-            output.append(f"- Dtype: {{obj.dtype}}")
-            output.append("\\n#### Head (5 items):")
-            output.append(obj.head(5).to_markdown())
-            
-        elif isinstance(obj, (list, tuple)):
-            output.append(f"- Length: {{len(obj)}}")
-            # Only show safe representation of items if they are primitives
-            sample = []
-            for item in obj[:5]:
-                if isinstance(item, (int, float, bool, str, bytes, type(None))):
-                    sample.append(item)
-                else:
-                    sample.append(f"<{type(item).__name__}>")
-            output.append(f"- Sample (first 5): {{sample}}")
-            
-        elif isinstance(obj, dict):
-            output.append(f"- Keys: {{list(obj.keys())[:10]}}")
-            output.append(f"- Sample (first 3 items):")
-            for k, v in list(obj.items())[:3]:
-                # Avoid calling str(v) on unknown objects
-                val_str = str(v)[:100] if isinstance(v, (int, float, bool, str, bytes, type(None))) else f"<{type(v).__name__}>"
-                output.append(f"  - {{k}}: {{val_str}}")
-                
-        elif hasattr(obj, 'shape') and hasattr(obj, 'dtype'):  # Numpy
-            output.append(f"- Shape: {{obj.shape}}")
-            output.append(f"- Dtype: {{obj.dtype}}")
-            output.append(f"- Sample: {{list(obj.flat[:10])}}")
-            
-        else:
-            output.append(f"- String Representation: {{str(obj)[:500]}}")
-            
-        return "\\n".join(output)
-        
-    except Exception as e:
-        return f"Inspection error: {{e}}"
-
-print(_safe_inspect())
-"""
     return await session_manager.run_simple_code(notebook_path, code)
 
 # -----------------------

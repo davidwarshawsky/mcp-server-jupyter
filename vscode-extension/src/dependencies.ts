@@ -28,6 +28,7 @@ try:
     import jupyter_client
     import nbformat
     import psutil
+    import git
     print("OK")
 except ImportError as e:
     print(f"MISSING: {e}")

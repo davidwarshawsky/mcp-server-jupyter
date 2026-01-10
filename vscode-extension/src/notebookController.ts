@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { McpClient } from './mcpClient';
 import { ExecutionStatus, NotebookOutput } from './types';
 
@@ -11,11 +12,16 @@ export class McpNotebookController {
   private activeTaskIds = new Map<string, string>(); // execution key -> MCP task ID
   private notebookKernels = new Map<string, boolean>(); // track which notebooks have started kernels
   private kernelStartPromises = new Map<string, Promise<void>>(); // track in-progress kernel starts
+  private completionResolvers = new Map<string, (success: boolean) => void>();
+  private activeExecutions = new Map<string, vscode.NotebookCellExecution>(); // taskId -> execution
   private statusBar: vscode.StatusBarItem;
   private currentEnvironment?: { name: string; path: string; type: string };
 
   constructor(mcpClient: McpClient) {
     this.mcpClient = mcpClient;
+    
+    // Subscribe to MCP notifications (Event-Driven Architecture)
+    this.mcpClient.onNotification(event => this.handleNotification(event));
 
     this.controller = vscode.notebooks.createNotebookController(
       'mcp-agent-kernel',
@@ -34,6 +40,53 @@ export class McpNotebookController {
     this.statusBar.tooltip = 'Click to change Python environment';
     this.updateStatusBar();
     this.statusBar.show();
+  }
+
+  /**
+   * Handle incoming MCP notifications
+   */
+  private async handleNotification(event: { method: string, params: any }): Promise<void> {
+    if (event.method === 'notebook/output') {
+      const { exec_id, type, content } = event.params;
+      const execution = this.activeExecutions.get(exec_id);
+      
+      if (execution) {
+        let output: NotebookOutput | undefined;
+
+        if (type === 'stream') {
+          output = { output_type: 'stream', name: content.name, text: content.text };
+        } else if (type === 'display_data') {
+          output = { output_type: 'display_data', data: content.data, metadata: content.metadata };
+        } else if (type === 'execute_result') {
+          output = { output_type: 'execute_result', data: content.data, metadata: content.metadata, execution_count: content.execution_count };
+          if (content.execution_count) {
+             execution.executionOrder = content.execution_count;
+          }
+        } else if (type === 'error') {
+          output = { output_type: 'error', ename: content.ename, evalue: content.evalue, traceback: content.traceback };
+        }
+
+        if (output) {
+          const cellOutput = this.convertOutput(output);
+          await execution.appendOutput([cellOutput]);
+        }
+      }
+    } else if (event.method === 'notebook/status') {
+      const { exec_id, status } = event.params;
+      const resolver = this.completionResolvers.get(exec_id);
+      
+      if (resolver) {
+        if (status === 'completed') {
+          resolver(true);
+        } else if (status === 'error' || status === 'cancelled') {
+          resolver(false);
+        }
+        
+        if (status !== 'running' && status !== 'queued') {
+            this.completionResolvers.delete(exec_id);
+        }
+      }
+    }
   }
 
   /**
@@ -69,93 +122,39 @@ export class McpNotebookController {
       // Clear previous outputs
       execution.clearOutput();
 
-      // Start async execution
-      const taskId = await this.mcpClient.runCellAsync(
-        notebook.uri.fsPath,
-        cell.index,
-        cell.document.getText()
-      );
+      // Generate ID client-side to prevent race conditions
+      const taskId = crypto.randomUUID();
 
       // Track task ID for interrupt capability
       this.activeTaskIds.set(executionKey, taskId);
+      this.activeExecutions.set(taskId, execution);
 
-      // Stream outputs using incremental polling
-      const pollingInterval = vscode.workspace
-        .getConfiguration('mcp-jupyter')
-        .get<number>('pollingInterval', 500);
+      // Create a promise that resolves when execution completes (via Notification)
+      const completionPromise = new Promise<boolean>((resolve) => {
+        this.completionResolvers.set(taskId, resolve);
+      });
 
-      let outputIndex = 0;
-      let currentOutputs: vscode.NotebookCellOutput[] = [];
-      let isComplete = false;
+      // Start async execution with explicit ID
+      await this.mcpClient.runCellAsync(
+        notebook.uri.fsPath,
+        cell.index,
+        cell.document.getText(),
+        taskId
+      );
 
-      while (!isComplete) {
-        await this.sleep(pollingInterval);
-        
-        // Get only new outputs since last check
-        const stream = await this.mcpClient.getExecutionStream(
-          notebook.uri.fsPath,
-          taskId,
-          outputIndex
-        );
+      // Wait for completion (Event-Driven)
+      // We also set a safety timeout or keep the polling as a fallback?
+      // "Priorities 2: Optimize Communication ... Eliminate polling loop."
+      // We will rely purely on notifications for now.
+      const success = await completionPromise;
 
-        // Handle mixed output formats (Legacy String vs New Structured JSON)
-        let outputArray: NotebookOutput[] = [];
-        const rawNewOutputs = stream.new_outputs as any;
-
-        if (typeof rawNewOutputs === 'string') {
-          try {
-             // Try parsing as the new JSON format { llm_summary, raw_outputs }
-             const parsed = JSON.parse(rawNewOutputs);
-             if (parsed.raw_outputs && Array.isArray(parsed.raw_outputs)) {
-                 outputArray = parsed.raw_outputs;
-             } else {
-                 // Fallback: It might be just the summary text (legacy behavior)
-                 outputArray = [{
-                     output_type: 'stream',
-                     text: rawNewOutputs,
-                     name: 'stdout'
-                 }];
-             }
-          } catch (e) {
-             // Not JSON, treat as raw text summary
-             outputArray = [{
-                 output_type: 'stream',
-                 text: rawNewOutputs,
-                 name: 'stdout'
-             }];
-          }
-        } else if (Array.isArray(rawNewOutputs)) {
-             outputArray = rawNewOutputs;
-        }
-
-        // Append new outputs incrementally
-        if (outputArray.length > 0) {
-          const newCellOutputs = outputArray.map((output) => this.convertOutput(output));
-          currentOutputs.push(...newCellOutputs);
-          await execution.replaceOutput(currentOutputs);
-          outputIndex = stream.next_index;
-        }
-
-        // Set execution count when available
-        if (stream.execution_count !== undefined) {
-          execution.executionOrder = stream.execution_count;
-        }
-
-      // Check completion status
-      if (stream.status === 'completed') {
-        // Add execution metadata to cell
-        await this.addExecutionMetadata(cell, 'human', Date.now());
-        execution.end(true, Date.now());
-        isComplete = true;
-      } else if (stream.status === 'error') {
-        execution.end(false, Date.now());
-        isComplete = true;
-      } else if (stream.status !== 'queued' && stream.status !== 'running') {
-        // Unknown status, treat as completion
-        execution.end(false, Date.now());
-        isComplete = true;
+      if (success) {
+         await this.addExecutionMetadata(cell, 'human', Date.now());
+         execution.end(true, Date.now());
+      } else {
+         execution.end(false, Date.now());
       }
-      }
+
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       await execution.replaceOutput([

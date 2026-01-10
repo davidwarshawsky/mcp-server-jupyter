@@ -25,7 +25,7 @@ from src.cell_id_manager import (
     insert_cell_by_id,
     StaleStateError
 )
-from src.provenance import ProvenanceManager
+# from src.provenance import ProvenanceManager - DELETED
 from src.git_tools import save_notebook_clean, create_agent_branch, setup_git_filters
 from src.asset_manager import prune_unused_assets, get_assets_summary, ensure_assets_gitignored
 
@@ -120,49 +120,7 @@ class TestCellIDOperations:
         assert outline2[1]['source_preview'] == "y = 2"
 
 
-class TestProvenanceSidecar:
-    """Test external provenance storage"""
-    
-    def test_provenance_saves_to_sidecar(self, tmp_path):
-        """Provenance stored in .mcp/provenance.json, not notebook"""
-        nb_path = tmp_path / "test.ipynb"
-        create_notebook(str(nb_path))
-        
-        pm = ProvenanceManager(str(nb_path))
-        metadata = {
-            "execution_timestamp": "2026-01-08T12:00:00",
-            "kernel_env_name": "test-env"
-        }
-        
-        pm.save_execution("cell-123", metadata)
-        
-        # Check sidecar exists
-        sidecar = tmp_path / ".mcp" / "provenance.json"
-        assert sidecar.exists()
-        
-        # Check notebook doesn't contain provenance
-        with open(nb_path, 'r') as f:
-            nb_content = f.read()
-            assert "execution_timestamp" not in nb_content
-    
-    def test_provenance_garbage_collection(self, tmp_path):
-        """Deleted cells removed from provenance"""
-        nb_path = tmp_path / "test.ipynb"
-        create_notebook(str(nb_path))
-        
-        pm = ProvenanceManager(str(nb_path))
-        
-        # Add provenance for 3 cells
-        pm.save_execution("cell-1", {"time": "1"})
-        pm.save_execution("cell-2", {"time": "2"})
-        pm.save_execution("cell-3", {"time": "3"})
-        
-        # Garbage collect - only cell-1 and cell-3 still exist
-        removed = pm.garbage_collect({"cell-1", "cell-3"})
-        
-        assert removed == 1
-        assert pm.get_execution("cell-2") is None
-        assert pm.get_execution("cell-1") is not None
+
 
 
 class TestGitTools:
@@ -355,20 +313,3 @@ class TestGetNotebookOutline:
         assert len(outline) == 1
         assert 'id' in outline[0]
         assert len(outline[0]['id']) > 0  # Has a non-empty ID
-    
-    def test_outline_triggers_provenance_gc(self, tmp_path):
-        """get_notebook_outline cleans up provenance"""
-        nb_path = tmp_path / "test.ipynb"
-        create_notebook(str(nb_path), initial_cells=[
-            {"type": "code", "content": "x = 1"}
-        ])
-        
-        # Add provenance for non-existent cell
-        pm = ProvenanceManager(str(nb_path))
-        pm.save_execution("dead-cell-id", {"time": "1"})
-        
-        # Get outline (triggers GC)
-        get_notebook_outline(str(nb_path))
-        
-        # Dead cell should be gone
-        assert pm.get_execution("dead-cell-id") is None

@@ -4,6 +4,15 @@ import re
 from pathlib import Path
 from typing import List, Any, Optional
 
+def get_cell_hash(cell_source: str) -> str:
+    """
+    Calculate SHA-256 hash of cell content.
+    Normalizes line endings to prevent Windows/Unix mismatch.
+    """
+    # Normalize line endings to prevent Windows/Unix mismatch
+    normalized = cell_source.replace('\r\n', '\n').strip()
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
 def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
     """
     Convert small HTML tables to markdown for LLM consumption.

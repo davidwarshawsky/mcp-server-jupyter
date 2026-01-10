@@ -139,7 +139,6 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
         return []
 
     from src.cell_id_manager import ensure_cell_ids
-    from src.provenance import ProvenanceManager
     
     path = Path(notebook_path)
     with open(path, 'r', encoding='utf-8') as f:
@@ -169,15 +168,6 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
             "source_preview": source_preview.replace("\n", "\\n"),
             "state": state
         })
-    
-    # Garbage collect provenance entries for deleted cells
-    try:
-        prov_manager = ProvenanceManager(str(path))
-        removed = prov_manager.garbage_collect(cell_ids)
-        if removed > 0:
-            logger.info(f"Garbage collected {removed} provenance entries for {path.name}")
-    except Exception as e:
-        logger.warning(f"Provenance GC failed for {path}: {e}")
     
     return outline
 
@@ -336,9 +326,9 @@ def save_cell_execution(
         
         # Inject provenance metadata if provided
         if metadata_update:
-            if 'mcp_trace' not in nb.cells[index].metadata:
-                nb.cells[index].metadata['mcp_trace'] = {}
-            nb.cells[index].metadata['mcp_trace'].update(metadata_update)
+            if 'mcp' not in nb.cells[index].metadata:
+                nb.cells[index].metadata['mcp'] = {}
+            nb.cells[index].metadata['mcp'].update(metadata_update)
         
         _atomic_write_notebook(nb, path)
 

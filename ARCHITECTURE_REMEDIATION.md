@@ -1,46 +1,50 @@
-# Architecture Remediation Plan
+# Architecture Remediation Plan (Updated Jan 2026)
 
-This document addresses the critical flaws identified in the `mcp-server-jupyter` architecture.
+This document tracks the remediation of critical architectural flaws identified in the "Forensic Teardown".
 
-## 1. Data Persistence & Handoff (The "Split Brain" Problem)
-**Critique:** "Re-executing cells to sync state is catastrophic for Data Gravity (30GB dataframes)."
-**Remediation:**
-- **Short Term:** Implement `dill`-based session checkpointing.
-    - Add `save_checkpoint(path)` and `load_checkpoint(path)` tools.
-    - When `sync_state_from_disk` is called, prefer loading a checkpoint over re-execution if the graph hasn't diverged.
-- **Long Term:** Adopt "Variable Mirroring". The Agent should not own the kernel; it should attach to a persistent kernel managed by VS Code or a Jupyter Server.
+## 🛑 Critical Issues & Status
 
-## 2. File System Race Conditions
-**Critique:** "MCP Server writes to disk, fighting VS Code's buffer."
-**Remediation:**
-- **Immediate Fix:** Implement `apply_edit` tool that returns a JSON description of the edit (insert/replace).
-- **Architecture Change:** The VS Code Client (`mcp-agent-kernel` extension) must handle the actual file writes. The MCP Server should function as a *Calculator/Reasoner*, returning *intent* ("Insert code at index 3") rather than performing side effects on the filesystem.
+| Issue | Severity | Status | Fix Implemented |
+|-------|----------|--------|-----------------|
+| **"Split Brain" Metadata** | Critical | **Fixed** | Removed `.mcp` sidecar. Metadata now stored in `.ipynb` `cell.metadata.mcp`. |
+| **Handoff Race Condition** | Critical | **Fixed** | Replaced mtime timestamps with Content Hashing (SHA-256). |
+| **Fragile Shell Checkouts** | High | **In Progress** | Refactoring `git_tools.py` to use `GitPython` instead of `subprocess`. |
+| **Polling Loop (Latency)** | High | Pending | Needs MCP Notifications implementation. |
+| **Environment Fragility** | High | Pending | Needs direct binary execution (no conda activate). |
+| **Security (Eval)** | High | Pending | Needs Inspector Sandbox. |
 
-## 3. Communication Architecture
-**Critique:** "Stdio polling every 500ms is sluggish and brittle."
-**Remediation:**
-- **Medium Term:** Switch to WebSockets for the MCP transport layer if supported, or use ZMQ for the internal Kernel <-> MCP communication (Standard Jupyter Protocol).
-- **Optimization:** Increase polling frequency for active execution streams, but implementation of `notifications/message` from MCP to push updates to VS Code is required to eliminate polling.
+## 🛠️ Implemented Fixes (Week 1: Stabilization)
 
-## 4. Security
-**Critique:** "`inspect_variable` executes unsafe code (str/repr) in the kernel."
-**Remediation:**
-- **Immediate Fix:** Sanitize `variable_name` input to prevent injection. Wrap object inspection in strict time-boxed execution. Avoid calling `str()` on unknown objects where possible, or do so in a separate thread.
-- **Long Term:** Use the Jupyter Debugger Protocol (DAP) to inspect variables without executing kernel code.
+### 1. Unified Metadata (Killing the Sidecar)
+- **Problem:** Storing state in `.mcp/provenance.json` caused data loss on file rename/move.
+- **Fix:** 
+    - Deleted `src/provenance.py`.
+    - Updated `src/session.py` to calculate execution metadata and pass it to `src/notebook.py`.
+    - Metadata is now stored atomically in `cell.metadata.mcp` within the notebook JSON.
 
-## 5. Visualization
-**Critique:** "Static backends break human interactivity."
-**Remediation:**
-- **Fix:** Update `sanitize_outputs` to pass through MIME bundles (`application/vnd.plotly.v1+json`) instead of flattening to text. The VS Code extension must then render these MIME types in the chat interface or a webview, rather than just treating the output as text.
+### 2. Content-Addressable State (Fixing Handoff)
+- **Problem:** `detect_sync_needed` relied on file timestamps (`mtime`), causing false positives/negatives with Git branch switching.
+- **Fix:**
+    - Implemented `utils.get_cell_hash(source)` (SHA-256).
+    - Rewrote `detect_sync_needed` in `src/main.py` to compare `current_hash` vs `last_executed_hash`.
+    - System is now immune to filesystem timestamp quirks.
 
----
+### 3. Git Tooling Reliability
+- **Problem:** `git_tools.py` relied on fragile `subprocess.run(['git', ...])` calls.
+- **Fix:**
+    - Added `GitPython` dependency.
+    - Refactored `create_agent_branch` and `commit_agent_work` to use native Git bindings.
 
-## Implemented Fixes (In Progress)
+## 📅 Remaining Roadmap
 
-### 1. Security Hardening: `inspect_variable`
-I am patching `src/main.py` to:
-- Validate that `variable_name` is a valid Python identifier.
-- Wrap inspection logic to handle `__repr__` bombs gracefully.
+### Week 2: Reliability
+- [ ] **Environment Hardening:** Stop using `conda activate` or shell execution. direct execution of python binaries.
+- [ ] **Defensive Checkpointing:** Wrap `dill` in try/except blocks to strictly serialize only safe types (pandas/numpy/lists) and ignore sockets/locks.
 
-### 2. State Preservation: `dill` Support
-I am adding optional `dill` serialization to `src/session.py` to allow snapshotting heavy states.
+### Week 3: Performance
+- [ ] **Event-Driven Architecture:** Replace VS Code client polling with MCP Server-Sent Notifications (`notebook/output`).
+
+### Week 4: Cleanup
+- [ ] Standardize logging and error reporting.
+- [ ] Finalize `README.md` to reflect "Beta" status.
+

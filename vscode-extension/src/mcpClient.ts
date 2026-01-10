@@ -12,6 +12,8 @@ export class McpClient {
   private autoRestart = true;
   private isStarting = false;
   private isShuttingDown = false;
+  private _onNotification = new vscode.EventEmitter<{ method: string, params: any }>();
+  public readonly onNotification = this._onNotification.event;
 
   constructor() {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
@@ -95,12 +97,22 @@ export class McpClient {
   /**
    * Execute a cell asynchronously and return task ID
    */
-  async runCellAsync(notebookPath: string, index: number, codeContent: string): Promise<string> {
+  async runCellAsync(notebookPath: string, index: number, codeContent: string, taskId?: string): Promise<string> {
     const result = await this.callTool('run_cell_async', {
       notebook_path: notebookPath,
       index,
-      code_override: codeContent
+      code_override: codeContent,
+      task_id_override: taskId
     });
+    // Handle both new JSON return and legacy string return
+    if (typeof result === 'string') {
+        try {
+            const parsed = JSON.parse(result);
+            return parsed.task_id || result;
+        } catch {
+            return result;
+        }
+    }
     return result.task_id;
   }
 
@@ -259,9 +271,21 @@ export class McpClient {
   }
 
   /**
-   * Handle a JSON-RPC response
+   * Handle a JSON-RPC response or notification
    */
   private handleResponse(response: McpResponse): void {
+    // Check for Notification
+    if (response.method && (response.id === undefined || response.id === null)) {
+        this._onNotification.fire({ method: response.method, params: response.params });
+        return;
+    }
+
+    // It must be a response to a request if we are here (or invalid)
+    if (response.id === undefined || response.id === null) {
+        // Technically this is an error in JSON-RPC if it's not a notification
+        return; 
+    }
+
     const pending = this.pendingRequests.get(response.id);
     if (!pending) {
       this.outputChannel.appendLine(`Received response for unknown request ID: ${response.id}`);
@@ -378,6 +402,17 @@ export class McpClient {
    * Find Python executable (exposed for dependency checking)
    */
   async findPythonExecutable(): Promise<string> {
+    // 0. Check for local .venv in usage workspace (Priority for Hardening)
+    const serverPath = this.findServerPath();
+    const venvPython = process.platform === 'win32' 
+        ? path.join(serverPath, '.venv', 'Scripts', 'python.exe')
+        : path.join(serverPath, '.venv', 'bin', 'python');
+    
+    if (require('fs').existsSync(venvPython)) {
+        this.outputChannel.appendLine(`Using local .venv Python: ${venvPython}`);
+        return venvPython;
+    }
+
     // 1. Check extension config
     const config = vscode.workspace.getConfiguration('mcp-jupyter');
     const configuredPath = config.get<string>('pythonPath');
@@ -389,14 +424,23 @@ export class McpClient {
     try {
       const pythonExtension = vscode.extensions.getExtension('ms-python.python');
       if (pythonExtension) {
+        if (!pythonExtension.isActive) {
+           await pythonExtension.activate();
+        }
+        
+        // Use the API properly
+        // Note: The API shape depends on version, checking commonly available API
+        // This is a simplified check
         const pythonApi = pythonExtension.exports;
-        const activeEnv = pythonApi?.environments?.getActiveEnvironmentPath();
-        if (activeEnv?.path) {
-          return activeEnv.path;
+        if (pythonApi.settings && pythonApi.settings.getExecutionDetails) {
+            const details = pythonApi.settings.getExecutionDetails();
+            if (details && details.execCommand && details.execCommand[0]) {
+                 return details.execCommand[0];
+            }
         }
       }
-    } catch {
-      // Python extension not available
+    } catch (e) {
+      console.warn("Failed to get Python API", e);
     }
 
     // 3. Use system Python

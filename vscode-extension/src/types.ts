@@ -14,8 +14,10 @@ export interface McpRequest {
 
 export interface McpResponse {
   jsonrpc: '2.0';
-  id: number;
+  id?: number | null;
   result?: any;
+  method?: string; // For notifications
+  params?: any;    // For notifications
   error?: {
     code: number;
     message: string;

@@ -16,6 +16,11 @@ import nbformat
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+try:
+    import git
+except ImportError:
+    git = None
+
 
 def save_notebook_clean(notebook_path: str, strip_outputs: bool = False) -> str:
     """
@@ -190,11 +195,15 @@ def create_agent_branch(repo_path: str = ".", branch_name: str = "") -> str:
     """
     import datetime
     
-    repo = Path(repo_path).resolve()
-    
-    # Check if this is a Git repo
-    if not (repo / ".git").exists():
-        return f"Error: {repo} is not a Git repository"
+    if not git:
+        return "Error: GitPython library not installed."
+
+    try:
+        repo = git.Repo(repo_path, search_parent_directories=True)
+    except git.InvalidGitRepositoryError:
+        return f"Error: {repo_path} is not a Git repository"
+    except Exception as e:
+        return f"Error opening repo: {e}"
     
     # Generate branch name if not provided
     if not branch_name:
@@ -203,55 +212,28 @@ def create_agent_branch(repo_path: str = ".", branch_name: str = "") -> str:
     
     try:
         # Check for uncommitted changes
-        result = subprocess.run(
-            ['git', 'status', '--porcelain'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.stdout.strip():
+        if repo.is_dirty(untracked_files=True):
+            try:
+                status = repo.git.status('--porcelain')
+            except:
+                status = "dirty"
             return (
                 "Error: Uncommitted changes detected.\n"
                 "Please commit or stash changes before creating agent branch:\n"
-                f"{result.stdout[:200]}"
+                f"{status[:200]}"
             )
         
         # Check if we're in detached HEAD
-        result = subprocess.run(
-            ['git', 'symbolic-ref', '-q', 'HEAD'],
-            cwd=str(repo),
-            capture_output=True,
-            timeout=5
-        )
-        
-        if result.returncode != 0:
+        if repo.head.is_detached:
             return "Error: Repository is in detached HEAD state. Checkout a branch first."
         
         # Get current branch for reference
-        result = subprocess.run(
-            ['git', 'branch', '--show-current'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        current_branch = result.stdout.strip()
+        current_branch = repo.active_branch.name
         
         # Create and checkout new branch
-        result = subprocess.run(
-            ['git', 'checkout', '-b', branch_name],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode != 0:
-            if "already exists" in result.stderr:
-                return f"Error: Branch '{branch_name}' already exists. Choose a different name."
-            return f"Error creating branch: {result.stderr}"
+        # git checkout -b branch_name
+        new_branch = repo.create_head(branch_name)
+        new_branch.checkout()
         
         return (
             f"✓ Created and switched to branch: {branch_name}\n"
@@ -263,10 +245,10 @@ def create_agent_branch(repo_path: str = ".", branch_name: str = "") -> str:
             f"  git commit -m 'Agent work: <description>'"
         )
     
-    except FileNotFoundError:
-        return "Error: git command not found. Is Git installed?"
-    except subprocess.TimeoutExpired:
-        return "Error: Git command timed out"
+    except git.GitCommandError as e:
+        if "already exists" in str(e) or "already exists" in str(e.stderr):
+             return f"Error: Branch '{branch_name}' already exists. Choose a different name."
+        return f"Git Error: {e}"
     except Exception as e:
         return f"Error: {str(e)}"
 
@@ -301,21 +283,22 @@ def commit_agent_work(
     if not files or len(files) == 0:
         return "Error: No files specified. Provide list of files to commit."
     
-    repo = Path(repo_path).resolve()
-    
-    if not (repo / ".git").exists():
-        return f"Error: {repo} is not a Git repository"
-    
+    if not git:
+         return "Error: GitPython library not installed."
+
+    try:
+        repo = git.Repo(repo_path, search_parent_directories=True)
+    except git.InvalidGitRepositoryError:
+        return f"Error: {repo_path} is not a Git repository"
+    except Exception as e:
+        return f"Error opening repo: {e}"
+        
     try:
         # Get current branch
-        result = subprocess.run(
-            ['git', 'branch', '--show-current'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        current_branch = result.stdout.strip()
+        if repo.head.is_detached:
+             current_branch = "HEAD (detached)"
+        else:
+             current_branch = repo.active_branch.name
         
         # Warn if on main/master
         if current_branch in ['main', 'master']:
@@ -326,55 +309,44 @@ def commit_agent_work(
             )
         
         # Add specified files
+        # Resolving files relative to the repo root is tricky if repo_path is just ".", 
+        # but GitPython handles paths relative to working tree usually.
+        # We'll assert files exist first.
+        repo_root = Path(repo.working_dir)
+        files_to_add = []
         for file in files:
-            file_path = Path(file)
+            file_path = repo_root / file
+            # If path was absolute, join might fail to produce what we expect if we aren't careful, 
+            # but usually 'files' are relative.
             if not file_path.exists():
-                return f"Error: File not found: {file}"
+                 # Try resolving purely
+                 if Path(file).is_absolute() and Path(file).exists():
+                     pass # It exists
+                 elif not (Path(os.getcwd()) / file).exists():
+                     return f"Error: File not found: {file}"
+            files_to_add.append(str(file))
             
-            result = subprocess.run(
-                ['git', 'add', str(file)],
-                cwd=str(repo),
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            
-            if result.returncode != 0:
-                return f"Error adding {file}: {result.stderr}"
+        repo.index.add(files_to_add)
         
         # Commit with message
-        result = subprocess.run(
-            ['git', 'commit', '-m', message],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        # git.commit checks for changes automatically? No, we added to index.
+        # If nothing changed in index, it might act weird.
+        # But let's assume valid commit.
         
-        if result.returncode != 0:
-            # Check if it's just "no changes"
-            if "nothing to commit" in result.stdout.lower():
-                return "No changes to commit (files already committed or unchanged)"
-            return f"Error committing: {result.stderr}"
-        
-        # Get commit hash
-        result = subprocess.run(
-            ['git', 'rev-parse', '--short', 'HEAD'],
-            cwd=str(repo),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        commit_hash = result.stdout.strip()
-        
+        new_commit = repo.index.commit(message)
+
         return (
             f"✓ Committed to branch: {current_branch}\n"
-            f"  Commit: {commit_hash}\n"
+            f"  Commit: {new_commit.hexsha[:7]}\n"
             f"  Files: {', '.join(files)}\n"
             f"  Message: {message}"
         )
     
-    except subprocess.TimeoutExpired:
-        return "Error: Git command timed out"
+    except git.GitCommandError as e:
+        # GitPython raises error if command fails
+        return f"Git Error: {e}"
+        
     except Exception as e:
-        return f"Error: {str(e)}"
+        if "nothing to commit" in str(e).lower():
+            return "No changes to commit (files already committed or unchanged)"
+        return f"Error committing: {str(e)}"
