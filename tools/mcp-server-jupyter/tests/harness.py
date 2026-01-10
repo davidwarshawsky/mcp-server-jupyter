@@ -68,12 +68,14 @@ class MCPServerHarness:
         }
         await self._send_json(req)
 
-    async def read_response(self):
+    async def read_response(self, timeout=5.0):
         # Read lines until we get a response or notification
         while True:
-            # Add timeout to readline so we don't hang forever
             try:
-                line = await self.proc.stdout.readline()
+                # Add timeout to readline so we don't hang forever
+                line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise TimeoutError("Server was silent for too long while waiting for response")
             except Exception:
                  raise EOFError("Server closed connection during read")
 

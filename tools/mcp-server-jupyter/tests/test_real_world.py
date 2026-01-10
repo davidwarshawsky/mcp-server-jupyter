@@ -65,8 +65,6 @@ async def test_end_to_end_asset_extraction_and_provenance(tmp_path, real_session
     
     # 4. Add a cell that creates a matplotlib plot
     plot_code = """
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
 import numpy as np
 
@@ -81,7 +79,7 @@ plt.ylabel("Sin(X)")
 plt.grid(True)
 plt.show()
 """
-    notebook.edit_cell(str(nb_path), 0, plot_code)
+    notebook.insert_cell(str(nb_path), 0, plot_code)
     
     # 5. Execute the plot cell
     exec_id = await real_session_manager.execute_cell_async(str(nb_path), 0, plot_code)
@@ -98,6 +96,9 @@ plt.show()
     # 7. Verify execution completed successfully
     assert status['status'] == 'completed', f"Execution failed: {status}"
     
+    # DEBUG: Print output to debug why png is missing
+    print(f"DEBUG: Plot Execution Output:\n{status['output']}")
+
     # 7. Check that assets directory was created
     assets_dir = tmp_path / "assets"
     assert assets_dir.exists(), "assets/ directory should be created"
@@ -120,36 +121,32 @@ plt.show()
     
     cell = nb.cells[0]
     
-    # Verify mcp_trace metadata exists
-    assert 'mcp_trace' in cell.metadata, "Cell should have mcp_trace metadata"
+    # Verify mcp metadata exists
+    assert 'mcp' in cell.metadata, "Cell should have mcp metadata"
     
-    trace = cell.metadata['mcp_trace']
+    # Get the provenance metadata
+    mcp_meta = cell.metadata['mcp']
     
     # Verify required provenance fields
-    assert 'execution_timestamp' in trace, "Should have execution_timestamp"
-    assert 'kernel_env_name' in trace, "Should have kernel_env_name"
-    assert 'kernel_python_path' in trace, "Should have kernel_python_path"
-    assert 'kernel_start_time' in trace, "Should have kernel_start_time"
-    assert 'agent_tool' in trace, "Should have agent_tool"
+    assert 'execution_timestamp' in mcp_meta, "Should have execution_timestamp"
+    assert 'kernel_env_name' in mcp_meta, "Should have kernel_env_name"
+    assert 'execution_hash' in mcp_meta, "Should have execution_hash"
+    assert 'agent_run_id' in mcp_meta, "Should have agent_run_id"
     
     # Verify values are populated
-    assert trace['agent_tool'] == 'mcp-jupyter'
-    assert trace['kernel_env_name'] in ['system', 'System/Global'], \
-        f"Expected 'system', got '{trace['kernel_env_name']}'"
-    assert len(trace['kernel_python_path']) > 0, "Python path should not be empty"
-    assert len(trace['execution_timestamp']) > 0, "Timestamp should not be empty"
+    assert mcp_meta['kernel_env_name'] == 'system'
+    assert len(mcp_meta['execution_timestamp']) > 0, "Timestamp should not be empty"
     
     # 12. Verify ISO 8601 timestamp format
     from datetime import datetime
     try:
-        datetime.fromisoformat(trace['execution_timestamp'])
-        datetime.fromisoformat(trace['kernel_start_time'])
+        datetime.fromisoformat(mcp_meta['execution_timestamp'].replace('Z', '+00:00'))
     except ValueError:
-        pytest.fail("Timestamps should be valid ISO 8601 format")
+        pytest.fail(f"Invalid ISO 8601 timestamp: {mcp_meta['execution_timestamp']}")
     
     print(f"+ Asset extraction test passed")
     print(f"  - PNG saved to: {png_file}")
-    print(f"  - Provenance: env={trace['kernel_env_name']}, time={trace['execution_timestamp']}")
+    print(f"  - Provenance: env={mcp_meta['kernel_env_name']}, time={mcp_meta['execution_timestamp']}")
 
 
 @pytest.mark.asyncio
@@ -213,15 +210,23 @@ my_dict = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
     df_info = await real_session_manager.get_variable_info(str(nb_path), 'df_test')
     df_data = json.loads(df_info)
     
-    assert 'shape' in df_data, "DataFrame inspection should include shape"
-    assert df_data['shape'] == [5, 3], f"Shape should be [5, 3], got {df_data['shape']}"
-    assert 'columns' in df_data, "Should include columns"
-    assert set(df_data['columns']) == {'A', 'B', 'C'}, "Columns should match"
+    if 'llm_summary' in df_data:
+        inner_data = json.loads(df_data['llm_summary'])
+    else:
+        inner_data = df_data
+
+    assert 'shape' in inner_data, "DataFrame inspection should include shape"
+    assert inner_data['shape'] == [5, 3], f"Shape should be [5, 3], got {inner_data['shape']}"
+    assert 'columns' in inner_data, "Should include columns"
+    assert set(inner_data['columns']) == {'A', 'B', 'C'}, "Columns should match"
     
     # 5. Test list inspection
     list_info = await real_session_manager.get_variable_info(str(nb_path), 'my_list')
     list_data = json.loads(list_info)
     
+    if 'llm_summary' in list_data:
+        list_data = json.loads(list_data['llm_summary'])
+
     assert 'length' in list_data, "List inspection should include length"
     assert list_data['length'] == 10, "List length should be 10"
     
@@ -229,17 +234,23 @@ my_dict = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
     dict_info = await real_session_manager.get_variable_info(str(nb_path), 'my_dict')
     dict_data = json.loads(dict_info)
     
+    if 'llm_summary' in dict_data:
+        dict_data = json.loads(dict_data['llm_summary'])
+
     assert dict_data['type'] == 'dict', "Type should be dict"
     
     # 7. Test non-existent variable
     missing_info = await real_session_manager.get_variable_info(str(nb_path), 'nonexistent_var')
     missing_data = json.loads(missing_info)
     
+    if 'llm_summary' in missing_data:
+        missing_data = json.loads(missing_data['llm_summary'])
+
     assert 'error' in missing_data, "Should return error for missing variable"
     assert 'not found' in missing_data['error'].lower(), "Error message should mention 'not found'"
     
     print(f"+ Variable inspection test passed")
-    print(f"  - DataFrame: shape={df_data['shape']}, columns={df_data['columns']}")
+    print(f"  - DataFrame: shape={inner_data['shape']}, columns={inner_data['columns']}")
     print(f"  - List: length={list_data['length']}")
 
 

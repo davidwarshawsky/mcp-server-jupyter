@@ -32,8 +32,8 @@ class TestCreateNotebook:
         assert_metadata_contains(str(nb_path), 'kernelspec')
         assert_metadata_contains(str(nb_path), 'language_info')
         
-        # Should have no cells by default
-        assert get_cell_count(str(nb_path)) == 0
+        # Should have one empty cell by default (mimics Jupyter behavior)
+        assert get_cell_count(str(nb_path)) == 1
     
     def test_create_notebook_with_custom_kernel(self, tmp_notebook_dir):
         """Test creating notebook with custom kernel name."""
@@ -69,12 +69,13 @@ class TestCreateNotebook:
         
         assert "Notebook created" in result
         assert_notebook_valid(str(nb_path))
-        assert_notebook_has_cells(str(nb_path), 3)
+        # Note: +1 for the default empty cell that's always created first
+        assert_notebook_has_cells(str(nb_path), 4)
         
-        # Verify cell contents
-        assert "# Test Notebook" in get_cell_source(str(nb_path), 0)
-        assert "import numpy" in get_cell_source(str(nb_path), 1)
-        assert "print('hello')" in get_cell_source(str(nb_path), 2)
+        # Verify cell contents (index 0 is the default empty cell)
+        assert "# Test Notebook" in get_cell_source(str(nb_path), 1)
+        assert "import numpy" in get_cell_source(str(nb_path), 2)
+        assert "print('hello')" in get_cell_source(str(nb_path), 3)
     
     def test_create_notebook_with_python_version(self, tmp_notebook_dir):
         """Test creating notebook with specific Python version."""
@@ -144,16 +145,21 @@ class TestCreateNotebook:
         result = create_notebook(str(nb_path), initial_cells=initial_cells)
         
         assert "Notebook created" in result
-        assert_notebook_has_cells(str(nb_path), 5)
+        # +1 for default empty cell at index 0
+        assert_notebook_has_cells(str(nb_path), 6)
         
         with open(nb_path, 'r', encoding='utf-8') as f:
             nb = nbformat.read(f, as_version=4)
         
-        assert nb.cells[0].cell_type == 'markdown'
-        assert nb.cells[1].cell_type == 'code'
-        assert nb.cells[2].cell_type == 'raw'
-        assert nb.cells[3].cell_type == 'markdown'
-        assert nb.cells[4].cell_type == 'code'
+        # Index 0 is default empty code cell
+        assert nb.cells[0].cell_type == 'code'
+        assert nb.cells[0].source == ''
+        # The rest are the initial_cells
+        assert nb.cells[1].cell_type == 'markdown'
+        assert nb.cells[2].cell_type == 'code'
+        assert nb.cells[3].cell_type == 'raw'
+        assert nb.cells[4].cell_type == 'markdown'
+        assert nb.cells[5].cell_type == 'code'
     
     def test_create_notebook_with_language_info(self, tmp_notebook_dir):
         """Test that language_info metadata is properly set."""
@@ -196,7 +202,8 @@ class TestCreateNotebookEdgeCases:
         result = create_notebook(str(nb_path), initial_cells=[])
         
         assert "Notebook created" in result
-        assert get_cell_count(str(nb_path)) == 0
+        # Even with empty initial_cells, one default empty cell is created
+        assert get_cell_count(str(nb_path)) == 1
     
     def test_create_notebook_cell_with_empty_content(self, tmp_notebook_dir):
         """Test creating notebook with cells that have empty content."""
@@ -210,7 +217,8 @@ class TestCreateNotebookEdgeCases:
         result = create_notebook(str(nb_path), initial_cells=initial_cells)
         
         assert "Notebook created" in result
-        assert_notebook_has_cells(str(nb_path), 2)
+        # +1 for default empty cell
+        assert_notebook_has_cells(str(nb_path), 3)
     
     def test_create_notebook_multiline_cells(self, tmp_notebook_dir):
         """Test creating notebook with multiline cell content."""
@@ -231,10 +239,11 @@ class TestCreateNotebookEdgeCases:
         
         assert "Notebook created" in result
         
-        source0 = get_cell_source(str(nb_path), 0)
+        # Index 1 and 2 due to default empty cell at index 0
+        source0 = get_cell_source(str(nb_path), 1)
         assert "def hello():" in source0
         assert "print('world')" in source0
         
-        source1 = get_cell_source(str(nb_path), 1)
+        source1 = get_cell_source(str(nb_path), 2)
         assert "# Title" in source1
         assert "Paragraph 1" in source1

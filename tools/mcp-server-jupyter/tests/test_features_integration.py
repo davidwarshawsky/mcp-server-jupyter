@@ -4,6 +4,7 @@ from pathlib import Path
 from .harness import MCPServerHarness
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(120)
 async def test_error_handling_and_recovery(tmp_path):
     """
     Test Phase 4: Smart Error Recovery.
@@ -20,9 +21,9 @@ async def test_error_handling_and_recovery(tmp_path):
         
         # 1. Create Notebook and Start Kernel
         await harness.send_request("create_notebook", {"notebook_path": str(nb_path)})
-        await harness.read_response()
+        await harness.read_response(timeout=10)
         await harness.send_request("start_kernel", {"notebook_path": str(nb_path)})
-        await harness.read_response()
+        await harness.read_response(timeout=30)  # Kernel startup can take a while
         
         # 2. Trigger an Exception
         code = "val = 10 / 0"
@@ -31,14 +32,17 @@ async def test_error_handling_and_recovery(tmp_path):
             "index": 0, 
             "code_override": code
         })
-        await harness.read_response() # Task ID
+        await harness.read_response(timeout=15) # Task ID
         
         # 3. Analyze Output
         found_traceback = False
         found_sidecar = False
         
         for _ in range(10):
-            msg = await harness.read_response()
+            try:
+                msg = await harness.read_response(timeout=10)
+            except TimeoutError:
+                break  # No more messages
             if msg.get("method") == "notebook/output":
                 content = msg['params']['content']
                 text = str(content)

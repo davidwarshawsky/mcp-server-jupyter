@@ -1,6 +1,7 @@
 import pytest
 import os
 import nbformat
+import json
 from src.utils import sanitize_outputs
 from src.notebook_ops import _slice_text
 
@@ -22,8 +23,9 @@ def test_sanitize_outputs_truncation():
     
     summary = sanitize_outputs([mock_output], "dummy/path")
     # Updated: New truncation message includes "TRUNCATED" in uppercase
-    assert "TRUNCATED" in summary
-    assert len(summary) < 5000
+    summary_dict = json.loads(summary)
+    assert "TRUNCATED" in summary_dict['llm_summary']
+    assert len(summary_dict['llm_summary']) < 5000
 
 def test_sanitize_outputs_html_conversion():
     html_data = "<table><tr><td>Data</td></tr></table>"

@@ -388,7 +388,12 @@ class SessionManager:
 %load_ext autoreload
 %autoreload 2
 
+import sys
+import json
+import traceback
+
 # [STDIN BLOCKING] Prevent input() from hanging the kernel
+
 # Override built-in input() to raise error immediately instead of waiting forever
 def _mcp_blocked_input(prompt=''):
     raise RuntimeError(
@@ -531,7 +536,7 @@ try:
                 "locals": locals_dump,
                 "hint": "Check the locals values above to debug the logic."
             }
-            print(f"\\n__MCP_ERROR_CONTEXT_START__\\n{json.dumps(err_info)}\\n__MCP_ERROR_CONTEXT_END__")
+            print(f"\\n__MCP_ERROR_CONTEXT_START__\\n{json.dumps(err_info, default=str)}\\n__MCP_ERROR_CONTEXT_END__")
             
         except Exception:
             pass # Don't crash the error handler
@@ -1122,7 +1127,7 @@ def _inspect_var():
     else:
         result['preview'] = str(value)[:200]
     
-    return json.dumps(result, indent=2)
+    return json.dumps(result, indent=2, default=str)
 
 print(_inspect_var())
 """
