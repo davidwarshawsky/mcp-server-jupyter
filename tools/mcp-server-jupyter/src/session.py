@@ -50,51 +50,34 @@ def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[st
             env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         return env
     
-    # For conda, we need to run activation and capture environment
-    try:
-        # Safer approach: Use 'conda run' which manages activation internally
-        # without shell injection risks
-        cmd = ["conda", "run", "-p", str(venv_path_obj), "python", "-c", "import os, json; print(json.dumps(dict(os.environ)))"]
+    # For conda, we implement "Direct Binary Resolution" (Fast Mode)
+    # Instead of slow 'conda run', we manually construct the environment.
+    # This saves ~1-3 seconds of latency per kernel start.
+    
+    env = os.environ.copy()
+    bin_dir = str(Path(python_exe).parent)
+    
+    # 1. Essential Conda Vars
+    env['CONDA_PREFIX'] = str(venv_path_obj)
+    env['CONDA_DEFAULT_ENV'] = venv_path_obj.name
+    
+    # 2. Update PATH (Priority to environment bin)
+    # On Windows: env/Scripts; env/Library/bin; env/Library/usr/bin; env/Library/mingw-w64/bin; env
+    # On Unix: env/bin
+    if os.name == 'nt':
+        scripts = venv_path_obj / "Scripts"
+        lib_bin = venv_path_obj / "Library" / "bin"
+        lib_usr_bin = venv_path_obj / "Library" / "usr" / "bin"
         
-        # Run activation and capture environment
-        result = subprocess.run(
-            cmd,
-            shell=False, # SECURITY FIX: No shell=True
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        paths_to_add = [str(p) for p in [scripts, lib_bin, lib_usr_bin, venv_path_obj] if p.exists()]
+        env['PATH'] = os.pathsep.join(paths_to_add) + os.pathsep + env.get('PATH', '')
+    else:
+        # Unix
+        # Note: Some conda envs might have separate library paths, but bin/ usually covers it for execution
+        env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         
-        if result.returncode == 0:
-            # Parse the JSON output
-            # Some versions of conda run output extra text, locate the JSON
-            stdout = result.stdout.strip()
-            # Find the JSON part if there is noise
-            if stdout.find('{') != -1:
-                 stdout = stdout[stdout.find('{'):]
-            
-            env_dict = json.loads(stdout)
-            logger.info(f"Successfully activated conda env: {venv_path}")
-            return env_dict
-        else:
-            logger.warning(f"Conda activation failed (exit {result.returncode}): {result.stderr}")
-            # Fallback to basic PATH update
-            env = os.environ.copy()
-            bin_dir = str(Path(python_exe).parent)
-            env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
-            return env
-            
-    except subprocess.TimeoutExpired:
-        logger.warning(f"Conda activation timed out for {venv_path}")
-        return None
-    except json.JSONDecodeError as e:
-        logger.warning(f"Failed to parse conda environment JSON: {e}")
-        return None
-    except Exception as e:
-        logger.warning(f"Unexpected error during conda activation: {e}")
-        return None
-
+    logger.info(f"Directly resolved conda env: {venv_path} (Fast Start)")
+    return env
 
 class SessionManager:
     def __init__(self):
