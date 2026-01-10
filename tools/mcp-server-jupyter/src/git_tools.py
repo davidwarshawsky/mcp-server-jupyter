@@ -345,7 +345,11 @@ def commit_agent_work(
                 elif (repo_root / file).exists():
                      files_to_add.append(str(repo_root / file))
                 else:
-                     return f"Error: File not found: {file}"
+                     return (
+                         f"Error: File not found: {file}\n"
+                         f"Note: Git tools run in the repository root '{repo_root}'.\n"
+                         f"If you created a file in a subdirectory (e.g. 'src/'), please provide the full relative path (e.g. 'src/{file}') or an absolute path."
+                     )
 
         # Verify existence (double check processed list)
         for f in files_to_add:
