@@ -95,10 +95,11 @@ export class McpClient {
   /**
    * Execute a cell asynchronously and return task ID
    */
-  async runCellAsync(notebookPath: string, index: number): Promise<string> {
+  async runCellAsync(notebookPath: string, index: number, codeContent: string): Promise<string> {
     const result = await this.callTool('run_cell_async', {
       notebook_path: notebookPath,
       index,
+      code_override: codeContent
     });
     return result.task_id;
   }

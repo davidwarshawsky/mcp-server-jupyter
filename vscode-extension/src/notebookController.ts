@@ -72,7 +72,8 @@ export class McpNotebookController {
       // Start async execution
       const taskId = await this.mcpClient.runCellAsync(
         notebook.uri.fsPath,
-        cell.index
+        cell.index,
+        cell.document.getText()
       );
 
       // Track task ID for interrupt capability
@@ -97,9 +98,39 @@ export class McpNotebookController {
           outputIndex
         );
 
+        // Handle mixed output formats (Legacy String vs New Structured JSON)
+        let outputArray: NotebookOutput[] = [];
+        const rawNewOutputs = stream.new_outputs as any;
+
+        if (typeof rawNewOutputs === 'string') {
+          try {
+             // Try parsing as the new JSON format { llm_summary, raw_outputs }
+             const parsed = JSON.parse(rawNewOutputs);
+             if (parsed.raw_outputs && Array.isArray(parsed.raw_outputs)) {
+                 outputArray = parsed.raw_outputs;
+             } else {
+                 // Fallback: It might be just the summary text (legacy behavior)
+                 outputArray = [{
+                     output_type: 'stream',
+                     text: rawNewOutputs,
+                     name: 'stdout'
+                 }];
+             }
+          } catch (e) {
+             // Not JSON, treat as raw text summary
+             outputArray = [{
+                 output_type: 'stream',
+                 text: rawNewOutputs,
+                 name: 'stdout'
+             }];
+          }
+        } else if (Array.isArray(rawNewOutputs)) {
+             outputArray = rawNewOutputs;
+        }
+
         // Append new outputs incrementally
-        if (stream.new_outputs && stream.new_outputs.length > 0) {
-          const newCellOutputs = stream.new_outputs.map((output) => this.convertOutput(output));
+        if (outputArray.length > 0) {
+          const newCellOutputs = outputArray.map((output) => this.convertOutput(output));
           currentOutputs.push(...newCellOutputs);
           await execution.replaceOutput(currentOutputs);
           outputIndex = stream.next_index;
@@ -300,6 +331,21 @@ export class McpNotebookController {
     const items: vscode.NotebookCellOutputItem[] = [];
 
     if (output.data) {
+      // Phase 2: Rich Visualization Support
+      // Prioritize interactive types (Plotly, Widgets)
+      if (output.data['application/vnd.plotly.v1+json']) {
+          items.push(vscode.NotebookCellOutputItem.json(
+              output.data['application/vnd.plotly.v1+json'], 
+              'application/vnd.plotly.v1+json'
+          ));
+      }
+      if (output.data['application/vnd.jupyter.widget-view+json']) {
+          items.push(vscode.NotebookCellOutputItem.json(
+              output.data['application/vnd.jupyter.widget-view+json'], 
+              'application/vnd.jupyter.widget-view+json'
+          ));
+      }
+
       // Handle different MIME types
       for (const [mimeType, data] of Object.entries(output.data)) {
         try {

@@ -7,6 +7,10 @@ import logging
 import nbformat
 import datetime
 import subprocess
+try:
+    import dill
+except ImportError:
+    dill = None
 from pathlib import Path
 from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
@@ -791,6 +795,54 @@ def _get_var_info():
 print(_get_var_info())
 """
         return await self._run_and_wait_internal(nb_path, code)
+
+    async def save_checkpoint(self, notebook_path: str, checkpoint_name: str):
+        """Snapshot the kernel heap (variables) to disk."""
+        session = self.sessions.get(str(Path(notebook_path).resolve()))
+        if not session: return "No session"
+        
+        # Execute dill dump inside the kernel
+        # We save to a hidden .mcp folder next to the notebook
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
+        # Ensure directory exists on server side just in case, though kernel writes it
+        ckpt_path.parent.mkdir(exist_ok=True, parents=True)
+        
+        # Path for the kernel (cross-platform safe)
+        path_str = str(ckpt_path).replace("\\", "\\\\")
+        
+        code = f"""
+try:
+    import dill
+    import os
+    os.makedirs(os.path.dirname(r'{path_str}'), exist_ok=True)
+    with open(r'{path_str}', 'wb') as f:
+        dill.dump_session(f)
+    print("Checkpoint saved")
+except ImportError:
+    print("Error: 'dill' is not installed in the kernel environment. Please run '!pip install dill' first.")
+except Exception as e:
+    print(f"Checkpoint error: {{e}}")
+"""
+        # Use -1 index for internal commands
+        await self.execute_cell_async(notebook_path, -1, code)
+        return f"State saved to {ckpt_path}"
+
+    async def load_checkpoint(self, notebook_path: str, checkpoint_name: str):
+        """Restore the kernel heap from disk."""
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
+        path_str = str(ckpt_path).replace("\\", "\\\\")
+        
+        code = f"""
+try:
+    import dill
+    with open(r'{path_str}', 'rb') as f:
+        dill.load_session(f)
+    print("State restored")
+except Exception as e:
+    print(f"Restore error: {{e}}")
+"""
+        await self.execute_cell_async(notebook_path, -1, code)
+        return "State restored."
 
     async def get_variable_info(self, nb_path: str, var_name: str):
         """

@@ -6,6 +6,7 @@ import nbformat
 import json
 import sys
 import logging
+import datetime
 from src.session import SessionManager
 from src import notebook, utils, notebook_ops, environment
 
@@ -195,12 +196,47 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     return notebook.append_cell(notebook_path, content, cell_type)
 
 @mcp.tool()
-def edit_cell(notebook_path: str, index: int, content: str):
+async def save_checkpoint(notebook_path: str, name: str = "checkpoint"):
     """
-    Replaces the Code. Crucially: Automatically clears the output.
-    Why: If you change the code, the old output is now a lie. Clearing it prevents hallucinations.
+    Snapshot the current kernel variables (memory heap) to disk.
+    Use this to prevent "Data Gravity" issues.
     """
-    return notebook.edit_cell(notebook_path, index, content)
+    return await session_manager.save_checkpoint(notebook_path, name)
+
+@mcp.tool()
+async def load_checkpoint(notebook_path: str, name: str = "checkpoint"):
+    """
+    Restore variables from a disk snapshot.
+    Replaces "Re-run all cells" strategy.
+    """
+    return await session_manager.load_checkpoint(notebook_path, name)
+
+@mcp.tool()
+def propose_edit(notebook_path: str, index: int, new_content: str):
+    """
+    Propose an edit to a cell. 
+    This avoids writing to disk directly, preventing conflicts with the editor buffer.
+    The Agent should use this instead of 'edit_cell'.
+    """
+    # Construct proposal
+    proposal = {
+        "action": "edit_cell",
+        "notebook_path": notebook_path,
+        "index": index,
+        "new_content": new_content,
+        "timestamp": str(datetime.datetime.now())
+    }
+    
+    # In a full Notifcation-based architecture, we would send this via
+    # ctx.session.send_notification("notebook/edit_proposal", proposal)
+    # For now, we return it so the Agent or VS Code Extension can act on it.
+    
+    return json.dumps({
+        "status": "proposal_created", 
+        "proposal": proposal,
+        "message": "Edit proposed. Client must apply changes."
+    })
+
 
 @mcp.tool()
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):
@@ -243,9 +279,16 @@ async def get_kernel_info(notebook_path: str):
 # --- NEW ASYNC TOOLS ---
 
 @mcp.tool()
-async def run_cell_async(notebook_path: str, index: int):
+async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None):
     """
     Submits a cell for execution in the background.
+    
+    Args:
+        notebook_path: Path to the notebook
+        index: Cell index
+        code_override: Optional explicit code to run (bypass disk read). 
+                      Crucial for "File vs Buffer" race conditions.
+    
     Returns: A Task ID (e.g., "b4f2...").
     Use `get_execution_status(task_id)` to check progress.
     """
@@ -253,13 +296,16 @@ async def run_cell_async(notebook_path: str, index: int):
     if not session:
         return "Error: No running kernel. Call start_kernel first."
     
-    # 1. Get Code
-    try:
-        cell = notebook.read_cell(notebook_path, index)
-    except Exception as e:
-        return f"Error reading cell: {e}"
-        
-    code = cell['source']
+    # 1. Get Code (Buffer Priority)
+    if code_override is not None:
+        code = code_override
+    else:
+        # Fallback to disk (Legacy/test behavior)
+        try:
+            cell = notebook.read_cell(notebook_path, index)
+            code = cell['source']
+        except Exception as e:
+            return f"Error reading cell: {e}"
     
     # 2. Submit
     exec_id = await session_manager.execute_cell_async(notebook_path, index, code)
@@ -341,11 +387,17 @@ def get_execution_stream(notebook_path: str, task_id: str, since_output_index: i
     
     # Sanitize outputs (converts binary images to assets, strips ANSI, etc.)
     assets_dir = str(Path(notebook_path).parent / "assets")
-    stream_text = utils.sanitize_outputs(new_outputs, assets_dir)
+    sanitized_json = utils.sanitize_outputs(new_outputs, assets_dir)
     
+    # Unpack to avoid double-JSON encoding
+    try:
+        new_outputs_data = json.loads(sanitized_json)
+    except:
+        new_outputs_data = sanitized_json
+
     return json.dumps({
         "status": target_data['status'],
-        "new_outputs": stream_text,
+        "new_outputs": new_outputs_data,
         "next_index": len(all_outputs),
         "total_outputs": len(all_outputs),
         "last_activity": target_data.get('last_activity', 0),
