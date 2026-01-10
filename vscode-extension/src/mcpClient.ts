@@ -1,5 +1,7 @@
 import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as vscode from 'vscode';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 
@@ -319,7 +321,6 @@ export class McpClient {
     if (proposal.action !== 'edit_cell') return;
 
     const uri = vscode.Uri.file(proposal.notebook_path);
-    const edit = new vscode.WorkspaceEdit();
     
     // We need to find the notebook document
     const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === uri.fsPath);
@@ -327,14 +328,69 @@ export class McpClient {
 
     const cell = notebook.cellAt(proposal.index);
     if (!cell) return;
-
-    // Replace the cell content
-    const range = new vscode.Range(0, 0, cell.document.lineCount, 0);
-    edit.replace(cell.document.uri, range, proposal.new_content);
-
-    // Apply the edit
-    await vscode.workspace.applyEdit(edit);
-    vscode.window.showInformationMessage(`Agent edited Cell ${proposal.index + 1}`);
+    
+    // Phase 2: Trust (The Diff View)
+    // Instead of auto-applying, we show a diff and ask for confirmation.
+    
+    const currentContent = cell.document.getText();
+    const newContent = proposal.new_content;
+    
+    // Create temporary files for diffing
+    // We use temp files to ensure the diff editor has compatible resources
+    const tempDir = os.tmpdir();
+    const leftPath = path.join(tempDir, `cell_${proposal.index}_current.py`);
+    const rightPath = path.join(tempDir, `cell_${proposal.index}_proposal.py`);
+    
+    try {
+        fs.writeFileSync(leftPath, currentContent);
+        fs.writeFileSync(rightPath, newContent);
+        
+        const leftUri = vscode.Uri.file(leftPath);
+        const rightUri = vscode.Uri.file(rightPath);
+        
+        // Show Diff Editor (Background)
+        await vscode.commands.executeCommand(
+            'vscode.diff', 
+            leftUri, 
+            rightUri, 
+            `Review Agent Proposal (Cell ${proposal.index + 1})`
+        );
+        
+        // Modal Confirmation
+        const selection = await vscode.window.showInformationMessage(
+            `Agent wants to edit Cell ${proposal.index + 1}.`,
+            { modal: true, detail: "Review the changes in the diff view." },
+            'Accept Changes',
+            'Reject'
+        );
+        
+        // Close the diff editor (best effort - by reverting focus or closing active editor? Hard to do reliably via API)
+        // We will just leave it open or let the user close it.
+        
+        if (selection === 'Accept Changes') {
+            const edit = new vscode.WorkspaceEdit();
+            // Replace the cell content
+            const range = new vscode.Range(0, 0, cell.document.lineCount, 0);
+            edit.replace(cell.document.uri, range, newContent);
+            
+            // Apply the edit
+            const success = await vscode.workspace.applyEdit(edit);
+            if (success) {
+                vscode.window.showInformationMessage(`Updated Cell ${proposal.index + 1}`);
+            } else {
+                vscode.window.showErrorMessage('Failed to apply edit.');
+            }
+        } else {
+             vscode.window.showInformationMessage('Edit rejected.');
+        }
+        
+    } catch (e) {
+        vscode.window.showErrorMessage(`Failed to present diff: ${e}`);
+    } finally {
+        // cleanup temp files? 
+        // If we delete them too fast, diff editor might break?
+        // Let's rely on OS temp cleanup or delete after a delay.
+    }
   }
 
 
