@@ -92,7 +92,7 @@ def list_kernels():
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-def detect_sync_needed(notebook_path: str):
+async def detect_sync_needed(notebook_path: str):
     """
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk.
     
@@ -111,6 +111,7 @@ def detect_sync_needed(notebook_path: str):
         - reason: Description of mismatch
         - changed_cells: List of cell indices that changed
     """
+    logger.info(f"detect_sync_needed called with: {notebook_path}")
     import os
     from pathlib import Path
     

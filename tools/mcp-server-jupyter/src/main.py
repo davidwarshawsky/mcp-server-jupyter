@@ -22,6 +22,10 @@ mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
 
+# Store for agent proposals to support feedback loop
+# Key: proposal_id, Value: dict with status, result, timestamp
+PROPOSAL_STORE = {}
+
 @mcp.tool()
 async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
     """
@@ -92,7 +96,7 @@ def list_kernels():
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-def detect_sync_needed(notebook_path: str):
+async def detect_sync_needed(notebook_path: str):
     """
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk.
     
@@ -215,8 +219,12 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
     This avoids writing to disk directly, preventing conflicts with the editor buffer.
     The Agent should use this instead of 'edit_cell'.
     """
+    import uuid
+    proposal_id = str(uuid.uuid4())
+    
     # Construct proposal
     proposal = {
+        "id": proposal_id,
         "action": "edit_cell",
         "notebook_path": notebook_path,
         "index": index,
@@ -230,6 +238,7 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
     
     return json.dumps({
         "status": "proposal_created", 
+        "proposal_id": proposal_id,
         "proposal": proposal,
         "message": "Edit proposed. Client must apply changes.",
         # SIGNAL PROTOCOL
@@ -244,22 +253,29 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
     """
     logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
     
-    # Store this result in a way that can be queried by the agent? 
-    # Or just log it for now as a "channel"?
-    # For a synchronous agent loop, the agent might be polling for this, 
-    # but typically this is for the *human* side (or Client) to tell the Server.
-    
-    # In a full autonomous loop, the Agent would have paused after propose_edit.
-    # To "unpause", the Server might need to send a notification back to the Agent,
-    # or the Agent checks a status.
-    
-    # For this implementation, we log it and potentially return a success message.
-    # Future: Store in a 'proposal_history' or fire an event.
+    # Store result for agent to retrieve
+    if proposal_id:
+        PROPOSAL_STORE[proposal_id] = {
+            "status": status,
+            "message": message,
+            "notebook_path": notebook_path,
+            "timestamp": str(datetime.datetime.now())
+        }
     
     return json.dumps({
         "status": "ack",
-        "timestamp": str(datetime.datetime.now())
+        "proposal_id": proposal_id
     })
+
+@mcp.tool()
+def get_proposal_status(proposal_id: str):
+    """
+    Check the status of a specific proposal.
+    Returns: 'pending', 'accepted', 'rejected', 'failed', or 'unknown'.
+    """
+    if proposal_id in PROPOSAL_STORE:
+        return json.dumps(PROPOSAL_STORE[proposal_id])
+    return json.dumps({"status": "unknown"})
 
 @mcp.tool()
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):

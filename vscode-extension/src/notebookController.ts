@@ -250,9 +250,25 @@ export class McpNotebookController {
 
     // Check if we need to sync state from disk (handoff protocol)
     try {
-      const syncCheck = await this.mcpClient.detectSyncNeeded(notebookPath);
-      // Handle both raw boolean (legacy) or detailed object response
-      const syncNeeded = typeof syncCheck === 'string' ? JSON.parse(syncCheck).sync_needed : syncCheck;
+      const syncResult = await this.mcpClient.detectSyncNeeded(notebookPath);
+      let syncNeeded = false;
+      let reason = '';
+      
+      if (typeof syncResult === 'boolean') {
+          syncNeeded = syncResult;
+      } else if (typeof syncResult === 'string') {
+          const parsed = JSON.parse(syncResult);
+          syncNeeded = parsed.sync_needed;
+          reason = parsed.reason;
+      } else {
+          syncNeeded = syncResult.sync_needed;
+          reason = syncResult.reason;
+      }
+      
+      // If no kernel is active, we don't need to ask user to sync, we just start fresh
+      if (syncNeeded && reason === 'no_active_kernel') {
+          syncNeeded = false;
+      }
       
       if (syncNeeded) {
          const selection = await vscode.window.showWarningMessage(

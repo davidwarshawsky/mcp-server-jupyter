@@ -69,6 +69,21 @@ export class McpClient {
         this.rejectAllPending(new Error(`Server process error: ${error.message}`));
       });
 
+      // Initialize MCP Protocol
+      try {
+          const initResult = await this.sendRequest('initialize', {
+            protocolVersion: '2024-11-05',
+            capabilities: {},
+            clientInfo: { name: 'vscode-mcp-jupyter', version: '0.1.0' }
+          });
+          
+          this.sendNotification('notifications/initialized', {});
+          this.outputChannel.appendLine('MCP protocol initialized');
+      } catch (e) {
+          this.outputChannel.appendLine(`MCP Initialization failed: ${e}`);
+          throw e;
+      }
+
       // Wait for server to initialize
       await this.waitForReady();
       this.outputChannel.appendLine('MCP server ready');
@@ -182,11 +197,12 @@ export class McpClient {
   /**
    * Check if notebook needs sync (handoff protocol)
    */
-  async detectSyncNeeded(notebookPath: string): Promise<boolean> {
+  async detectSyncNeeded(notebookPath: string): Promise<any> {
     const result = await this.callTool('detect_sync_needed', {
       notebook_path: notebookPath,
     });
-    return result.sync_needed || false;
+    // Return full result for inspection
+    return result;
   }
 
   /**
@@ -199,49 +215,19 @@ export class McpClient {
   }
 
   /**
-   * Call an MCP tool
+   * Send a JSON-RPC request to the MCP server
    */
-  private async callTool(toolName: string, args: Record<string, any>): Promise<any> {
+  private async sendRequest(method: string, params: any): Promise<any> {
     if (!this.process) {
       throw new Error('MCP server not started');
     }
-
-    // --- INTEROCEPTOR: Argument Injection ---
-    // Fix "Index Blindness" by injecting the VS Code buffer structure into get_notebook_outline
-    if (toolName === 'get_notebook_outline' && args.notebook_path && !args.structure_override) {
-        // Find the active notebook document
-        const nbDoc = vscode.workspace.notebookDocuments.find(
-            nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
-        );
-        
-        if (nbDoc) {
-            // Construct structure_override from the buffer
-            const structure = nbDoc.getCells().map((cell, index) => ({
-                index: index,
-                // We don't have stable IDs in the buffer unless we track them, 
-                // but we can generate transient ones or read them if available in metadata
-                id: (cell.metadata as any)?.custom?.id || `buffer-${index}`,
-                cell_type: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
-                source: cell.document.getText(),
-                // Best effort state guess
-                state: (cell as any).executionSummary?.executionOrder ? 'executed' : 'fresh'
-            }));
-            
-            args.structure_override = structure;
-            // console.log(`[MCP] Injected ${structure.length} cells into get_notebook_outline`);
-        }
-    }
-    // ----------------------------------------
 
     const id = ++this.requestId;
     const request: McpRequest = {
       jsonrpc: '2.0',
       id,
-      method: 'tools/call',
-      params: {
-        name: toolName,
-        arguments: args,
-      },
+      method,
+      params,
     };
 
     const promise = new Promise<any>((resolve, reject) => {
@@ -252,6 +238,77 @@ export class McpClient {
     this.process.stdin?.write(requestJson);
 
     return promise;
+  }
+
+  /**
+   * Send a JSON-RPC notification to the MCP server
+   */
+  private sendNotification(method: string, params: any): void {
+      if (!this.process) return;
+      const notification = {
+          jsonrpc: '2.0',
+          method,
+          params
+      };
+      this.process.stdin?.write(JSON.stringify(notification) + '\n');
+  }
+
+  /**
+   * Call an MCP tool
+   */
+  private async callTool(toolName: string, args: Record<string, any>): Promise<any> {
+    // --- INTEROCEPTOR: Argument Injection ---
+    // Fix "Index Blindness" by injecting the VS Code buffer structure into get_notebook_outline
+    if (toolName === 'get_notebook_outline' && args.notebook_path && !args.structure_override) {
+        try {
+            // Find the active notebook document
+            const nbDoc = vscode.workspace.notebookDocuments.find(
+                nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
+            );
+            
+            if (nbDoc) {
+                // Construct structure_override from the buffer
+                const structure = nbDoc.getCells().map((cell, index) => ({
+                    index: index,
+                    id: (cell.metadata as any)?.custom?.id || `buffer-${index}`,
+                    cell_type: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
+                    source: cell.document.getText(),
+                    state: (cell as any).executionSummary?.executionOrder ? 'executed' : 'fresh'
+                }));
+                
+                args.structure_override = structure;
+            }
+        } catch (e) {
+            console.error('Failed to inject structure:', e);
+        }
+    }
+    // ----------------------------------------
+
+    // Use general request mechanism
+    return this.sendRequest('tools/call', {
+        name: toolName,
+        arguments: args
+    }).then(result => {
+        // FastMCP might wrap the result in { content: [...] }
+        if (result && result.content && Array.isArray(result.content)) {
+            // If it's a text response, extract it
+            const textContent = result.content.find((c: any) => c.type === 'text');
+            if (textContent) {
+                try {
+                     // Try to see if it's JSON inside text string
+                     return JSON.parse(textContent.text);
+                } catch {
+                     // Note: Legacy tools might return plain strings or objects
+                     // If it's not JSON, return the raw text if that's what caller expects?
+                     // Or return the original structure?
+                     // Let's assume non-JSON text output is valid for some tools.
+                     return textContent.text;
+                }
+            }
+        }
+        // If result is directly returned (legacy?)
+        return result; 
+    });
   }
 
   /**
@@ -383,11 +440,35 @@ export class McpClient {
             const success = await vscode.workspace.applyEdit(edit);
             if (success) {
                 vscode.window.showInformationMessage(`Updated Cell ${proposal.index + 1}`);
+                if (proposal.id) {
+                    this.callTool('notify_edit_result', {
+                        notebook_path: proposal.notebook_path,
+                        proposal_id: proposal.id,
+                        status: 'accepted',
+                        message: 'User accepted edit'
+                    }).catch(err => console.error('Failed to notify edit result:', err));
+                }
             } else {
                 vscode.window.showErrorMessage('Failed to apply edit.');
+                if (proposal.id) {
+                     this.callTool('notify_edit_result', {
+                        notebook_path: proposal.notebook_path,
+                        proposal_id: proposal.id,
+                        status: 'failed',
+                        message: 'VS Code failed to apply edit'
+                    }).catch(err => console.error('Failed to notify edit result:', err));
+                }
             }
         } else {
              vscode.window.showInformationMessage('Edit rejected.');
+             if (proposal.id) {
+                 this.callTool('notify_edit_result', {
+                    notebook_path: proposal.notebook_path,
+                    proposal_id: proposal.id,
+                    status: 'rejected',
+                    message: 'User rejected edit'
+                }).catch(err => console.error('Failed to notify edit result:', err));
+             }
         }
         
     } catch (e) {
