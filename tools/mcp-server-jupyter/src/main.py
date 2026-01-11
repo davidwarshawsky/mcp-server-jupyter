@@ -1,5 +1,6 @@
 from mcp.server.fastmcp import FastMCP
 import asyncio
+import time
 from pathlib import Path
 from typing import List, Optional, Any
 import nbformat
@@ -37,6 +38,21 @@ class ConnectionManager:
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
 
     async def broadcast(self, message: dict):
+        # Immediate send for status changes or errors
+        if message.get('method') != 'notebook/output':
+            await self._send_raw(message)
+            return
+
+        # For outputs, throttle to ~10 messages per second (100ms delay)
+        now = time.time()
+        if now - getattr(self, 'last_broadcast', 0) > 0.1:
+            await self._send_raw(message)
+            self.last_broadcast = now
+        else:
+            # Drop or aggregate (Dropping intermediate high-frequency output is usually fine for UX)
+            pass 
+
+    async def _send_raw(self, message):
         """Send raw JSON message to all connected clients"""
         json_str = json.dumps(message)
         # Iterate over copy to prevent runtime errors during disconnects
@@ -53,6 +69,15 @@ session_manager.set_mcp_server(mcp)
 # Inject connection manager
 connection_manager = ConnectionManager()
 session_manager.connection_manager = connection_manager
+
+@mcp.tool()
+def get_server_status():
+    """Check how many humans are connected to this session."""
+    return json.dumps({
+        "active_connections": len(connection_manager.active_connections),
+        "mode": "multi-user" if len(connection_manager.active_connections) > 1 else "solo"
+    })
+
 
 # Persistence for proposals
 PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
@@ -1583,6 +1608,12 @@ if __name__ == "__main__":
             
             # Print port to stderr so parent process can parse it if needed
             print(f"MCP Server listening on ws://{args.host}:{args.port}/ws", file=sys.stderr)
+            
+            host = args.host if args.host != "0.0.0.0" else "localhost"
+            print(f"\n🚀 MCP Server Running.")
+            print(f"To connect VS Code, open the Command Palette and run:")
+            print(f"  MCP Jupyter: Connect to Existing Server")
+            print(f"  Url: ws://{host}:{args.port}/ws\n")
             
             # Run uvicorn
             uvicorn.run(app, host=args.host, port=args.port, log_level="error")

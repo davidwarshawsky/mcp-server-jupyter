@@ -272,3 +272,25 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         "raw_outputs": raw_outputs
     })
 
+def get_project_root(start_path: Path) -> Path:
+    """
+    Finds the project root by looking for common markers (.git, pyproject.toml).
+    Walks up from start_path.
+    """
+    current = start_path.resolve()
+    for _ in range(10): # Limit traversing depth
+        if (current / ".git").exists() or \
+           (current / "pyproject.toml").exists() or \
+           (current / "requirements.txt").exists() or \
+           (current / ".devcontainer").exists() or \
+           (current / ".env").exists():
+            return current
+        
+        parent = current.parent
+        if parent == current: # Reached filesystem root
+            break
+        current = parent
+    
+    return start_path # Fallback to start path if no root marker found
+
+

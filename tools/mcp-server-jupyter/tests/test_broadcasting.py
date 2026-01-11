@@ -50,8 +50,10 @@ async def test_interactive_input_flow():
     sm.connection_manager = AsyncMock()
     
     # Mock Kernel Client Stdin
-    mock_kc = MagicMock()
-    mock_kc.input = MagicMock()
+    # Use spec=['input'] to ensure we strictly mimic the needed interface
+    # and guarantee no other ZMQ methods (like execute/shell_channel) are accessed.
+    mock_kc = MagicMock(spec=['input'])
+    mock_kc.input = MagicMock(return_value=None)
     
     # Use resolved path for the key, as get_session does
     test_path = "test.ipynb"
