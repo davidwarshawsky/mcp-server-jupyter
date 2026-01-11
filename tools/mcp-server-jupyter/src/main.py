@@ -19,9 +19,38 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# [BROADCASTER] Connection Manager for Multi-User Notification
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[Any] = []
+
+    async def connect(self, websocket: Any):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+        logger.info(f"Client connected. Total: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: Any):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+
+    async def broadcast(self, message: dict):
+        """Send raw JSON message to all connected clients"""
+        json_str = json.dumps(message)
+        # Iterate over copy to prevent runtime errors during disconnects
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(json_str)
+            except Exception as e:
+                logger.error(f"Broadcast error: {e}")
+                self.disconnect(connection)
+
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
+# Inject connection manager
+connection_manager = ConnectionManager()
+session_manager.connection_manager = connection_manager
 
 # Persistence for proposals
 PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
@@ -1521,16 +1550,29 @@ if __name__ == "__main__":
             import uvicorn
             from starlette.applications import Starlette
             from starlette.routing import WebSocketRoute
-            from starlette.websockets import WebSocket
+            from starlette.websockets import WebSocket, WebSocketDisconnect
             from mcp.server.websocket import websocket_server
             
             async def mcp_websocket_endpoint(websocket: WebSocket):
-                async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
-                    await mcp._mcp_server.run(
-                        read_stream,
-                        write_stream,
-                        mcp._mcp_server.create_initialization_options(),
-                    )
+                # A. Register connection
+                await connection_manager.connect(websocket)
+                
+                try:
+                    # B. Bridge FastMCP with this socket
+                    # We use the websocket_server context manager to handle streams
+                    # This allows FastMCP to read/write, while ConnectionManager can also broadcast
+                    async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
+                        await mcp._mcp_server.run(
+                            read_stream,
+                            write_stream,
+                            mcp._mcp_server.create_initialization_options(),
+                        )
+                except WebSocketDisconnect:
+                    logger.info("WebSocket disconnected")
+                    connection_manager.disconnect(websocket)
+                except Exception as e:
+                    logger.error(f"Connection error: {e}")
+                    connection_manager.disconnect(websocket)
 
             app = Starlette(
                 routes=[

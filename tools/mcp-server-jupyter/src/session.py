@@ -119,6 +119,8 @@ class SessionManager:
     def set_mcp_server(self, mcp_server):
         """Set the MCP server instance to enable notifications."""
         self.mcp_server = mcp_server
+        # [BROADCASTER] Optional connection manager for multi-user support
+        self.connection_manager = None
 
     def register_session(self, session):
         """Register a client session for sending notifications."""
@@ -130,6 +132,18 @@ class SessionManager:
 
     async def _send_notification(self, method: str, params: Any):
         """Helper to send notifications via available channels (Broadcast)."""
+        
+        # 1. Prefer the WebSocket Connection Manager (Multi-User)
+        if hasattr(self, 'connection_manager') and self.connection_manager:
+            msg = {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params
+            }
+            # This broadcasts to ALL active connections (Human + Agent)
+            await self.connection_manager.broadcast(msg)
+            return
+
         # Wrap custom notification to satisfy MCP SDK interface
         class CustomNotification:
             def __init__(self, method, params):
