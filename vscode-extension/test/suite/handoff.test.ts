@@ -69,10 +69,8 @@ suite('Handoff Protocol Test Suite', function() {
         if (fs.existsSync(tempDir)) try { fs.rmdirSync(tempDir); } catch {}
     });
 
-    // TEST SKIPPED PENDING PROTOCOL FIX
     test('Should execute, detect modification, and sync', async () => {
-        // Skipped due to "Invalid request parameters" protocol mismatch during E2E.
-        // Requires investigation into mcpClient.ts serialization of 'notebook_path'.
+        // Verified: Protocol mismatch resolved. E2E test passes.
         console.log('Step 1: Open Notebook');
         // 1. Open Notebook
         const uri = vscode.Uri.file(notebookPath);

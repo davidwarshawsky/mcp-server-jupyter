@@ -22,9 +22,31 @@ mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
 
+# Persistence for proposals
+PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
+
+def load_proposals():
+    """Load proposals from disk to survive server restarts."""
+    if PROPOSAL_STORE_FILE.exists():
+        try:
+            with open(PROPOSAL_STORE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load proposals: {e}")
+    return {}
+
+def save_proposals():
+    """Save proposals to disk."""
+    try:
+        PROPOSAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PROPOSAL_STORE_FILE, 'w') as f:
+            json.dump(PROPOSAL_STORE, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save proposals: {e}")
+
 # Store for agent proposals to support feedback loop
 # Key: proposal_id, Value: dict with status, result, timestamp
-PROPOSAL_STORE = {}
+PROPOSAL_STORE = load_proposals()
 
 @mcp.tool()
 async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
@@ -262,6 +284,7 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
             "notebook_path": notebook_path,
             "timestamp": timestamp
         }
+        save_proposals()
     
     return json.dumps({
         "status": "ack",
