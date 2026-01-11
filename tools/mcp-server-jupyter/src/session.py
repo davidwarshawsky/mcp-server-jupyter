@@ -691,13 +691,9 @@ except ImportError:
     async def _stdin_listener(self, nb_path: str, session_data: Dict):
         """
         Background task to handle input() requests from the kernel.
-        Runs the blocking ZMQ call in a separate threadexecutor to prevent loop blocking.
         """
         kc = session_data['kc']
         logger.info(f"Starting stdin listener for {nb_path}")
-        
-        # Get the running loop to schedule executor jobs
-        loop = asyncio.get_running_loop()
         
         try:
             while True:
@@ -708,19 +704,12 @@ except ImportError:
                          await asyncio.sleep(0.5)
                          continue
                     
-                    # [ASYNC SAFETY] Run blocking ZMQ polling in executor
-                    # get_msg can trigger underlying socket polling which might conflict 
-                    # with the main loop if implementation is not pure async
-                    
-                    def _poll_stdin():
-                         if kc.stdin_channel.msg_ready():
-                             return kc.stdin_channel.get_msg(timeout=0)
-                         return None
-
-                    # Run poll in thread
-                    msg = await loop.run_in_executor(None, _poll_stdin)
-                    
-                    if not msg:
+                    # [ASYNC SAFETY] Use safe async polling
+                    # AsyncKernelClient methods are coroutines but might not be thread-safe
+                    # so we execute them directly in the event loop not an executor
+                    if await kc.stdin_channel.msg_ready():
+                        msg = await kc.stdin_channel.get_msg(timeout=0)
+                    else:
                         await asyncio.sleep(0.1)
                         continue
                         

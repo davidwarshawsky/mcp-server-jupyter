@@ -386,10 +386,20 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
     
     # Let's try to find venv path relative to python path
     if python_path:
-         from pathlib import Path
-         venv_path = str(Path(python_path).parent.parent) 
-         # This is a heuristic. Ideally SessionManager passed this.
-         env_vars = environment.get_activated_env_vars(venv_path, python_path)
+        from pathlib import Path
+        import os
+        
+        path_obj = Path(python_path)
+        
+        # Windows Conda check: python.exe is usually in the root of the env
+        if os.name == 'nt' and path_obj.parent.name != 'Scripts':
+            venv_path = str(path_obj.parent)
+        else:
+            # Standard venv or Unix Conda (bin/python)
+            venv_path = str(path_obj.parent.parent)
+            
+        # This is a heuristic. Ideally SessionManager passed this.
+        env_vars = environment.get_activated_env_vars(venv_path, python_path)
 
     success, output = environment.install_package(package_name, python_path, env_vars)
     

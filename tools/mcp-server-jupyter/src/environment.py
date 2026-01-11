@@ -187,7 +187,10 @@ def find_conda_environments() -> List[Dict[str, Any]]:
                     env_path = Path(env_path)
                     # Find python executable
                     if os.name == 'nt':
+                        # Windows: Check root first, then Scripts (some distros differ)
                         python_exe = env_path / 'python.exe'
+                        if not python_exe.exists():
+                            python_exe = env_path / 'Scripts' / 'python.exe'
                     else:
                         python_exe = env_path / 'bin' / 'python'
                     
@@ -219,7 +222,10 @@ def find_conda_environments() -> List[Dict[str, Any]]:
             for env_dir in location.iterdir():
                 if env_dir.is_dir():
                     if os.name == 'nt':
+                        # Windows: Check root first, then Scripts
                         python_exe = env_dir / 'python.exe'
+                        if not python_exe.exists():
+                            python_exe = env_dir / 'Scripts' / 'python.exe'
                     else:
                         python_exe = env_dir / 'bin' / 'python'
                     

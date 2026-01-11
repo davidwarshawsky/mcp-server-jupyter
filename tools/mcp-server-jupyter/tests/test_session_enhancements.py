@@ -8,8 +8,8 @@ from src.session import _get_activated_env_vars, SessionManager
 class TestEnvironmentActivation:
     """Test the improved Conda/Venv activation logic."""
 
-    @patch('src.session.Path')
-    @patch('src.session.os')
+    @patch('src.environment.Path')
+    @patch('src.environment.os')
     def test_conda_activation_linux(self, mock_os, mock_path):
         """Test conda activation variables on Linux."""
         # Setup Mocks
@@ -57,8 +57,8 @@ class TestEnvironmentActivation:
         assert env['CONDA_DEFAULT_ENV'] == "myenv"
         assert "/opt/conda/envs/myenv/bin" in env['PATH']
 
-    @patch('src.session.Path')
-    @patch('src.session.os')
+    @patch('src.environment.Path')
+    @patch('src.environment.os')
     def test_conda_activation_windows(self, mock_os, mock_path):
         """Test conda activation variables on Windows (DLL handling)."""
         # Setup Mocks
