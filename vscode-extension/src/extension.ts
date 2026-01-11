@@ -9,7 +9,12 @@ let notebookController: McpNotebookController;
 let syncStatusBar: vscode.StatusBarItem;
 const notebooksNeedingSync = new Set<string>();
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export interface ExtensionApi {
+  mcpClient: McpClient;
+  notebookController: McpNotebookController;
+}
+
+export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | void> {
   console.log('MCP Agent Kernel extension activating...');
 
   try {
@@ -115,6 +120,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Show success message
     vscode.window.showInformationMessage('MCP Agent Kernel is ready!');
     console.log('MCP Agent Kernel extension activated successfully');
+    
+    return {
+      mcpClient,
+      notebookController
+    };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`Failed to activate MCP Agent Kernel: ${errorMessage}`);

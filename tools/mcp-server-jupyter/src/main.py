@@ -236,6 +236,30 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "_mcp_action": "apply_edit" 
     })
 
+@mcp.tool()
+def notify_edit_result(notebook_path: str, proposal_id: str, status: str, message: Optional[str] = None):
+    """
+    Callback for the client to report the result of a proposed edit.
+    status: 'accepted' | 'rejected' | 'failed'
+    """
+    logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
+    
+    # Store this result in a way that can be queried by the agent? 
+    # Or just log it for now as a "channel"?
+    # For a synchronous agent loop, the agent might be polling for this, 
+    # but typically this is for the *human* side (or Client) to tell the Server.
+    
+    # In a full autonomous loop, the Agent would have paused after propose_edit.
+    # To "unpause", the Server might need to send a notification back to the Agent,
+    # or the Agent checks a status.
+    
+    # For this implementation, we log it and potentially return a success message.
+    # Future: Store in a 'proposal_history' or fire an event.
+    
+    return json.dumps({
+        "status": "ack",
+        "timestamp": str(datetime.datetime.now())
+    })
 
 @mcp.tool()
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):

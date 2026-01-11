@@ -21,6 +21,12 @@ export class McpClient {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
   }
 
+  public getStatus(): 'running' | 'stopped' | 'starting' {
+    if (this.isStarting) return 'starting';
+    if (this.process && !this.process.killed) return 'running';
+    return 'stopped';
+  }
+
   /**
    * Start the MCP server process
    */

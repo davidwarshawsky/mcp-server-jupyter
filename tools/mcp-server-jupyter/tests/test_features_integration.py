@@ -57,13 +57,10 @@ async def test_error_handling_and_recovery(tmp_path):
                         found_sidecar = True
                     
             if found_traceback and found_sidecar:
-                pass # break removed to see all output
+                break
                 
         assert found_traceback, "Standard traceback not found in output"
-        # Optional: Sidecar might be stripped or embedded. 
-        # Since I implemented the Smart Error Recovery to print to stdout using print(), 
-        # it should appear in the 'stream' output type.
-        # assert found_sidecar, "Smart Error Recovery sidecar JSON not found in output" # DISABLED TEMPORARILY due to environment flakiness
+        assert found_sidecar, "Smart Error Recovery sidecar JSON not found in output"
 
     finally:
         await harness.stop()
