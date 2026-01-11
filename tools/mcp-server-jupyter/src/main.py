@@ -371,22 +371,8 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
         if session and 'env_info' in session:
             python_path = session['env_info'].get('python_path')
 
-    # Let's try to find venv path relative to python path
-    if python_path:
-        from pathlib import Path
-        import os
-        
-        path_obj = Path(python_path)
-        
-        # Windows Conda check: python.exe is usually in the root of the env
-        if os.name == 'nt' and path_obj.parent.name != 'Scripts':
-            venv_path = str(path_obj.parent)
-        else:
-            # Standard venv or Unix Conda (bin/python)
-            venv_path = str(path_obj.parent.parent)
-            
-        # This is a heuristic. Ideally SessionManager passed this.
-        env_vars = environment.get_activated_env_vars(venv_path, python_path)
+    # Derive environment variables
+    env_vars = _derive_env_vars(python_path) if python_path else None
 
     success, output = environment.install_package(package_name, python_path, env_vars)
     
@@ -396,6 +382,25 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
         error_msg=output if not success else None,
         user_suggestion="IMPORTANT: You MUST restart the kernel to load the new package." if success else "Check package name"
     ).to_json()
+
+def _derive_env_vars(python_path: str) -> Optional[dict]:
+    """Helper to derive environment variables from a Python executable path."""
+    import os
+    from pathlib import Path
+    
+    try:
+        path_obj = Path(python_path)
+        
+        # Windows Conda check: python.exe is usually in the root of the env
+        if os.name == 'nt' and path_obj.parent.name != 'Scripts':
+            venv_path = str(path_obj.parent)
+        else:
+            # Standard venv or Unix Conda (bin/python)
+            venv_path = str(path_obj.parent.parent)
+            
+        return environment.get_activated_env_vars(venv_path, python_path)
+    except Exception:
+        return None
 
 @mcp.tool()
 async def run_shell_command(command: str, notebook_path: Optional[str] = None):
@@ -421,20 +426,25 @@ async def run_shell_command(command: str, notebook_path: Optional[str] = None):
     if notebook_path:
         session = session_manager.get_session(notebook_path)
         if session:
-            # Reconstruct environment if possible
-             # ... (Similar logic to install_package could go here, but for now system commands 
-             # usually care about system libs mostly)
-             cwd = session.get('cwd')
+            cwd = session.get('cwd')
+            
+            # [CRITICAL] Inject the kernel's environment variables
+            # This ensures 'pip list' or 'python --version' matches the kernel
+            if 'env_info' in session:
+                python_path = session['env_info'].get('python_path')
+                env = _derive_env_vars(python_path)
 
     try:
         # Run with timeout to prevent hangs
+        # stdin=subprocess.DEVNULL prevents hanging on prompts like 'sudo password:' or 'apt-get [Y/n]'
         result = subprocess.run(
             cmd_parts, 
             capture_output=True, 
             text=True, 
             timeout=10,
             cwd=cwd,
-            env=env if env else os.environ.copy()
+            env=env if env else os.environ.copy(),
+            stdin=subprocess.DEVNULL
         )
         
         output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
