@@ -1510,6 +1510,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"])
     parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
     args = parser.parse_args()
 
     try:
@@ -1538,10 +1539,10 @@ if __name__ == "__main__":
             )
             
             # Print port to stderr so parent process can parse it if needed
-            print(f"MCP Server listening on ws://127.0.0.1:{args.port}/ws", file=sys.stderr)
+            print(f"MCP Server listening on ws://{args.host}:{args.port}/ws", file=sys.stderr)
             
             # Run uvicorn
-            uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="error")
+            uvicorn.run(app, host=args.host, port=args.port, log_level="error")
              
         else:
             # Start the MCP server using Standard IO

@@ -121,11 +121,15 @@ class SessionManager:
         self.mcp_server = mcp_server
 
     def register_session(self, session):
-        """Register the active ServerSession for sending notifications."""
-        self.server_session = session
+        """Register a client session for sending notifications."""
+        if not hasattr(self, 'active_sessions'):
+            self.active_sessions = set()
+        
+        self.active_sessions.add(session)
+        logger.info(f"Registered new client session. Total active: {len(self.active_sessions)}")
 
     async def _send_notification(self, method: str, params: Any):
-        """Helper to send notifications via available channel."""
+        """Helper to send notifications via available channels (Broadcast)."""
         # Wrap custom notification to satisfy MCP SDK interface
         class CustomNotification:
             def __init__(self, method, params):
@@ -136,9 +140,26 @@ class SessionManager:
 
         notification = CustomNotification(method, params)
 
-        if self.server_session:
+        # Broadcast to all active sessions (Agent + Human)
+        if hasattr(self, 'active_sessions') and self.active_sessions:
+            # We must iterate a copy because sessions might disconnect during send
+            dead_sessions = set()
+            for session in list(self.active_sessions):
+                try:
+                    await session.send_notification(notification)
+                except Exception as e:
+                    logger.warning(f"Failed to send notification to session: {e}")
+                    dead_sessions.add(session)
+            
+            # Cleanup dead sessions
+            if dead_sessions:
+                self.active_sessions -= dead_sessions
+                
+        elif self.server_session:
+            # Fallback for legacy single session
             await self.server_session.send_notification(notification)
         elif self.mcp_server and hasattr(self.mcp_server, "send_notification"):
+             # Fallback to server level if no sessions registered (e.g. stdio)
             await self.mcp_server.send_notification(notification)
 
     

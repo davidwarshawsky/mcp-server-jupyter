@@ -42,44 +42,64 @@ export class McpClient {
     this.isShuttingDown = false;
 
     try {
-      const pythonPath = await this.findPythonExecutable();
-      const serverPath = this.findServerPath();
-      const port = await this.getFreePort();
+      const config = vscode.workspace.getConfiguration('mcp-jupyter');
+      const serverMode = config.get<string>('serverMode') || 'spawn';
+      let wsUrl = '';
 
-      this.outputChannel.appendLine(`Starting MCP server (WebSocket mode)...`);
-      this.outputChannel.appendLine(`Python: ${pythonPath}`);
-      this.outputChannel.appendLine(`Server: ${serverPath}`);
-      this.outputChannel.appendLine(`Port: ${port}`);
+      if (serverMode === 'connect') {
+        // Mode: Connect to existing server
+        const remotePort = config.get<number>('remotePort') || 3000;
+        const remoteHost = '127.0.0.1'; // Could make this configurable too if needed
+        wsUrl = `ws://${remoteHost}:${remotePort}/ws`;
+        this.outputChannel.appendLine(`Connecting to existing MCP server at ${wsUrl}...`);
+        
+        // Connect directly without spawning
+        await this.connectWebSocket(wsUrl, 5, 1000); // Fewer retries for connect mode
+        
+      } else {
+        // Mode: Spawn new server (Default)
+        const pythonPath = await this.findPythonExecutable();
+        const serverPath = this.findServerPath();
+        const port = await this.getFreePort();
+        wsUrl = `ws://127.0.0.1:${port}/ws`;
 
-      this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], {
-        cwd: serverPath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+        this.outputChannel.appendLine(`Starting MCP server (WebSocket mode)...`);
+        this.outputChannel.appendLine(`Python: ${pythonPath}`);
+        this.outputChannel.appendLine(`Server: ${serverPath}`);
+        this.outputChannel.appendLine(`Port: ${port}`);
+        this.outputChannel.appendLine(`Mode: spawn`);
 
-      this.process.stdout?.on('data', (data) => {
-        // Log stdout but don't parse it as JSON-RPC if using WebSocket
-        this.outputChannel.append(`[stdout] ${data.toString()}`);
-      });
+        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], {
+          cwd: serverPath,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
 
-      this.process.stderr?.on('data', (data) => {
-        this.outputChannel.append(`[stderr] ${data.toString()}`);
-      });
+        this.process.stdout?.on('data', (data) => {
+          // Log stdout but don't parse it as JSON-RPC if using WebSocket
+          this.outputChannel.append(`[stdout] ${data.toString()}`);
+        });
 
-      this.process.on('exit', (code, signal) => {
-        this.outputChannel.appendLine(`MCP server exited: code=${code}, signal=${signal}`);
-        this.handleProcessExit(code, signal);
-      });
+        this.process.stderr?.on('data', (data) => {
+          this.outputChannel.append(`[stderr] ${data.toString()}`);
+        });
 
-      this.process.on('error', (error) => {
-        this.outputChannel.appendLine(`MCP server error: ${error.message}`);
-        this.rejectAllPending(new Error(`Server process error: ${error.message}`));
-      });
+        this.process.on('exit', (code, signal) => {
+          this.outputChannel.appendLine(`MCP server exited: code=${code}, signal=${signal}`);
+          this.handleProcessExit(code, signal);
+        });
 
-      // Connect WebSocket with retry
-      await this.connectWebSocket(`ws://127.0.0.1:${port}/ws`);
+        this.process.on('error', (error) => {
+          this.outputChannel.appendLine(`MCP server error: ${error.message}`);
+          this.rejectAllPending(new Error(`Server process error: ${error.message}`));
+        });
+
+        // Connect WebSocket with retry (wait for spawn)
+        await this.connectWebSocket(wsUrl);
+      }
 
       // Initialize MCP Protocol
       try {
+          // [HANDOFF] We must initialize to register this client session
           const initResult = await this.sendRequest('initialize', {
             protocolVersion: '2024-11-05',
             capabilities: {},

@@ -43,6 +43,17 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically restart MCP server on crash."
+        },
+        "mcp-jupyter.serverMode": {
+          "type": "string",
+          "enum": ["spawn", "connect"],
+          "default": "spawn",
+          "description": "Whether to spawn a new server process or connect to an existing one."
+        },
+        "mcp-jupyter.remotePort": {
+          "type": "number",
+          "default": 3000,
+          "description": "Port to connect to when serverMode is 'connect'."
         }
       }
     },
