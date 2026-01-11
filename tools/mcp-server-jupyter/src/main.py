@@ -26,7 +26,8 @@ class ConnectionManager:
         self.active_connections: List[WebSocket] = []
 
     async def connect(self, websocket: WebSocket):
-        await websocket.accept()
+        # NOTE: We do NOT call accept() here because mcp.server.websocket handles the ASGI handshake.
+        # We just register the connection.
         self.active_connections.append(websocket)
         logger.info(f"Client connected. Total: {len(self.active_connections)}")
 
