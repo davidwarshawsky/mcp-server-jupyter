@@ -1,8 +1,183 @@
 import nbformat
 import os
 import sys
+import tempfile
+import logging
+import re
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+
+def _slice_text(text: str, line_range: Optional[List[int]] = None) -> str:
+    """Helper to slice text by lines safely."""
+    if not text:
+        return ""
+    lines = text.split('\n')
+    total_lines = len(lines)
+    
+    if not line_range:
+        return text
+
+    start, end = line_range[0], line_range[1]
+    
+    # Handle negative indexing
+    if start < 0: start += total_lines
+    if end < 0: end += total_lines + 1 # +1 because slice is exclusive
+    
+    # Clamp values
+    start = max(0, start)
+    end = min(total_lines, end)
+    
+    if start >= end:
+        return ""
+        
+    return "\n".join(lines[start:end])
+
+def read_cell_smart(path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None) -> str:
+    """
+    The Surgical Reader.
+    target: "source" (code), "output" (result), or "both".
+    format: "summary" (Default), "full", or "slice".
+    line_range: [start_line, end_line] (e.g., [0, 10] or [-10, -1]).
+    """
+    try:
+        nb = nbformat.read(path, as_version=4)
+    except Exception as e:
+        return f"Error reading notebook: {e}"
+        
+    if index >= len(nb.cells) or index < 0:
+        return f"Error: Index {index} out of bounds (0-{len(nb.cells)-1})."
+        
+    cell = nb.cells[index]
+    result = []
+    
+    # 1. Get Source
+    if target in ["source", "both"]:
+        src = cell.source
+        if fmt == "slice" and line_range:
+            src = _slice_text(src, line_range)
+        # Add context header
+        result.append(f"--- CELL {index} SOURCE ---")
+        result.append(src)
+
+    # 2. Get Outputs
+    if target in ["output", "both"] and cell.cell_type == "code":
+        raw_output = ""
+        outputs = cell.get('outputs', [])
+        for out in outputs:
+            # Handle stream (stdout/stderr)
+            if out.output_type == "stream":
+                raw_output += out.text
+            # Handle text/plain (execution results)
+            elif "text/plain" in out.get("data", {}):
+                raw_output += out.data["text/plain"]
+            # Handle errors
+            elif "error" == out.output_type:
+                raw_output += f"\nError: {out.ename}: {out.evalue}\n"
+                # traceback is usually a list of strings
+                if 'traceback' in out:
+                    raw_output += "\n".join(out.traceback)
+
+        if raw_output:
+            # Apply Logic
+            if fmt == "summary":
+                # Smart default: First 5, Last 5 lines
+                lines = raw_output.split('\n')
+                if len(lines) > 20: # Slightly larger buffer than 10 to make it worth truncating
+                    truncated = lines[:5] + [f"\n... ({len(lines)-10} lines hidden) ...\n"] + lines[-5:]
+                    raw_output = "\n".join(truncated)
+                elif len(raw_output) > 2000:
+                    raw_output = raw_output[:1000] + "\n... [Truncated] ...\n" + raw_output[-500:]
+                    
+            elif fmt == "slice" and line_range:
+                raw_output = _slice_text(raw_output, line_range)
+                
+            elif fmt == "full":
+                # Safety Cap for "Full"
+                if len(raw_output) > 10000:
+                    raw_output = raw_output[:10000] + "\n... [Safety Truncated by MCP Server (10k char limit)] ..."
+
+            result.append(f"--- CELL {index} OUTPUT ---")
+            result.append(raw_output)
+        else:
+            if target == "output":
+                result.append("(No output)")
+
+    return "\n\n".join(result)
+
+def search_notebook(path: str, query: str, regex: bool = False) -> str:
+    """
+    Search for a string or regex pattern in the notebook.
+    """
+    try:
+        nb = nbformat.read(path, as_version=4)
+    except Exception as e:
+        return f"Error reading notebook: {e}"
+
+    matches = []
+    
+    for i, cell in enumerate(nb.cells):
+        source = cell.source
+        lines = source.split('\n')
+        
+        for line_idx, line in enumerate(lines):
+            found = False
+            if regex:
+                if re.search(query, line):
+                    found = True
+            else:
+                if query in line:
+                    found = True
+            
+            if found:
+                matches.append(f"Cell {i} (Line {line_idx+1}): {line.strip()}")
+    
+    if not matches:
+        return f"No matches found for query: '{query}'"
+        
+    return "Matches found:\n" + "\n".join(matches)
+
+def _atomic_write_notebook(nb: nbformat.NotebookNode, path: Path) -> None:
+    """
+    Write notebook atomically to prevent corruption from crashes or concurrent writes.
+    
+    Uses temp file + os.replace() pattern for atomic operation on all platforms.
+    
+    Args:
+        nb: Notebook node to write
+        path: Target path for the notebook file
+        
+    Raises:
+        OSError: If write fails or path is inaccessible
+    """
+    # Create temp file in same directory as target (ensures same filesystem)
+    temp_fd, temp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp"
+    )
+    
+    try:
+        # Write to temp file
+        with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
+            nbformat.write(nb, f)
+        
+        # Atomic rename (replaces target if exists)
+        # os.replace() is atomic on POSIX and Windows
+        os.replace(temp_path, str(path))
+        
+    except Exception:
+        # Clean up temp file on any error
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except OSError:
+            pass  # Best effort cleanup
+        raise
+
 
 def create_notebook(
     notebook_path: str,
@@ -43,6 +218,9 @@ def create_notebook(
     
     # Create notebook with proper metadata
     nb = nbformat.v4.new_notebook()
+
+    # Create one empty code cell by default to mimic Jupyter functionality/prevent index errors
+    nb.cells.append(nbformat.v4.new_code_cell(source=""))
     
     # Set kernelspec metadata
     nb.metadata['kernelspec'] = {
@@ -78,27 +256,74 @@ def create_notebook(
             elif cell_type == 'raw':
                 nb.cells.append(nbformat.v4.new_raw_cell(source=content))
     
-    # Write to file
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    # Write to file atomically
+    _atomic_write_notebook(nb, path)
     
     return f"Notebook created at {notebook_path} with kernel '{kernel_display_name}'"
 
 def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
-    """Returns a low-token overview of the file."""
+    """
+    Returns a low-token overview of the file with Cell IDs.
+    
+    Automatically migrates notebooks to nbformat 4.5+ if needed.
+    Also performs provenance garbage collection.
+    """
     if not os.path.exists(notebook_path):
         return []
 
-    with open(notebook_path, 'r', encoding='utf-8') as f:
+    from src.cell_id_manager import ensure_cell_ids
+    
+    path = Path(notebook_path)
+    with open(path, 'r', encoding='utf-8') as f:
         nb = nbformat.read(f, as_version=4)
+    
+    # Ensure all cells have IDs (auto-migration)
+    # CRITICAL FIX: Do NOT write changes back to disk silently.
+    # We perform migration in-memory only for the purpose of the outline.
+    # If the user wants to migrate the file, they should use a dedicated tool or save/edit.
+    was_modified, cells_updated = ensure_cell_ids(nb)
+    # if was_modified:
+    #    # Upgrade nbformat version if needed
+    #    if nb.nbformat_minor < 5:
+    #        nb.nbformat_minor = 5
+    #    # Save with atomic write - DISABLED to prevent side effects
+    #    _atomic_write_notebook(nb, path)
 
+    # Build outline
     outline = []
+    cell_ids = set()
     for i, cell in enumerate(nb.cells):
         source_preview = cell.source[:50] + "..." if len(cell.source) > 50 else cell.source
         state = "executed" if cell.get('outputs') or cell.get('execution_count') else "fresh"
+        cell_id = getattr(cell, 'id', f"legacy-{i}")  # Fallback for safety
+        cell_ids.add(cell_id)
         outline.append({
             "index": i,
+            "id": cell_id,  # CRITICAL: Include Cell ID for Git-safe addressing
             "type": cell.cell_type,
+            "source_preview": source_preview.replace("\n", "\\n"),
+            "state": state
+        })
+    
+    return outline
+
+def format_outline(structure_override: List[Dict]) -> List[Dict]:
+    """
+    Format a structure override from VS Code into the standard outline format.
+    Checks consistency and applies standard formatting.
+    """
+    outline = []
+    for i, item in enumerate(structure_override):
+        source = item.get('source', '')
+        source_preview = source[:50] + "..." if len(source) > 50 else source
+        
+        # Infer state if not provided
+        state = item.get('state', 'fresh')
+        
+        outline.append({
+            "index": i,
+            "id": item.get('id', f"buffer-{i}"),
+            "type": item.get('cell_type', item.get('kind', 'code')), # VSCode uses 'kind', nbformat uses 'cell_type'
             "source_preview": source_preview.replace("\n", "\\n"),
             "state": state
         })
@@ -122,8 +347,7 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code") -> st
         
     nb.cells.append(new_cell)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell appended at index {len(nb.cells) - 1}"
 
@@ -142,8 +366,7 @@ def edit_cell(notebook_path: str, index: int, content: str) -> str:
             nb.cells[index].outputs = []
             nb.cells[index].execution_count = None
         
-        with open(path, 'w', encoding='utf-8') as f:
-            nbformat.write(nb, f)
+        _atomic_write_notebook(nb, path)
         return f"Cell {index} edited and output cleared."
     else:
         raise IndexError(f"Cell index {index} out of range (0-{len(nb.cells)-1})")
@@ -169,8 +392,7 @@ def insert_cell(notebook_path: str, index: int, content: str, cell_type: str = "
     # Python insert handles negative indices and out of bounds gracefully automatically
     nb.cells.insert(index, new_cell)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
         
     return f"Cell inserted at index {index}."
 
@@ -192,8 +414,7 @@ def delete_cell(notebook_path: str, index: int) -> str:
         
     if 0 <= actual_index < total:
         nb.cells.pop(actual_index)
-        with open(path, 'w', encoding='utf-8') as f:
-            nbformat.write(nb, f)
+        _atomic_write_notebook(nb, path)
         return f"Cell {actual_index} (was {index}) deleted. Remaining: {len(nb.cells)}"
     else:
         raise IndexError(f"Cell index {index} out of range (Total cells: {total})")
@@ -241,12 +462,11 @@ def save_cell_execution(
         
         # Inject provenance metadata if provided
         if metadata_update:
-            if 'mcp_trace' not in nb.cells[index].metadata:
-                nb.cells[index].metadata['mcp_trace'] = {}
-            nb.cells[index].metadata['mcp_trace'].update(metadata_update)
+            if 'mcp' not in nb.cells[index].metadata:
+                nb.cells[index].metadata['mcp'] = {}
+            nb.cells[index].metadata['mcp'].update(metadata_update)
         
-        with open(path, 'w', encoding='utf-8') as f:
-            nbformat.write(nb, f)
+        _atomic_write_notebook(nb, path)
 
 def move_cell(notebook_path: str, from_index: int, to_index: int) -> str:
     """Moves a cell from one position to another."""
@@ -274,8 +494,7 @@ def move_cell(notebook_path: str, from_index: int, to_index: int) -> str:
     cell = nb.cells.pop(from_index)
     nb.cells.insert(to_index, cell)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell moved from index {from_index} to {to_index}"
 
@@ -326,8 +545,7 @@ def copy_cell(notebook_path: str, index: int, target_index: Optional[int] = None
             target_index = total + target_index + 1  # +1 because we're inserting after copying
         nb.cells.insert(target_index, new_cell)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell {index} copied to index {target_index}"
 
@@ -377,8 +595,7 @@ def merge_cells(notebook_path: str, start_index: int, end_index: int, separator:
     for i in range(end_index, start_index, -1):
         nb.cells.pop(i)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Merged cells {start_index} to {end_index} into cell {start_index}"
 
@@ -429,8 +646,7 @@ def split_cell(notebook_path: str, index: int, split_at_line: int) -> str:
     # Insert new cell after current
     nb.cells.insert(index + 1, new_cell)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell {index} split at line {split_at_line}. New cell created at index {index + 1}"
 
@@ -480,8 +696,7 @@ def change_cell_type(notebook_path: str, index: int, new_type: str) -> str:
         # Replace cell
         nb.cells[index] = new_cell
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell {index} type changed from '{old_type}' to '{new_type}'"
 
@@ -509,8 +724,7 @@ def set_notebook_metadata(notebook_path: str, metadata: Dict[str, Any]) -> str:
     # Update metadata
     nb.metadata.update(metadata)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Notebook metadata updated"
 
@@ -533,8 +747,7 @@ def update_kernelspec(notebook_path: str, kernel_name: str, display_name: Option
     if language:
         nb.metadata['kernelspec']['language'] = language
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Kernelspec updated to '{kernel_name}'"
 
@@ -576,8 +789,7 @@ def set_cell_metadata(notebook_path: str, index: int, metadata: Dict[str, Any]) 
     # Update cell metadata
     nb.cells[index].metadata.update(metadata)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cell {index} metadata updated"
 
@@ -612,8 +824,7 @@ def add_cell_tags(notebook_path: str, index: int, tags: List[str]) -> str:
         if tag not in cell.metadata['tags']:
             cell.metadata['tags'].append(tag)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Tags {tags} added to cell {index}"
 
@@ -644,8 +855,7 @@ def remove_cell_tags(notebook_path: str, index: int, tags: List[str]) -> str:
         if tag in cell.metadata['tags']:
             cell.metadata['tags'].remove(tag)
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Tags {tags} removed from cell {index}"
 
@@ -672,8 +882,7 @@ def clear_cell_outputs(notebook_path: str, index: int) -> str:
         cell.outputs = []
         cell.execution_count = None
         
-        with open(path, 'w', encoding='utf-8') as f:
-            nbformat.write(nb, f)
+        _atomic_write_notebook(nb, path)
         
         return f"Cell {index} outputs cleared"
     else:
@@ -695,8 +904,7 @@ def clear_all_outputs(notebook_path: str) -> str:
             cell.execution_count = None
             count += 1
     
-    with open(path, 'w', encoding='utf-8') as f:
-        nbformat.write(nb, f)
+    _atomic_write_notebook(nb, path)
     
     return f"Cleared outputs from {count} code cells"
 

@@ -53,18 +53,18 @@ Instead of trying to share kernel state (which causes race conditions), we imple
 **Strategies**:
 | Strategy | Behavior | Use When |
 |----------|----------|----------|
-| `"smart"` | Skips visualization-only cells (plots, prints) | Default (fast, usually sufficient) |
-| `"full"` | Re-executes ALL code cells | Safest (slow but guaranteed sync) |
-| `"incremental"` | Only executes modified cells | Future enhancement (requires cell hashing) |
+| `"incremental"` | **(Recommended)** Finds the first "dirty" cell (content changed vs execution history) and re-runs from there. | Default. Maximizes performance while ensuring correctness. |
+| `"full"` | Re-executes ALL code cells | Fallback if incremental fails or state is corrupted. |
 
 **Returns**:
 ```json
 {
   "status": "syncing",
-  "cells_synced": 12,
-  "cells_skipped": 3,
-  "execution_ids": ["abc123", "def456", ...],
-  "estimated_duration_seconds": 24,
+  "cells_synced": 3,
+  "cells_skipped": 9,
+  "execution_ids": ["abc123", "def456"],
+  "estimated_duration_seconds": 6,
+  "strategy_used": "incremental",
   "hint": "Use get_execution_status() to monitor progress"
 }
 ```

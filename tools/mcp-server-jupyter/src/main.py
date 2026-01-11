@@ -8,7 +8,7 @@ import sys
 import logging
 import datetime
 from src.session import SessionManager
-from src import notebook, utils, notebook_ops, environment
+from src import notebook, utils, environment
 
 # Configure logging to stderr to avoid corrupting JSON-RPC stdout
 logging.basicConfig(
@@ -247,7 +247,7 @@ def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: s
     """
     if line_range and isinstance(line_range, list):
          line_range = [int(x) for x in line_range]
-    return notebook_ops.read_cell_smart(notebook_path, index, target, fmt, line_range)
+    return notebook.read_cell_smart(notebook_path, index, target, fmt, line_range)
 
 @mcp.tool()
 def insert_cell(notebook_path: str, index: int, content: str, cell_type: str = "code"):
@@ -265,7 +265,7 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     Don't read the file to find where df_clean is defined. Search for it.
     Returns: Found 'df_clean' in Cell 3 (Line 4) and Cell 8 (Line 1).
     """
-    return notebook_ops.search_notebook(notebook_path, query, regex)
+    return notebook.search_notebook(notebook_path, query, regex)
 
 @mcp.tool()
 async def get_kernel_info(notebook_path: str):
@@ -535,12 +535,49 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
     
     exec_ids = []
     
-    # ALWAYS use full sync for correctness
-    # Previous "smart" strategy caused false positives where cells with mixed logic
-    # (e.g., plt.figure() + data = calc()) would be skipped entirely, causing
-    # undefined variable errors in subsequent cells.
+    # [Sync Strategy 2.0: Cut-Point incremental Sync]
+    # We find the first cell that is either changed OR not executed in this session.
+    # We execute that cell and ALL subsequent cells to ensure consistent state.
+    # This avoids re-running expensive early cells (Model Training, ETL) if they are unchanged.
+    
+    start_index = 0
+    strategy_used = "incremental"
+    
+    if strategy == "full":
+        # User requested full re-run
+        start_index = 0
+        strategy_used = "full"
+    else:
+        # Determine Cut Point
+        first_dirty_idx = -1
+        executed_indices = session.get('executed_indices', set())
+        
+        for idx, cell in enumerate(nb.cells):
+            if cell.cell_type == 'code':
+                # Condition 1: Not executed in this session (State missing)
+                if idx not in executed_indices:
+                    first_dirty_idx = idx
+                    break 
+                
+                # Condition 2: Content Changed vs Disk
+                current_hash = utils.get_cell_hash(cell.source)
+                # Check both new 'mcp' and legacy 'mcp_trace'
+                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+                last_hash = mcp_meta.get('execution_hash')
+                
+                if not last_hash or current_hash != last_hash:
+                    first_dirty_idx = idx
+                    break
+        
+        if first_dirty_idx != -1:
+            start_index = first_dirty_idx
+        else:
+            # All cells clean and executed
+            start_index = len(nb.cells) # Nothing to run
+            strategy_used = "incremental (skipped_all)"
+
     for idx, cell in enumerate(nb.cells):
-        if cell.cell_type == 'code':
+        if cell.cell_type == 'code' and idx >= start_index:
             exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
             if exec_id:
                 exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
@@ -551,13 +588,13 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
     
     return json.dumps({
         'status': 'syncing',
-        'message': f'Queued {len(exec_ids)} cells for full state synchronization',
+        'message': f'Queued {len(exec_ids)} cells for state synchronization (starting from cell {start_index})',
         'cells_synced': len(exec_ids),
         'execution_ids': exec_ids,
         'queue_size': queue_size + len(exec_ids),
         'estimated_duration_seconds': estimate_seconds,
-        'strategy_used': 'full',
-        'hint': 'Use get_execution_status() to monitor progress. All cells executed for correctness.'
+        'strategy_used': strategy_used,
+        'hint': 'Use get_execution_status() to monitor progress.'
     }, indent=2)
 
 @mcp.tool()

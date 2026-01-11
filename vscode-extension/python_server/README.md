@@ -19,8 +19,8 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 ## ✨ Key Features
 
 ### 🔒 Production-Ready
-- **Security**: Safe variable inspection (no `eval()`), sandboxed execution
-- **Robustness**: Automatic kernel recovery, execution provenance tracking, clear_output handling
+- **Security**: Safe variable inspection (no `eval()`), sandboxed execution via Docker
+- **Robustness**: Automatic kernel recovery, execution provenance tracking, clear_output handling, **execution timeouts**
 - **Context-Aware**: Smart HTML table preview (reduces API calls by 50%)
 - **Asset Management**: Automatic extraction of plots/PDFs to disk (98% context reduction)
 - **Progress Bar Support**: Handles `clear_output` messages correctly (prevents file size explosion)
@@ -29,7 +29,7 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 - **Asynchronous Execution**: Non-blocking cell execution with status tracking
 - **Auto-reload**: Code changes detected automatically (no kernel restarts)
 - **Parallel Testing**: pytest-xdist support for fast test execution
-- **Environment Detection**: Automatic conda/venv/system Python detection
+- **Environment Detection**: Robust `conda activate` / `venv` simulation for complex ML environments
 
 ### 🛠️ Comprehensive API
 - **29 MCP Tools** covering every notebook operation

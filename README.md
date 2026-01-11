@@ -18,9 +18,16 @@ This project implements a **Buffer-Based, State-Aware Architecture** that:
 
 ## Architecture: The Four Pillars
 
-### Phase 1: Buffer-Based Execution
-**Problem**: Agent reads cell code from disk while human edits in VS Code buffer.  
-**Solution**: When `run_cell_async` is called, VS Code Extension sends the actual buffer content (`code_override`), not the filename.
+### Phase 1: Robust Environment & State Management
+**Problem**: 
+- **"Split Brain"**: Agent edits vs Human edits leads to divergence.
+- **"Conda Nightmare"**: Manually hacking `PATH` fails to activate complex ML libraries (CUDA/MKL).
+- **"Data Gravity"**: Re-running a 30GB data load to sync state is non-viable.
+
+**Solution**: 
+- **Incremental State Sync**: Using `sync_state_from_disk(strategy="incremental")`, the server identifies the first "dirty" or missing cell and re-runs only from that point forward.
+- **Native Conda Activation**: Uses `conda run` to ensure deep environment activation (LD_LIBRARY_PATH, etc).
+- **Dill Checkpoints**: Snapshots kernel state to disk for instant recovery (Planned).
 
 ```python
 # Server receives code directly from buffer

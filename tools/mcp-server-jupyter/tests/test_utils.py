@@ -3,7 +3,7 @@ import os
 import nbformat
 import json
 from src.utils import sanitize_outputs
-from src.notebook_ops import _slice_text
+from src.notebook import _slice_text
 
 def test_slice_text_logic():
     text = "Line 1\nLine 2\nLine 3\nLine 4"

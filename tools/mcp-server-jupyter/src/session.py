@@ -21,6 +21,69 @@ from src.cell_id_manager import get_cell_id_at_index
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# [SECURITY] Safe Inspection Helper
+INSPECT_HELPER_CODE = """
+def _mcp_inspect(var_name):
+    import builtins
+    import sys
+    
+    # Safe lookup: Check locals then globals
+    # Note: In ipykernel, user variables are in globals()
+    ns = globals()
+    if var_name not in ns:
+        return f"Variable '{var_name}' not found."
+    
+    obj = ns[var_name]
+    
+    try:
+        t_name = type(obj).__name__
+        output = [f"### Type: {t_name}"]
+        
+        # Check for pandas/numpy without importing if not already imported
+        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
+        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
+        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
+        
+        # Safe Primitives
+        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
+             output.append(f"- Value: {str(obj)[:500]}")
+
+        elif is_pd_df:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Columns: {list(obj.columns)}")
+            output.append("\\n#### Head (3 rows):")
+            # to_markdown requires tabulate, fallback to string if fails
+            try:
+                output.append(obj.head(3).to_markdown(index=False))
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_pd_series:
+            output.append(f"- Length: {len(obj)}")
+            try:
+                output.append(obj.head(3).to_markdown())
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_numpy:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Dtype: {obj.dtype}")
+            
+        elif isinstance(obj, (list, tuple, set)):
+             output.append(f"- Length: {len(obj)}")
+             output.append(f"- Sample: {str(list(obj)[:3])}")
+             
+        elif isinstance(obj, dict):
+             output.append(f"- Keys ({len(obj)}): {list(obj.keys())[:5]}")
+             
+        elif hasattr(obj, '__dict__'):
+             output.append(f"- Attributes: {list(obj.__dict__.keys())[:5]}")
+             
+        return "\\n".join(output)
+            
+    except Exception as e:
+        return f"Error inspecting '{var_name}': {str(e)}"
+"""
 
 def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[str, str]]:
     # UPDATED: Using safer "conda run" approach instead of manual PATH hacking
@@ -352,6 +415,7 @@ class SessionManager:
                  'docker', 'run', 
                  '--rm',                     # Cleanup container on exit
                  '-i',                       # Interactive (keeps stdin open)
+                 '--network', 'none',        # [SECURITY] Disable networking
                  '-u', str(os.getuid()),     # Run as current user (avoid root file issues)
                  '-v', f'{mount_source}:{mount_target}',
                  '-v', '{connection_file}:/kernel.json',
@@ -366,33 +430,57 @@ class SessionManager:
              # We explicitly do NOT activate local envs if using Docker
              # Docker image is the environment
              kernel_env = {} 
+             
+             # Set metadata for session tracking
+             py_exe = "python" # Inside container
+             env_name = f"docker:{docker_image}"
         
         else:
             # 1. Handle Environment (Local)
             py_exe = sys.executable
-        env_name = "system"
-        kernel_env = os.environ.copy()  # Default: inherit current environment
-        
-        if venv_path:
-            py_exe = self.get_python_path(venv_path)
-            env_name = Path(venv_path).name
-            # Better: if venv_path provided, ensure py_exe starts with it.
-            if venv_path and not str(py_exe).lower().startswith(str(Path(venv_path).resolve()).lower()):
-                 return f"Error: Could not find python executable in {venv_path}"
+            env_name = "system"
+            kernel_env = os.environ.copy()  # Default: inherit current environment
+            
+            if venv_path:
+                venv_path_obj = Path(venv_path).resolve()
+                is_conda = (venv_path_obj / "conda-meta").exists()
+                
+                py_exe = self.get_python_path(venv_path)
+                env_name = venv_path_obj.name
+                
+                # Validation
+                if not is_conda and not str(py_exe).lower().startswith(str(venv_path_obj).lower()):
+                     return f"Error: Could not find python executable in {venv_path}"
 
-            # Get fully activated environment variables (critical for conda + PyTorch/TensorFlow)
-            kernel_env = _get_activated_env_vars(venv_path, py_exe)
-            if kernel_env:
-                logger.info(f"Using activated environment for {env_name} with {len(kernel_env)} env vars")
-            else:
-                logger.warning(f"Failed to activate environment {venv_path}, using basic PATH update")
-                # Fallback: just update PATH
-                kernel_env = os.environ.copy()
-                bin_dir = str(Path(py_exe).parent)
-                kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+                if is_conda:
+                    # [ACTIVATION FIX] Use 'conda run' instead of brittle env var manipulation
+                    # This ensures activation scripts (SetVars.bat, activate.d) run correctly.
+                    # We assume 'conda' is in PATH or could be found relative to the environment?
+                    
+                    # Proper Conda Activation
+                    km.kernel_cmd = [
+                        'conda', 'run', 
+                        '-p', str(venv_path_obj), 
+                        '--no-capture-output', 
+                        'python', '-m', 'ipykernel_launcher', 
+                        '-f', '{connection_file}'
+                    ]
+                    logger.info(f"Configured Conda kernel with 'conda run': {km.kernel_cmd}")
+                    # We rely on conda run to set up the environment, but we might pass some system envs
+                    # kernel_env is already os.environ.copy()
+                    
+                else: 
+                    # Standard Venv
+                    # Get fully activated environment variables (standard venv approach)
+                    kernel_env = _get_activated_env_vars(venv_path, py_exe)
+                    
+                    if not kernel_env:
+                         kernel_env = os.environ.copy()
+                         bin_dir = str(Path(py_exe).parent)
+                         kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
 
-            # Force Jupyter to use our Venv Python
-            km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                    # Force Jupyter to use our Venv Python
+                    km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
         
         # 2. Start Kernel with Correct CWD and Environment
         await km.start_kernel(cwd=notebook_dir, env=kernel_env)
@@ -408,7 +496,7 @@ class SessionManager:
         
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
         # Execute startup setup (fire-and-forget for reliability)
-        startup_code = '''
+        startup_code = f'''
 %load_ext autoreload
 %autoreload 2
 
@@ -432,74 +520,40 @@ builtins.input = _mcp_blocked_input
 # Python 2 compatibility (though ipykernel requires Python 3)
 builtins.raw_input = _mcp_blocked_input
 
-
 # [SECURITY] Safe Inspection Helper
-# Pre-compile inspection logic to avoid sending large code blocks
-# Must be consistent with _mcp_inspect in session.py
-INSPECT_HELPER_CODE = """
-def _mcp_inspect(var_name):
-    import builtins
-    import sys
+{INSPECT_HELPER_CODE}
+
+# [PHASE 4: Smart Error Recovery]
+# Inject a custom exception handler to provide context-aware error reports
+def _mcp_handler(etype, value, tb, tb_offset=None):
+    # Print standard traceback
+    if hasattr(sys, 'last_type'):
+        del sys.last_type
+    if hasattr(sys, 'last_value'):
+        del sys.last_value
+    if hasattr(sys, 'last_traceback'):
+        del sys.last_traceback
+        
+    traceback.print_exception(etype, value, tb)
     
-    # Safe lookup: Check locals then globals
-    # Note: In ipykernel, user variables are in globals()
-    ns = globals()
-    if var_name not in ns:
-        return f"Variable '{var_name}' not found."
-    
-    obj = ns[var_name]
-    
+    # Generate sidecar JSON
     try:
-        t_name = type(obj).__name__
-        output = [f"### Type: {t_name}"]
-        
-        # Check for pandas/numpy without importing if not already imported
-        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
-        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
-        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
-        
-        # Safe Primitives
-        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
-             output.append(f"- Value: {str(obj)[:500]}")
-
-        elif is_pd_df:
-            output.append(f"- Shape: {obj.shape}")
-            output.append(f"- Columns: {list(obj.columns)}")
-            output.append("\\n#### Head (3 rows):")
-            # to_markdown requires tabulate, fallback to string if fails
-            try:
-                output.append(obj.head(3).to_markdown(index=False))
-            except:
-                output.append(str(obj.head(3)))
-            
-        elif is_pd_series:
-            output.append(f"- Length: {len(obj)}")
-            try:
-                output.append(obj.head(3).to_markdown())
-            except:
-                output.append(str(obj.head(3)))
-            
-        elif is_numpy:
-            output.append(f"- Shape: {obj.shape}")
-            output.append(f"- Dtype: {obj.dtype}")
-            
-        elif isinstance(obj, (list, tuple, set)):
-             output.append(f"- Length: {len(obj)}")
-             output.append(f"- Sample: {str(list(obj)[:3])}")
-             
-        elif isinstance(obj, dict):
-             output.append(f"- Keys ({len(obj)}): {list(obj.keys())[:5]}")
-             
-        elif hasattr(obj, '__dict__'):
-             output.append(f"- Attributes: {list(obj.__dict__.keys())[:5]}")
-             
-        return "\\n".join(output)
-            
+        error_context = {{
+            "error": str(value),
+            "type": etype.__name__,
+            "suggestion": "Check your inputs."
+        }}
+        sidecar_msg = f"\\n__MCP_ERROR_CONTEXT_START__\\n{{json.dumps(error_context)}}\\n__MCP_ERROR_CONTEXT_END__\\n"
+        sys.stderr.write(sidecar_msg)
+        sys.stderr.flush()
     except Exception as e:
-        return f"Error inspecting '{var_name}': {str(e)}"
-"""
+        sys.stderr.write(f"Error in MCP Handler: {{e}}\\n")
+        sys.stderr.flush()
 
-# [END SECURITY HELPER]
+try:
+    get_ipython().set_custom_exc((Exception,), _mcp_handler)
+except Exception:
+    pass
 
 # [PHASE 3.3] Force static rendering for interactive visualization libraries
 # This allows AI agents to "see" plots that would otherwise be JavaScript-based
@@ -507,22 +561,17 @@ import os
 try:
     import matplotlib
     matplotlib.use('Agg')  # Headless backend for matplotlib
-    get_ipython().run_line_magic('matplotlib', 'inline')
+    # Inline backend is still useful for png display
+    try:
+        get_ipython().run_line_magic('matplotlib', 'inline')
+    except:
+        pass
 except ImportError:
     pass  # matplotlib not installed, skip
-
-# [PHASE 4: Smart Error Recovery]
-# Inject a custom exception handler to provide context-aware error reports
-        
-    get_ipython().set_custom_exc((Exception,), _mcp_handler)
-
-except Exception as e:
-    pass # Failed to register error handler
 
 # Force Plotly to render as static PNG
 # NOTE: Requires kaleido installed in kernel environment: pip install kaleido
 try:
-
     import plotly
     try:
         import kaleido
@@ -565,6 +614,7 @@ except ImportError:
             'executions': {},
             'queued_executions': {},  # Track queued executions before processing
             'execution_queue': asyncio.Queue(),
+            'executed_indices': set(), # Track which cells have been run in this session
             'execution_counter': 0,
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
             'execution_timeout': execution_timeout,  # Per-session timeout
@@ -630,6 +680,11 @@ except ImportError:
                             exec_data['status'] = 'completed'
                         # Finalize: Save to disk
                         self._finalize_execution(nb_path, exec_data)
+                        
+                        # Track successful execution
+                        session_data = self.sessions.get(nb_path)
+                        if session_data and exec_data.get('cell_index') is not None:
+                             session_data['executed_indices'].add(exec_data['cell_index'])
                         
                         # [PRIORITY 2] Emit Completion Notification
                         try:

@@ -6,8 +6,9 @@ import nbformat
 import json
 import sys
 import logging
+import datetime
 from src.session import SessionManager
-from src import notebook, utils, notebook_ops, environment
+from src import notebook, utils, environment
 
 # Configure logging to stderr to avoid corrupting JSON-RPC stdout
 logging.basicConfig(
@@ -19,23 +20,52 @@ logger = logging.getLogger(__name__)
 
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
+session_manager.set_mcp_server(mcp)
 
 @mcp.tool()
-async def start_kernel(notebook_path: str, venv_path: str = ""):
+async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
     """
     Boot a background process.
     Windows Logic: Looks for venv_path/Scripts/python.exe.
     Ubuntu Logic: Looks for venv_path/bin/python.
+    Docker Logic: If docker_image is set, runs kernel securely in container.
+    Timeout: Seconds before killing long-running cells (default: 300).
     Output: "Kernel started (PID: 1234). Ready for execution."
     """
-    return await session_manager.start_kernel(notebook_path, venv_path if venv_path else None)
+    # Capture the active session for notifications
+    try:
+        ctx = mcp.get_context()
+        if ctx and ctx.request_context:
+            session_manager.register_session(ctx.request_context.session)
+    except:
+         # Ignore if context not available (e.g. testing)
+         pass
+
+    # Security Check
+    if not docker_image:
+        logger.warning(f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges.")
+
+    return await session_manager.start_kernel(
+        notebook_path, 
+        venv_path if venv_path else None,
+        docker_image if docker_image else None,
+        timeout
+    )
 
 @mcp.tool()
 async def stop_kernel(notebook_path: str):
     """
-    Kill the process to free RAM.
-    Output: "Kernel shutdown."
+    Kill the process to free RAM and clean up assets.
     """
+    # 1. Prune assets before stopping
+    from src.asset_manager import prune_unused_assets
+    try:
+        # Run cleanup. This ensures that if I delete a cell and close the notebook,
+        # the orphaned image is deleted.
+        prune_unused_assets(notebook_path, dry_run=False)
+    except Exception as e:
+        logger.warning(f"Asset cleanup failed: {e}")
+
     return await session_manager.stop_kernel(notebook_path)
 
 @mcp.tool()
@@ -67,31 +97,19 @@ def detect_sync_needed(notebook_path: str):
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk.
     
     **Purpose**: Before the agent starts work, check if a human has modified the notebook
-    since the last agent execution. This prevents "KeyError" or "NameError" crashes when
-    the agent assumes variables exist that were never executed in the current kernel.
+    since the last agent execution.
     
     **How It Works**:
-    1. Reads notebook metadata for last agent execution timestamp
-    2. Compares with file modification time
-    3. Counts cells without mcp_trace metadata (= human-added cells)
-    4. Checks if kernel execution_count matches disk cell execution_counts
+    1. Reads notebook from disk.
+    2. Calculates SHA-256 hash of each cell's content.
+    3. Compares with 'execution_hash' stored in cell metadata.
+    4. If hashes mismatch, sync is required.
     
     Returns:
         JSON with:
-        - sync_needed: boolean (true if sync recommended)
-        - reason: Why sync is needed (if applicable)
-        - human_cells: List of cell indices without agent metadata
-        - last_agent_execution: Timestamp of last agent activity
-        - disk_modified: File modification timestamp
-        - recommendation: Action to take ("sync_state_from_disk" or "proceed")
-    
-    Agent Workflow:
-        status = detect_sync_needed(path)
-        if status['sync_needed']:
-            print(f"Sync required: {status['reason']}")
-            sync_state_from_disk(path, strategy="smart")
-        else:
-            print("State is synced. Proceeding with work.")
+        - sync_needed: boolean
+        - reason: Description of mismatch
+        - changed_cells: List of cell indices that changed
     """
     import os
     from pathlib import Path
@@ -109,59 +127,32 @@ def detect_sync_needed(notebook_path: str):
     # Read notebook from disk
     try:
         nb = nbformat.read(notebook_path, as_version=4)
-        file_stat = os.stat(notebook_path)
-        disk_modified = file_stat.st_mtime
     except Exception as e:
         return json.dumps({
             "error": f"Failed to read notebook: {e}"
         })
     
-    # Check for human-added cells (no mcp_trace)
-    human_cells = []
-    last_agent_time = None
+    changed_cells = []
     
     for idx, cell in enumerate(nb.cells):
         if cell.cell_type == 'code':
-            metadata = cell.metadata.get('mcp_trace', {})
-            if not metadata:
-                human_cells.append(idx)
-            else:
-                # Track most recent agent execution
-                exec_time = metadata.get('execution_timestamp', '')
-                if exec_time and (not last_agent_time or exec_time > last_agent_time):
-                    last_agent_time = exec_time
+            current_hash = utils.get_cell_hash(cell.source)
+            # Check both new 'mcp' and legacy 'mcp_trace' metadata locations
+            mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+            last_hash = mcp_meta.get('execution_hash')
+            
+            # If no hash exists (never executed by agent) or hash mismatch (content changed)
+            if not last_hash or current_hash != last_hash:
+                changed_cells.append(idx)
     
-    # Determine if sync is needed
-    sync_needed = False
-    reason = None
-    
-    if len(human_cells) > 0:
-        sync_needed = True
-        reason = f"Found {len(human_cells)} cells without agent metadata (likely human-added)"
-    
-    # Check if file was modified after kernel start
-    kernel_start_time = session.get('env_info', {}).get('start_time', '')
-    if kernel_start_time:
-        from datetime import datetime
-        try:
-            kernel_dt = datetime.fromisoformat(kernel_start_time)
-            disk_dt = datetime.fromtimestamp(disk_modified)
-            if disk_dt > kernel_dt:
-                sync_needed = True
-                reason = f"File modified at {disk_dt} after kernel started at {kernel_dt}"
-        except:
-            pass
+    sync_needed = len(changed_cells) > 0
     
     return json.dumps({
         'sync_needed': sync_needed,
-        'reason': reason if sync_needed else "Kernel state appears synced with disk",
-        'human_cells': human_cells,
-        'human_cell_count': len(human_cells),
-        'total_code_cells': sum(1 for c in nb.cells if c.cell_type == 'code'),
-        'last_agent_execution': last_agent_time,
-        'kernel_start_time': kernel_start_time,
+        'reason': f"Content mismatch in {len(changed_cells)} cells" if sync_needed else "Content matches execution history",
+        'changed_cells': changed_cells,
         'recommendation': 'sync_state_from_disk' if sync_needed else 'proceed',
-        'suggested_strategy': 'smart' if len(human_cells) < 10 else 'full'
+        'sync_strategy': 'full'
     }, indent=2)
 
 @mcp.tool()
@@ -179,12 +170,19 @@ def set_stop_on_error(notebook_path: str, enabled: bool):
     return f"stop_on_error set to {enabled} for {notebook_path}"
 
 @mcp.tool()
-def get_notebook_outline(notebook_path: str):
+def get_notebook_outline(notebook_path: str, structure_override: Optional[List[dict]] = None):
     """
     Low-token overview of the file.
-    Output: JSON list: [{index: 0, type: "code", source_preview: "import pandas...", state: "executed"}].
+    Args:
+        structure_override: Optional list of cell metadata pushed from VS Code buffer.
+                           Prevents "Index Blindness" where Agent reads stale disk state.
     """
-    return notebook.get_notebook_outline(notebook_path)
+    if structure_override:
+        # Use the real-time buffer state from VS Code
+        return notebook.format_outline(structure_override)
+    else:
+        # Fallback to disk (risk of stale data)
+        return notebook.get_notebook_outline(notebook_path)
 
 @mcp.tool()
 def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
@@ -195,12 +193,49 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     return notebook.append_cell(notebook_path, content, cell_type)
 
 @mcp.tool()
-def edit_cell(notebook_path: str, index: int, content: str):
+async def save_checkpoint(notebook_path: str, name: str = "checkpoint"):
     """
-    Replaces the Code. Crucially: Automatically clears the output.
-    Why: If you change the code, the old output is now a lie. Clearing it prevents hallucinations.
+    Snapshot the current kernel variables (memory heap) to disk.
+    Use this to prevent "Data Gravity" issues.
     """
-    return notebook.edit_cell(notebook_path, index, content)
+    return await session_manager.save_checkpoint(notebook_path, name)
+
+@mcp.tool()
+async def load_checkpoint(notebook_path: str, name: str = "checkpoint"):
+    """
+    Restore variables from a disk snapshot.
+    Replaces "Re-run all cells" strategy.
+    """
+    return await session_manager.load_checkpoint(notebook_path, name)
+
+@mcp.tool()
+def propose_edit(notebook_path: str, index: int, new_content: str):
+    """
+    Propose an edit to a cell. 
+    This avoids writing to disk directly, preventing conflicts with the editor buffer.
+    The Agent should use this instead of 'edit_cell'.
+    """
+    # Construct proposal
+    proposal = {
+        "action": "edit_cell",
+        "notebook_path": notebook_path,
+        "index": index,
+        "new_content": new_content,
+        "timestamp": str(datetime.datetime.now())
+    }
+    
+    # We return a specific structure that the Client (mcpClient.ts) listens for.
+    # By convention, if the tool result contains this structure, the client
+    # will trigger a WorkspaceEdit.
+    
+    return json.dumps({
+        "status": "proposal_created", 
+        "proposal": proposal,
+        "message": "Edit proposed. Client must apply changes.",
+        # SIGNAL PROTOCOL
+        "_mcp_action": "apply_edit" 
+    })
+
 
 @mcp.tool()
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):
@@ -212,7 +247,7 @@ def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: s
     """
     if line_range and isinstance(line_range, list):
          line_range = [int(x) for x in line_range]
-    return notebook_ops.read_cell_smart(notebook_path, index, target, fmt, line_range)
+    return notebook.read_cell_smart(notebook_path, index, target, fmt, line_range)
 
 @mcp.tool()
 def insert_cell(notebook_path: str, index: int, content: str, cell_type: str = "code"):
@@ -230,7 +265,7 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     Don't read the file to find where df_clean is defined. Search for it.
     Returns: Found 'df_clean' in Cell 3 (Line 4) and Cell 8 (Line 1).
     """
-    return notebook_ops.search_notebook(notebook_path, query, regex)
+    return notebook.search_notebook(notebook_path, query, regex)
 
 @mcp.tool()
 async def get_kernel_info(notebook_path: str):
@@ -243,9 +278,17 @@ async def get_kernel_info(notebook_path: str):
 # --- NEW ASYNC TOOLS ---
 
 @mcp.tool()
-async def run_cell_async(notebook_path: str, index: int):
+async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
     """
     Submits a cell for execution in the background.
+    
+    Args:
+        notebook_path: Path to the notebook
+        index: Cell index
+        code_override: Optional explicit code to run (bypass disk read). 
+                      Crucial for "File vs Buffer" race conditions.
+        task_id_override: Optional client-generated ID to prevent race conditions.
+    
     Returns: A Task ID (e.g., "b4f2...").
     Use `get_execution_status(task_id)` to check progress.
     """
@@ -253,20 +296,26 @@ async def run_cell_async(notebook_path: str, index: int):
     if not session:
         return "Error: No running kernel. Call start_kernel first."
     
-    # 1. Get Code
-    try:
-        cell = notebook.read_cell(notebook_path, index)
-    except Exception as e:
-        return f"Error reading cell: {e}"
-        
-    code = cell['source']
+    # 1. Get Code (Buffer Priority)
+    if code_override is not None:
+        code = code_override
+    else:
+        # Fallback to disk (Legacy/test behavior)
+        try:
+            cell = notebook.read_cell(notebook_path, index)
+            code = cell['source']
+        except Exception as e:
+            return f"Error reading cell: {e}"
     
     # 2. Submit
-    exec_id = await session_manager.execute_cell_async(notebook_path, index, code)
+    exec_id = await session_manager.execute_cell_async(notebook_path, index, code, exec_id=task_id_override)
     if not exec_id:
         return "Error starting execution."
         
-    return f"Execution started. Task ID: {exec_id}"
+    return json.dumps({
+        "task_id": exec_id,
+        "message": "Execution started"
+    })
 
 @mcp.tool()
 def get_execution_status(notebook_path: str, task_id: str):
@@ -341,11 +390,17 @@ def get_execution_stream(notebook_path: str, task_id: str, since_output_index: i
     
     # Sanitize outputs (converts binary images to assets, strips ANSI, etc.)
     assets_dir = str(Path(notebook_path).parent / "assets")
-    stream_text = utils.sanitize_outputs(new_outputs, assets_dir)
+    sanitized_json = utils.sanitize_outputs(new_outputs, assets_dir)
     
+    # Unpack to avoid double-JSON encoding
+    try:
+        new_outputs_data = json.loads(sanitized_json)
+    except:
+        new_outputs_data = sanitized_json
+
     return json.dumps({
         "status": target_data['status'],
-        "new_outputs": stream_text,
+        "new_outputs": new_outputs_data,
         "next_index": len(all_outputs),
         "total_outputs": len(all_outputs),
         "last_activity": target_data.get('last_activity', 0),
@@ -423,7 +478,7 @@ async def run_all_cells(notebook_path: str):
     }, indent=2)
 
 @mcp.tool()
-async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
+async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
     """
     [HANDOFF PROTOCOL] Synchronize kernel state with disk after human intervention.
     
@@ -436,20 +491,19 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     - Agent detects unexpected notebook structure (new cells, modified cells)
     - After switching from "Human Mode" to "Agent Mode" in VS Code extension
     
-    **Strategies**:
-    - "smart" (default): Only re-executes cells that define variables (skips plots, prints)
-    - "full": Re-executes ALL code cells from disk (safest, but slowest)
-    - "incremental": Only executes cells modified since last agent execution (requires metadata tracking)
+    **Strategy**:
+    - Always uses "full" sync: Re-executes ALL code cells from disk
+    - Previous "smart" strategy removed due to false positive risk
+      (Example: cell with plt.figure() + data = calc() would skip calc() causing undefined variable errors)
     
     Args:
         notebook_path: Path to the notebook file
-        strategy: Sync strategy ("smart", "full", or "incremental")
+        strategy: DEPRECATED - now always uses "full" for correctness
     
     Returns:
         JSON with:
         - cells_synced: Number of cells re-executed
         - execution_ids: List of execution IDs for tracking
-        - skipped_cells: List of cell indices skipped (if strategy="smart")
         - sync_duration_estimate: Estimated time to complete (based on queue size)
     
     Agent Workflow Example:
@@ -457,7 +511,7 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
         outline = get_notebook_outline(path)
         if len(outline['cells']) > session.last_known_cell_count:
             # 2. Sync state before continuing
-            result = sync_state_from_disk(path, strategy="smart")
+            result = sync_state_from_disk(path)
             print(f"Synced {result['cells_synced']} cells to rebuild state")
         
         # 3. Now safe to continue work
@@ -480,67 +534,53 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
         })
     
     exec_ids = []
-    skipped = []
+    
+    # [Sync Strategy 2.0: Cut-Point incremental Sync]
+    # We find the first cell that is either changed OR not executed in this session.
+    # We execute that cell and ALL subsequent cells to ensure consistent state.
+    # This avoids re-running expensive early cells (Model Training, ETL) if they are unchanged.
+    
+    start_index = 0
+    strategy_used = "incremental"
     
     if strategy == "full":
-        # Re-execute everything (safest)
-        for idx, cell in enumerate(nb.cells):
-            if cell.cell_type == 'code':
-                exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
-                if exec_id:
-                    exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
-    
-    elif strategy == "smart":
-        # Skip cells that don't define variables (optimization)
-        import re
+        # User requested full re-run
+        start_index = 0
+        strategy_used = "full"
+    else:
+        # Determine Cut Point
+        first_dirty_idx = -1
+        executed_indices = session.get('executed_indices', set())
         
         for idx, cell in enumerate(nb.cells):
-            if cell.cell_type != 'code':
-                continue
-            
-            source = cell.source.strip()
-            
-            # Skip empty cells
-            if not source:
-                skipped.append({'cell_index': idx, 'reason': 'empty'})
-                continue
-            
-            # Skip pure visualization (no assignments)
-            if re.match(r'^(plt\.|fig\.|ax\.|sns\.|plot\(|show\()', source):
-                skipped.append({'cell_index': idx, 'reason': 'visualization_only'})
-                continue
-            
-            # Skip pure print statements
-            if re.match(r'^(print\(|display\()', source) and '=' not in source:
-                skipped.append({'cell_index': idx, 'reason': 'output_only'})
-                continue
-            
-            # Execute cells that likely define state
-            exec_id = await session_manager.execute_cell_async(notebook_path, idx, source)
-            if exec_id:
-                exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
-    
-    elif strategy == "incremental":
-        # Only execute cells modified since last agent run
-        for idx, cell in enumerate(nb.cells):
-            if cell.cell_type != 'code':
-                continue
-            
-            # Check if cell was executed by agent (has mcp_trace metadata)
-            metadata = cell.metadata.get('mcp_trace', {})
-            
-            # If no agent metadata OR cell source changed, re-execute
-            # (This requires storing cell hash in metadata - future enhancement)
-            # For now, fall back to "smart" strategy
+            if cell.cell_type == 'code':
+                # Condition 1: Not executed in this session (State missing)
+                if idx not in executed_indices:
+                    first_dirty_idx = idx
+                    break 
+                
+                # Condition 2: Content Changed vs Disk
+                current_hash = utils.get_cell_hash(cell.source)
+                # Check both new 'mcp' and legacy 'mcp_trace'
+                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+                last_hash = mcp_meta.get('execution_hash')
+                
+                if not last_hash or current_hash != last_hash:
+                    first_dirty_idx = idx
+                    break
+        
+        if first_dirty_idx != -1:
+            start_index = first_dirty_idx
+        else:
+            # All cells clean and executed
+            start_index = len(nb.cells) # Nothing to run
+            strategy_used = "incremental (skipped_all)"
+
+    for idx, cell in enumerate(nb.cells):
+        if cell.cell_type == 'code' and idx >= start_index:
             exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
             if exec_id:
                 exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
-    
-    else:
-        return json.dumps({
-            "error": f"Unknown strategy: {strategy}",
-            "valid_strategies": ["smart", "full", "incremental"]
-        })
     
     # Calculate estimated sync duration
     queue_size = session['execution_queue'].qsize() if 'execution_queue' in session else 0
@@ -548,15 +588,13 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     
     return json.dumps({
         'status': 'syncing',
-        'message': f'Queued {len(exec_ids)} cells for state synchronization',
+        'message': f'Queued {len(exec_ids)} cells for state synchronization (starting from cell {start_index})',
         'cells_synced': len(exec_ids),
-        'cells_skipped': len(skipped),
-        'skipped_details': skipped,
         'execution_ids': exec_ids,
         'queue_size': queue_size + len(exec_ids),
         'estimated_duration_seconds': estimate_seconds,
-        'strategy_used': strategy,
-        'hint': 'Use get_execution_status() to monitor progress'
+        'strategy_used': strategy_used,
+        'hint': 'Use get_execution_status() to monitor progress.'
     }, indent=2)
 
 @mcp.tool()
@@ -606,66 +644,18 @@ async def inspect_variable(notebook_path: str, variable_name: str):
     
     Returns: Markdown-formatted summary suitable for LLM consumption
     """
-    # SECURITY FIX: Use safe dictionary lookup instead of eval()
-    # This prevents code injection via inspect_variable(path, "os.system('rm -rf /')")
-    code = f"""
-import pandas as pd
-import numpy as np
+    # 1. Input Validation (Prevent Injection)
+    if not variable_name.isidentifier():
+        return f"Error: '{variable_name}' is not a valid Python identifier. Cannot inspect."
 
-def _safe_inspect():
-    var_name = '{variable_name}'
+    # SECURITY FIX: Use pre-defined helper function instead of sending code blocks
+    # Logic is defined in session.py startup_code as _mcp_inspect(name)
+    code = f"_mcp_inspect('{variable_name}')"
+    # Note: run_simple_code executes the expression and returns the result (relying on displayhook or print?)
+    # SessionManager.run_simple_code runs using execute_cell logic which captures output.
+    # _mcp_inspect returns a string. To get it as output, we might need to print it or rely on it being the last expression.
+    # Jupyter usually displays the last expression.
     
-    # Safe lookup: Check locals then globals
-    if var_name in locals():
-        obj = locals()[var_name]
-    elif var_name in globals():
-        obj = globals()[var_name]
-    else:
-        return f"Variable '{{var_name}}' not found in current scope."
-    
-    try:
-        t_name = type(obj).__name__
-        output = [f"### Type: {{t_name}}"]
-        
-        if isinstance(obj, pd.DataFrame):
-            output.append(f"- Shape: {{obj.shape}}")
-            output.append(f"- Columns: {{list(obj.columns)}}")
-            mem_mb = obj.memory_usage(deep=True).sum() / 1024**2
-            output.append(f"- Memory: {{mem_mb:.2f}} MB")
-            output.append("\\n#### Head (3 rows):")
-            output.append(obj.head(3).to_markdown(index=False))
-            
-        elif isinstance(obj, pd.Series):
-            output.append(f"- Length: {{len(obj)}}")
-            output.append(f"- Dtype: {{obj.dtype}}")
-            output.append("\\n#### Head (5 items):")
-            output.append(obj.head(5).to_markdown())
-            
-        elif isinstance(obj, (list, tuple)):
-            output.append(f"- Length: {{len(obj)}}")
-            output.append(f"- Sample (first 5): {{obj[:5]}}")
-            
-        elif isinstance(obj, dict):
-            output.append(f"- Keys: {{list(obj.keys())[:10]}}")
-            output.append(f"- Sample (first 3 items):")
-            for k, v in list(obj.items())[:3]:
-                output.append(f"  - {{k}}: {{str(v)[:100]}}")
-                
-        elif hasattr(obj, 'shape') and hasattr(obj, 'dtype'):  # Numpy
-            output.append(f"- Shape: {{obj.shape}}")
-            output.append(f"- Dtype: {{obj.dtype}}")
-            output.append(f"- Sample: {{list(obj.flat[:10])}}")
-            
-        else:
-            output.append(f"- String Representation: {{str(obj)[:500]}}")
-            
-        return "\\n".join(output)
-        
-    except Exception as e:
-        return f"Inspection error: {{e}}"
-
-print(_safe_inspect())
-"""
     return await session_manager.run_simple_code(notebook_path, code)
 
 # -----------------------
@@ -946,6 +936,198 @@ def auto_detect_environment(notebook_path: Optional[str] = None):
     return json.dumps(result, indent=2)
 
 @mcp.tool()
+def get_asset_content(asset_path: str) -> str:
+    """
+    Retrieve base64-encoded content of an asset file (PNG, PDF, SVG, etc.).
+    
+    **Use Case**: When the server reports `[PNG SAVED: assets/xyz.png]` and you need
+    to analyze the image content with multimodal capabilities.
+    
+    **Security**: Only allows access to assets/ directory (prevents path traversal).
+    
+    Args:
+        asset_path: Relative path to asset, typically from execution output
+                   Format: "assets/asset_abc123.png" or just "asset_abc123.png"
+    
+    Returns:
+        JSON with:
+        - mime_type: MIME type of the asset (e.g., "image/png")
+        - data: Base64-encoded binary content
+        - size_bytes: Size of the encoded data
+        - filename: Original filename
+    
+    Agent Workflow Example:
+        # 1. Execute cell that generates plot
+        result = execute_cell(path, 0, "import matplotlib.pyplot as plt\\nplt.plot([1,2,3])")
+        # Output: "[PNG SAVED: assets/asset_abc123.png]"
+        
+        # 2. Retrieve asset for analysis
+        asset = get_asset_content("assets/asset_abc123.png")
+        # Now can pass asset['data'] to multimodal model for description
+    """
+    import base64
+    from pathlib import Path
+    
+    # Normalize path separators
+    asset_path = asset_path.replace("\\", "/")
+    
+    # Security: Extract just the filename if full path provided
+    # Allows "assets/file.png" or just "file.png"
+    path_parts = asset_path.split("/")
+    if len(path_parts) > 1 and path_parts[0] == "assets":
+        filename = path_parts[-1]
+    else:
+        filename = path_parts[-1]
+    
+    # Build full path relative to current working directory
+    # Assets are always stored in assets/ subdirectory
+    full_path = Path("assets") / filename
+    
+    # Security check: Verify resolved path is still within assets directory
+    try:
+        resolved = full_path.resolve()
+        assets_dir = Path("assets").resolve()
+        if not str(resolved).startswith(str(assets_dir)):
+            return json.dumps({
+                "error": "Security violation: Path traversal attempt blocked",
+                "requested_path": asset_path
+            })
+    except Exception as e:
+        return json.dumps({
+            "error": f"Invalid path: {str(e)}",
+            "requested_path": asset_path
+        })
+    
+    # Check if file exists
+    if not full_path.exists():
+        return json.dumps({
+            "error": f"Asset not found: {asset_path}",
+            "checked_path": str(full_path),
+            "hint": "Ensure the cell has been executed and produced output. Check execution status."
+        })
+    
+    # Determine MIME type from extension
+    mime_map = {
+        '.png': 'image/png',
+        '.jpg': 'image/jpeg',
+        '.jpeg': 'image/jpeg',
+        '.svg': 'image/svg+xml',
+        '.pdf': 'application/pdf',
+        '.gif': 'image/gif',
+        '.webp': 'image/webp'
+    }
+    suffix = full_path.suffix.lower()
+    mime_type = mime_map.get(suffix, 'application/octet-stream')
+    
+    # Read and encode
+    try:
+        with open(full_path, 'rb') as f:
+            raw_bytes = f.read()
+            data = base64.b64encode(raw_bytes).decode('utf-8')
+        
+        return json.dumps({
+            "mime_type": mime_type,
+            "data": data,
+            "size_bytes": len(raw_bytes),
+            "encoded_size": len(data),
+            "filename": filename,
+            "full_path": str(full_path)
+        }, indent=2)
+    
+    except Exception as e:
+        return json.dumps({
+            "error": f"Failed to read asset: {str(e)}",
+            "asset_path": str(full_path)
+        })
+
+@mcp.tool()
+def edit_cell_by_id(notebook_path: str, cell_id: str, content: str, expected_index: Optional[int] = None):
+    """
+    [GIT-SAFE] Edit cell by stable Cell ID instead of index.
+    
+    **Why Cell IDs**: Index-based addressing breaks when cells are added/deleted.
+    Cell IDs are stable UUIDs that survive notebook restructuring.
+    
+    **Pre-flight Validation**: If expected_index is provided, checks that the cell
+    hasn't moved since the agent last read the outline. Prevents overwriting wrong cell.
+    
+    Args:
+        notebook_path: Path to notebook
+        cell_id: Cell ID from get_notebook_outline (e.g., "89523d2a-...")
+        content: New cell content
+        expected_index: Optional - cell's last known index for staleness check
+    
+    Returns:
+        Success message or StaleStateError
+    
+    Agent Workflow:
+        # 1. Get current outline
+        outline = get_notebook_outline(path)
+        cell = outline[5]  # Edit 6th cell
+        
+        # 2. Edit by ID with validation
+        result = edit_cell_by_id(
+            path, 
+            cell_id=cell['id'],
+            content="import pandas as pd",
+            expected_index=cell['index']  # Prevents race conditions
+        )
+    """
+    from src.cell_id_manager import edit_cell_by_id as _edit_by_id, StaleStateError
+    
+    try:
+        return _edit_by_id(notebook_path, cell_id, content, expected_index)
+    except StaleStateError as e:
+        return json.dumps({
+            "error": "StaleStateError",
+            "message": str(e),
+            "action_required": "Call get_notebook_outline() to refresh cell positions and retry"
+        }, indent=2)
+
+@mcp.tool()
+def delete_cell_by_id(notebook_path: str, cell_id: str, expected_index: Optional[int] = None):
+    """
+    [GIT-SAFE] Delete cell by stable Cell ID.
+    
+    See edit_cell_by_id for rationale on Cell ID addressing.
+    """
+    from src.cell_id_manager import delete_cell_by_id as _delete_by_id, StaleStateError
+    
+    try:
+        return _delete_by_id(notebook_path, cell_id, expected_index)
+    except StaleStateError as e:
+        return json.dumps({
+            "error": "StaleStateError",
+            "message": str(e),
+            "action_required": "Call get_notebook_outline() to refresh and retry"
+        }, indent=2)
+
+@mcp.tool()
+def insert_cell_by_id(notebook_path: str, after_cell_id: Optional[str], content: str, cell_type: str = "code"):
+    """
+    [GIT-SAFE] Insert new cell after specified Cell ID.
+    
+    Args:
+        notebook_path: Path to notebook
+        after_cell_id: Insert after this Cell ID (None = prepend to start)
+        content: Cell content
+        cell_type: 'code' or 'markdown'
+    
+    Returns:
+        Success message with new cell's ID
+    """
+    from src.cell_id_manager import insert_cell_by_id as _insert_by_id, StaleStateError
+    
+    try:
+        return _insert_by_id(notebook_path, after_cell_id, content, cell_type)
+    except StaleStateError as e:
+        return json.dumps({
+            "error": "StaleStateError",
+            "message": str(e),
+            "action_required": "Call get_notebook_outline() to refresh and retry"
+        }, indent=2)
+
+@mcp.tool()
 def create_venv(path: str, python_executable: str = ""):
     """
     Creates a new virtual environment.
@@ -958,8 +1140,170 @@ def create_venv(path: str, python_executable: str = ""):
         result = environment.create_venv(path, sys.executable)
     return json.dumps(result, indent=2)
 
+# ============================================================================
+# Git-Awareness Tools (Git-Safe Workflow)
+# ============================================================================
+
+@mcp.tool()
+def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
+    """
+    [GIT-SAFE] Save notebook in Git-friendly format.
+    
+    Strips volatile metadata while keeping outputs for GitHub viewing:
+    - execution_count (set to null)
+    - Volatile cell metadata (timestamps, collapsed, scrolled)
+    - Optionally strips all outputs if strip_outputs=True
+    
+    **When to use**: Call this before git commit to minimize merge conflicts.
+    
+    Args:
+        notebook_path: Path to notebook file
+        strip_outputs: If True, also remove all outputs (for sensitive data)
+    
+    Returns:
+        Success message with count of cleaned cells
+    
+    Example:
+        # Before committing
+        save_notebook_clean("analysis.ipynb")
+        # Then: git add analysis.ipynb && git commit
+    """
+    from src.git_tools import save_notebook_clean as _save_clean
+    return _save_clean(notebook_path, strip_outputs)
+
+@mcp.tool()
+def setup_git_filters(repo_path: str = "."):
+    """
+    [GIT-SAFE] Configure Git filters for automatic notebook cleaning.
+    
+    One-time setup per repository. Installs nbstripout filter that:
+    - Auto-strips execution_count on commit
+    - Auto-strips volatile metadata
+    - Keeps outputs in working tree (for local viewing)
+    
+    **When to use**: Run once when starting work on a new repo with notebooks.
+    
+    Args:
+        repo_path: Path to Git repository root (default: current directory)
+    
+    Returns:
+        Success message or error with installation instructions
+    
+    Example:
+        setup_git_filters(".")
+        # Now all git commits will auto-clean notebooks
+    """
+    from src.git_tools import setup_git_filters as _setup_filters
+    return _setup_filters(repo_path)
+
+@mcp.tool()
+def create_agent_branch(repo_path: str = ".", branch_name: str = ""):
+    """
+    [GIT-SAFE] Create defensive Git branch for agent work.
+    
+    Safety checks:
+    - Fails if uncommitted changes exist
+    - Fails if in detached HEAD state
+    - Creates and checks out new branch
+    
+    **Critical for safety**: Agent should ALWAYS work on a separate branch.
+    Human can review and squash-merge when done.
+    
+    Args:
+        repo_path: Path to Git repository
+        branch_name: Branch name (default: agent/task-{timestamp})
+    
+    Returns:
+        Success message with branch name and merge instructions
+    
+    Example:
+        create_agent_branch(".", "agent/add-features")
+        # Now safely work on this branch
+        # Human will review and merge later
+    """
+    from src.git_tools import create_agent_branch as _create_branch
+    return _create_branch(repo_path, branch_name)
+
+@mcp.tool()
+def commit_agent_work(repo_path: str = ".", message: str = "", files: Optional[List[str]] = None):
+    """
+    [GIT-SAFE] Commit agent changes to current branch.
+    
+    Safety checks:
+    - Only commits specified files (no 'git add .')
+    - Refuses to commit to main/master
+    - Runs pre-commit hooks
+    
+    **Optional helper**: Agent can also just tell human to review and commit.
+    
+    Args:
+        repo_path: Path to Git repository
+        message: Commit message (required)
+        files: List of file paths to commit (required)
+    
+    Returns:
+        Success message with commit hash, or error
+    
+    Example:
+        save_notebook_clean("analysis.ipynb")
+        commit_agent_work(".", "Add data analysis", ["analysis.ipynb"])
+    """
+    from src.git_tools import commit_agent_work as _commit_work
+    return _commit_work(repo_path, message, files)
+
+@mcp.tool()
+def prune_unused_assets(notebook_path: str, dry_run: bool = False):
+    """
+    [GIT-SAFE] Delete asset files not referenced in notebook.
+    
+    Scans notebook for asset references, deletes orphaned files.
+    Safe to run periodically to clean up after cell deletions.
+    
+    Args:
+        notebook_path: Path to notebook file
+        dry_run: If True, only report what would be deleted
+    
+    Returns:
+        JSON with deleted/kept files and size freed
+    
+    Example:
+        # Check what would be deleted
+        prune_unused_assets("analysis.ipynb", dry_run=True)
+        # Actually delete
+        prune_unused_assets("analysis.ipynb")
+    """
+    from src.asset_manager import prune_unused_assets as _prune_assets
+    result = _prune_assets(notebook_path, dry_run)
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+def get_assets_summary(notebook_path: str):
+    """
+    [GIT-SAFE] Get summary of asset usage for a notebook.
+    
+    Returns counts and sizes of assets (total, referenced, orphaned).
+    Useful to understand storage impact before/after cleanup.
+    
+    Args:
+        notebook_path: Path to notebook file
+    
+    Returns:
+        JSON with asset statistics
+    
+    Example:
+        get_assets_summary("analysis.ipynb")
+        # Shows: 50 total assets, 30 referenced, 20 orphaned
+    """
+    from src.asset_manager import get_assets_summary as _get_summary
+    result = _get_summary(notebook_path)
+    return json.dumps(result, indent=2)
+
 if __name__ == "__main__":
     try:
+        # Restore any persisted sessions from previous server runs
+        asyncio.run(session_manager.restore_persisted_sessions())
+        
+        # Start the MCP server
         mcp.run()
     finally:
         asyncio.run(session_manager.shutdown_all())

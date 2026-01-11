@@ -6,17 +6,89 @@ import json
 import logging
 import nbformat
 import datetime
+import subprocess
+try:
+    import dill
+except ImportError:
+    dill = None
 from pathlib import Path
 from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
+from src.cell_id_manager import get_cell_id_at_index
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[str, str]]:
+    # UPDATED: Using safer "conda run" approach instead of manual PATH hacking
+    """
+    Get fully activated environment variables for conda/venv environments.
+    
+    Critical for conda environments where packages like PyTorch/TensorFlow need
+    LD_LIBRARY_PATH, CUDA_HOME, and other env vars set by activation scripts.
+    
+    Args:
+        venv_path: Path to the environment directory
+        python_exe: Python executable within that environment
+    
+    Returns:
+        Dict of environment variables after activation, or None if not conda
+    """
+    venv_path_obj = Path(venv_path).resolve()
+    
+    # Detect if this is a conda environment
+    is_conda = (venv_path_obj / "conda-meta").exists()
+    
+    if not is_conda:
+        # For regular venv, just updating Python path is usually sufficient
+        # Return current environment with updated PATH
+        env = os.environ.copy()
+        bin_dir = str(Path(python_exe).parent)
+        if bin_dir not in env.get('PATH', ''):
+            env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        return env
+    
+    # For conda, we implement a safer approach than direct path manipulation.
+    # While path manipulation is faster, it is brittle.
+    # We will try to rely on 'conda run' if possible, but that requires
+    # changing how the kernel is started, which is handled by KernelManager.
+    #
+    # Since we are returning ENV VARS here to be passed to Popen, we do our best
+    # to emulate activation.
+    #
+    # IMPROVED LOGIC: Replicate what 'conda shell.bash activate' does more faithfully
+    # but acknowledge this is still a heuristic.
+    
+    env = os.environ.copy()
+    bin_dir = str(Path(python_exe).parent)
+    
+    # 1. Essential Conda Vars
+    env['CONDA_PREFIX'] = str(venv_path_obj)
+    env['CONDA_DEFAULT_ENV'] = venv_path_obj.name
+    
+    # 2. Update PATH (Priority to environment bin)
+    # On Windows: env/Scripts; env/Library/bin; env/Library/usr/bin; env/Library/mingw-w64/bin; env
+    # On Unix: env/bin
+    if os.name == 'nt':
+        scripts = venv_path_obj / "Scripts"
+        lib_bin = venv_path_obj / "Library" / "bin"
+        lib_usr_bin = venv_path_obj / "Library" / "usr" / "bin"
+        
+        paths_to_add = [str(p) for p in [scripts, lib_bin, lib_usr_bin, venv_path_obj] if p.exists()]
+        env['PATH'] = os.pathsep.join(paths_to_add) + os.pathsep + env.get('PATH', '')
+    else:
+        # Unix
+        # Note: Some conda envs might have separate library paths, but bin/ usually covers it for execution
+        env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        
+    logger.info(f"Resolved conda env: {venv_path}")
+    return env
+
 class SessionManager:
-    def __init__(self):
+    def __init__(self, default_execution_timeout: int = 300):
         # Maps notebook_path (str) -> {
         #   'km': KernelManager, 
         #   'kc': Client, 
@@ -31,7 +103,187 @@ class SessionManager:
         # }
         self.sessions = {}
         # Global timeout for cell executions (in seconds)
-        self.execution_timeout = 300  # 5 minutes
+        self.default_execution_timeout = default_execution_timeout
+        
+        # Reference to MCP server for notifications
+        self.mcp_server = None
+        self.server_session = None
+        
+        # Session persistence directory
+        self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
+        self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        
+    def set_mcp_server(self, mcp_server):
+        """Set the MCP server instance to enable notifications."""
+        self.mcp_server = mcp_server
+
+    def register_session(self, session):
+        """Register the active ServerSession for sending notifications."""
+        self.server_session = session
+
+    async def _send_notification(self, method: str, params: Any):
+        """Helper to send notifications via available channel."""
+        # Wrap custom notification to satisfy MCP SDK interface
+        class CustomNotification:
+            def __init__(self, method, params):
+                self.method = method
+                self.params = params
+            def model_dump(self, **kwargs):
+                return {"method": self.method, "params": self.params}
+
+        notification = CustomNotification(method, params)
+
+        if self.server_session:
+            await self.server_session.send_notification(notification)
+        elif self.mcp_server and hasattr(self.mcp_server, "send_notification"):
+            await self.mcp_server.send_notification(notification)
+
+    
+    def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
+        """
+        Save session info to disk to prevent zombie kernels after server restart.
+        
+        Stores:
+        - Connection file path (for reconnecting to kernel)
+        - Process ID (for checking if kernel still alive)
+        - Environment info (for proper cleanup)
+        """
+        try:
+            # Use notebook path hash as filename to handle special chars
+            import hashlib
+            path_hash = hashlib.md5(nb_path.encode()).hexdigest()
+            session_file = self.persistence_dir / f"session_{path_hash}.json"
+            
+            session_data = {
+                "notebook_path": nb_path,
+                "connection_file": connection_file,
+                "pid": pid if isinstance(pid, int) else None,
+                "env_info": env_info,
+                "created_at": datetime.datetime.now().isoformat()
+            }
+            
+            with open(session_file, 'w') as f:
+                json.dump(session_data, f, indent=2)
+            
+            logger.info(f"Persisted session info for {nb_path} (PID: {pid})")
+        except Exception as e:
+            logger.warning(f"Failed to persist session info: {e}")
+    
+    def _remove_persisted_session(self, nb_path: str):
+        """Remove persisted session info when kernel is shut down."""
+        try:
+            import hashlib
+            path_hash = hashlib.md5(nb_path.encode()).hexdigest()
+            session_file = self.persistence_dir / f"session_{path_hash}.json"
+            
+            if session_file.exists():
+                session_file.unlink()
+                logger.info(f"Removed persisted session for {nb_path}")
+        except Exception as e:
+            logger.warning(f"Failed to remove persisted session: {e}")
+    
+    async def restore_persisted_sessions(self):
+        """
+        Attempt to restore sessions from disk on server startup.
+        
+        Checks if kernel PIDs are still alive and reconnects if possible.
+        Cleans up stale session files for dead kernels.
+        """
+        restored_count = 0
+        cleaned_count = 0
+        
+        for session_file in self.persistence_dir.glob("session_*.json"):
+            try:
+                with open(session_file, 'r') as f:
+                    session_data = json.load(f)
+                
+                nb_path = session_data['notebook_path']
+                pid = session_data['pid']
+                connection_file = session_data['connection_file']
+                
+                # Check if kernel process is still alive
+                try:
+                    # Lazy import to avoid startup crashes
+                    import psutil
+                    if psutil.pid_exists(pid) and Path(connection_file).exists():
+                        # Try to reconnect to existing kernel
+                        logger.info(f"Attempting to restore session for {nb_path} (PID: {pid})")
+                        
+                        try:
+                            # Create kernel manager from existing connection file
+                            km = AsyncKernelManager(connection_file=connection_file)
+                            km.load_connection_file()
+                            
+                            # Create client and connect
+                            kc = km.client()
+                            kc.start_channels()
+                            
+                            # Test if kernel is responsive
+                            await asyncio.wait_for(kc.wait_for_ready(timeout=10), timeout=15)
+                            
+                            # Get notebook directory for CWD
+                            notebook_dir = str(Path(nb_path).parent.resolve())
+                            
+                            # Restore session structure
+                            abs_path = str(Path(nb_path).resolve())
+                            session_dict = {
+                                'km': km,
+                                'kc': kc,
+                                'cwd': notebook_dir,
+                                'listener_task': None,
+                                'executions': {},
+                                'queued_executions': {},
+                                'execution_queue': asyncio.Queue(),
+                                'execution_counter': 0,
+                                'stop_on_error': False,
+                                'env_info': session_data.get('env_info', {
+                                    'python_path': 'unknown',
+                                    'env_name': 'unknown',
+                                    'start_time': session_data.get('created_at', 'unknown')
+                                })
+                            }
+                            
+                            # Start background tasks
+                            session_dict['listener_task'] = asyncio.create_task(
+                                self._kernel_listener(abs_path, kc, session_dict['executions'])
+                            )
+                            session_dict['queue_processor_task'] = asyncio.create_task(
+                                self._queue_processor(abs_path, session_dict)
+                            )
+                            
+                            self.sessions[abs_path] = session_dict
+                            restored_count += 1
+                            logger.info(f"Successfully restored session for {nb_path}")
+                            
+                        except Exception as reconnect_error:
+                            logger.warning(f"Failed to reconnect to kernel PID {pid}: {reconnect_error}")
+                            # Clean up the stale session file
+                            session_file.unlink()
+                            cleaned_count += 1
+                    else:
+                        # Kernel is dead or connection file missing, clean up
+                        if not psutil.pid_exists(pid):
+                            logger.info(f"Kernel PID {pid} for {nb_path} is dead, cleaning up")
+                        else:
+                            logger.info(f"Connection file {connection_file} missing, cleaning up session")
+                        session_file.unlink()
+                        cleaned_count += 1
+                except ImportError:
+                    logger.warning("psutil not available, skipping session restoration")
+                    break
+                    
+            except Exception as e:
+                logger.warning(f"Failed to restore session from {session_file}: {e}")
+                # Clean up corrupted session file
+                try:
+                    session_file.unlink()
+                except:
+                    pass
+        
+        if restored_count > 0:
+            logger.info(f"Restored {restored_count} sessions from disk")
+        if cleaned_count > 0:
+            logger.info(f"Cleaned up {cleaned_count} stale session files")
 
     def get_python_path(self, venv_path: Optional[str]) -> str:
         """Cross-platform venv resolver"""
@@ -52,8 +304,24 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None):
+    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None):
+        """
+        Start a Jupyter kernel for a notebook.
+        
+        Args:
+            nb_path: Path to the notebook file
+            venv_path: Optional path to Python environment (venv/conda)
+            docker_image: Optional docker image to run kernel safely inside
+            timeout: Execution timeout in seconds (default: 300)
+        """
         abs_path = str(Path(nb_path).resolve())
+        # Set session timeout
+        execution_timeout = timeout if timeout is not None else self.default_execution_timeout
+
+        # Check for Dill (UX Fix)
+        if not dill:
+            logger.warning("['dill' is missing] State checkpointing/recovery will not work. Install 'dill' in your server environment.")
+
         # Determine the Notebook's directory to set as CWD
         notebook_dir = str(Path(nb_path).parent.resolve())
 
@@ -62,22 +330,97 @@ class SessionManager:
         
         km = AsyncKernelManager()
         
-        # 1. Handle Environment
-        py_exe = sys.executable
-        env_name = "system"
+        if docker_image:
+             # [PHASE 4: Docker Support]
+             # Strategy: Use docker run to launch the kernel
+             # We must mount:
+             # 1. The workspace (so imports work)
+             # 2. The connection file (so we can talk to it)
+             
+             # Locate workspace root (Simple heuristic: look for .git or go up logic)
+             # For now, we mount the notebook directory. 
+             # TODO: More robust root detection
+             mount_source = notebook_dir
+             mount_target = "/workspace"
+             
+             # Construct Docker Command
+             # We use {connection_file} which Jupyter substitutes with the host path
+             # We map Host Path -> Container Path (/kernel.json)
+             # Then tell ipykernel to read /kernel.json
+             
+             cmd = [
+                 'docker', 'run', 
+                 '--rm',                     # Cleanup container on exit
+                 '-i',                       # Interactive (keeps stdin open)
+                 '--network', 'none',        # [SECURITY] Disable networking
+                 '-u', str(os.getuid()),     # Run as current user (avoid root file issues)
+                 '-v', f'{mount_source}:{mount_target}',
+                 '-v', '{connection_file}:/kernel.json',
+                 '-w', mount_target,
+                 docker_image,
+                 'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
+             ]
+             
+             km.kernel_cmd = cmd
+             logger.info(f"Configured Docker kernel: {cmd}")
+             
+             # We explicitly do NOT activate local envs if using Docker
+             # Docker image is the environment
+             kernel_env = {} 
+             
+             # Set metadata for session tracking
+             py_exe = "python" # Inside container
+             env_name = f"docker:{docker_image}"
         
-        if venv_path:
-            py_exe = self.get_python_path(venv_path)
-            env_name = Path(venv_path).name
-            # Better: if venv_path provided, ensure py_exe starts with it.
-            if venv_path and not str(py_exe).lower().startswith(str(Path(venv_path).resolve()).lower()):
-                 return f"Error: Could not find python executable in {venv_path}"
+        else:
+            # 1. Handle Environment (Local)
+            py_exe = sys.executable
+            env_name = "system"
+            kernel_env = os.environ.copy()  # Default: inherit current environment
+            
+            if venv_path:
+                venv_path_obj = Path(venv_path).resolve()
+                is_conda = (venv_path_obj / "conda-meta").exists()
+                
+                py_exe = self.get_python_path(venv_path)
+                env_name = venv_path_obj.name
+                
+                # Validation
+                if not is_conda and not str(py_exe).lower().startswith(str(venv_path_obj).lower()):
+                     return f"Error: Could not find python executable in {venv_path}"
 
-            # Force Jupyter to use our Venv Python
-            km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                if is_conda:
+                    # [ACTIVATION FIX] Use 'conda run' instead of brittle env var manipulation
+                    # This ensures activation scripts (SetVars.bat, activate.d) run correctly.
+                    # We assume 'conda' is in PATH or could be found relative to the environment?
+                    
+                    # Proper Conda Activation
+                    km.kernel_cmd = [
+                        'conda', 'run', 
+                        '-p', str(venv_path_obj), 
+                        '--no-capture-output', 
+                        'python', '-m', 'ipykernel_launcher', 
+                        '-f', '{connection_file}'
+                    ]
+                    logger.info(f"Configured Conda kernel with 'conda run': {km.kernel_cmd}")
+                    # We rely on conda run to set up the environment, but we might pass some system envs
+                    # kernel_env is already os.environ.copy()
+                    
+                else: 
+                    # Standard Venv
+                    # Get fully activated environment variables (standard venv approach)
+                    kernel_env = _get_activated_env_vars(venv_path, py_exe)
+                    
+                    if not kernel_env:
+                         kernel_env = os.environ.copy()
+                         bin_dir = str(Path(py_exe).parent)
+                         kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+
+                    # Force Jupyter to use our Venv Python
+                    km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
         
-        # 2. Start Kernel with Correct CWD
-        await km.start_kernel(cwd=notebook_dir)
+        # 2. Start Kernel with Correct CWD and Environment
+        await km.start_kernel(cwd=notebook_dir, env=kernel_env)
         
         kc = km.client()
         kc.start_channels()
@@ -90,9 +433,98 @@ class SessionManager:
         
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
         # Execute startup setup (fire-and-forget for reliability)
-        startup_code = """
+        startup_code = '''
 %load_ext autoreload
 %autoreload 2
+
+import sys
+import json
+import traceback
+
+# [STDIN BLOCKING] Prevent input() from hanging the kernel
+
+# Override built-in input() to raise error immediately instead of waiting forever
+def _mcp_blocked_input(prompt=''):
+    raise RuntimeError(
+        "input() is disabled in MCP-managed kernels. "
+        "AI agents cannot provide interactive input. "
+        "Use hardcoded values or environment variables instead."
+    )
+
+# Replace builtins
+import builtins
+builtins.input = _mcp_blocked_input
+# Python 2 compatibility (though ipykernel requires Python 3)
+builtins.raw_input = _mcp_blocked_input
+
+
+# [SECURITY] Safe Inspection Helper
+# Pre-compile inspection logic to avoid sending large code blocks
+# Must be consistent with _mcp_inspect in session.py
+INSPECT_HELPER_CODE = """
+def _mcp_inspect(var_name):
+    import builtins
+    import sys
+    
+    # Safe lookup: Check locals then globals
+    # Note: In ipykernel, user variables are in globals()
+    ns = globals()
+    if var_name not in ns:
+        return f"Variable '{var_name}' not found."
+    
+    obj = ns[var_name]
+    
+    try:
+        t_name = type(obj).__name__
+        output = [f"### Type: {t_name}"]
+        
+        # Check for pandas/numpy without importing if not already imported
+        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
+        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
+        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
+        
+        # Safe Primitives
+        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
+             output.append(f"- Value: {str(obj)[:500]}")
+
+        elif is_pd_df:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Columns: {list(obj.columns)}")
+            output.append("\\n#### Head (3 rows):")
+            # to_markdown requires tabulate, fallback to string if fails
+            try:
+                output.append(obj.head(3).to_markdown(index=False))
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_pd_series:
+            output.append(f"- Length: {len(obj)}")
+            try:
+                output.append(obj.head(3).to_markdown())
+            except:
+                output.append(str(obj.head(3)))
+            
+        elif is_numpy:
+            output.append(f"- Shape: {obj.shape}")
+            output.append(f"- Dtype: {obj.dtype}")
+            
+        elif isinstance(obj, (list, tuple, set)):
+             output.append(f"- Length: {len(obj)}")
+             output.append(f"- Sample: {str(list(obj)[:3])}")
+             
+        elif isinstance(obj, dict):
+             output.append(f"- Keys ({len(obj)}): {list(obj.keys())[:5]}")
+             
+        elif hasattr(obj, '__dict__'):
+             output.append(f"- Attributes: {list(obj.__dict__.keys())[:5]}")
+             
+        return "\\n".join(output)
+            
+    except Exception as e:
+        return f"Error inspecting '{var_name}': {str(e)}"
+"""
+
+# [END SECURITY HELPER]
 
 # [PHASE 3.3] Force static rendering for interactive visualization libraries
 # This allows AI agents to "see" plots that would otherwise be JavaScript-based
@@ -104,9 +536,18 @@ try:
 except ImportError:
     pass  # matplotlib not installed, skip
 
+# [PHASE 4: Smart Error Recovery]
+# Inject a custom exception handler to provide context-aware error reports
+        
+    get_ipython().set_custom_exc((Exception,), _mcp_handler)
+
+except Exception as e:
+    pass # Failed to register error handler
+
 # Force Plotly to render as static PNG
 # NOTE: Requires kaleido installed in kernel environment: pip install kaleido
 try:
+
     import plotly
     try:
         import kaleido
@@ -124,7 +565,7 @@ try:
     os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg'
 except ImportError:
     pass  # bokeh not installed, skip
-"""
+'''
         try:
             kc.execute(startup_code, silent=True)
             # Give it a moment to take effect
@@ -149,8 +590,10 @@ except ImportError:
             'executions': {},
             'queued_executions': {},  # Track queued executions before processing
             'execution_queue': asyncio.Queue(),
+            'executed_indices': set(), # Track which cells have been run in this session
             'execution_counter': 0,
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
+            'execution_timeout': execution_timeout,  # Per-session timeout
             'env_info': {  # NEW: Environment provenance tracking
                 'python_path': py_exe,
                 'env_name': env_name,
@@ -170,10 +613,17 @@ except ImportError:
         
         self.sessions[abs_path] = session_data
         
-        # Safely get PID
+        # Safely get PID and connection file
         pid = "unknown"
+        connection_file = "unknown"
         if hasattr(km, 'kernel') and km.kernel:
             pid = getattr(km.kernel, 'pid', 'unknown')
+        if hasattr(km, 'connection_file'):
+            connection_file = km.connection_file
+        
+        # Persist session info to prevent zombie kernels after server restart
+        if pid != "unknown" and connection_file != "unknown":
+            self._persist_session_info(abs_path, connection_file, pid, session_data['env_info'])
                  
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
@@ -206,6 +656,21 @@ except ImportError:
                             exec_data['status'] = 'completed'
                         # Finalize: Save to disk
                         self._finalize_execution(nb_path, exec_data)
+                        
+                        # Track successful execution
+                        session_data = self.sessions.get(nb_path)
+                        if session_data and exec_data.get('cell_index') is not None:
+                             session_data['executed_indices'].add(exec_data['cell_index'])
+                        
+                        # [PRIORITY 2] Emit Completion Notification
+                        try:
+                            await self._send_notification("notebook/status", {
+                                "notebook_path": nb_path,
+                                "exec_id": exec_data.get('id'),
+                                "status": exec_data['status']
+                            })
+                        except Exception as e:
+                            logger.warning(f"Failed to send status notification: {e}")
 
                 elif msg_type == 'clear_output':
                     # [PHASE 3.1] Handle progress bars and dynamic updates (tqdm, etc.)
@@ -238,6 +703,18 @@ except ImportError:
                         # [PHASE 3.1] Update streaming metadata
                         exec_data['output_count'] = len(exec_data['outputs'])
                         exec_data['last_activity'] = asyncio.get_event_loop().time()
+                        
+                        # [PRIORITY 2] Emit MCP Notification (Event-Driven Architecture)
+                        try:
+                            await self._send_notification("notebook/output", {
+                                "notebook_path": nb_path,
+                                "exec_id": exec_data.get('id'),
+                                "type": msg_type,
+                                "content": content
+                            })
+                        except Exception as e:
+                            # Don't crash the listener if notification fails
+                            logger.warning(f"Failed to send MCP notification: {e}")
 
         except asyncio.CancelledError:
             logger.info(f"Listener cancelled for {nb_path}")
@@ -292,7 +769,9 @@ except ImportError:
                     }
                     
                     # Wait for execution to complete with timeout
-                    timeout_remaining = self.execution_timeout
+                    # Use per-session timeout
+                    session_timeout = session_data.get('execution_timeout', self.default_execution_timeout)
+                    timeout_remaining = session_timeout
                     while timeout_remaining > 0:
                         await asyncio.sleep(0.5)
                         timeout_remaining -= 0.5
@@ -323,7 +802,7 @@ except ImportError:
                         logger.warning(f"Execution timeout for cell {cell_index} in {nb_path}")
                         if msg_id in session_data['executions']:
                             session_data['executions'][msg_id]['status'] = 'timeout'
-                            session_data['executions'][msg_id]['error'] = f"Execution exceeded {self.execution_timeout}s timeout"
+                            session_data['executions'][msg_id]['error'] = f"Execution exceeded {session_timeout}s timeout"
                         
                         # If stop_on_error, also stop on timeout
                         if session_data.get('stop_on_error', False):
@@ -379,32 +858,54 @@ except ImportError:
             text_summary = utils.sanitize_outputs(exec_data['outputs'], assets_dir)
             exec_data['text_summary'] = text_summary
             
-            # 2. Build provenance metadata
+            # 2. Get Cell content for content hashing
             abs_path = str(Path(nb_path).resolve())
-            env_info = self.sessions[abs_path]['env_info']
+            execution_hash = None
             
-            provenance = {
-                "execution_timestamp": datetime.datetime.now().isoformat(),
-                "kernel_env_name": env_info['env_name'],
-                "kernel_python_path": env_info['python_path'],
-                "kernel_start_time": env_info['start_time'],
-                "agent_tool": "mcp-jupyter"
-            }
+            try:
+                # Load notebook to get Cell info
+                with open(nb_path, 'r', encoding='utf-8') as f:
+                    nb = nbformat.read(f, as_version=4)
+                
+                # Verify index is valid
+                if 0 <= exec_data['cell_index'] < len(nb.cells):
+                    cell = nb.cells[exec_data['cell_index']]
+                    execution_hash = utils.get_cell_hash(cell.source)
+                else:
+                    logger.warning(f"Cell index {exec_data['cell_index']} out of range")
+                    
+            except Exception as e:
+                logger.warning(f"Could not compute hash: {e}")
             
-            # 3. Write to Notebook File with provenance
+            # 3. Prepare metadata for injection into .ipynb
+            metadata_update = {}
+            if execution_hash:
+                try:
+                    env_info = self.sessions[abs_path].get('env_info', {})
+                    
+                    metadata_update = {
+                        "execution_hash": execution_hash,
+                        "execution_timestamp": datetime.datetime.now().isoformat(),
+                        "kernel_env_name": env_info.get('env_name', 'unknown'),
+                        "agent_run_id": str(uuid.uuid4())
+                    }
+                except Exception as e:
+                    logger.warning(f"Failed to prepare metadata: {e}")
+            
+            # 4. Write to Notebook File WITH metadata injection
             notebook.save_cell_execution(
                 nb_path, 
                 exec_data['cell_index'], 
                 exec_data['outputs'], 
                 exec_data.get('execution_count'),
-                metadata_update=provenance  # NEW: Inject provenance metadata
+                metadata_update=metadata_update if metadata_update else None
             )
         except Exception as e:
             exec_data['status'] = 'failed_save'
             exec_data['error'] = str(e)
             logger.error(f"Failed to finalize execution: {e}")
 
-    async def execute_cell_async(self, nb_path: str, cell_index: int, code: str) -> Optional[str]:
+    async def execute_cell_async(self, nb_path: str, cell_index: int, code: str, exec_id: Optional[str] = None) -> Optional[str]:
         """Submits execution to the queue and returns an ID immediately."""
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
@@ -412,8 +913,14 @@ except ImportError:
             
         session = self.sessions[abs_path]
         
-        # Generate execution ID
-        exec_id = str(uuid.uuid4())
+        # HEAL CHECK: If this is an inspection or system tool, ensure helper exists
+        # If the kernel restarted, we might not know, so we ensure it's available.
+        if "_mcp_inspect" in code and "def _mcp_inspect" not in code:
+             code = INSPECT_HELPER_CODE + "\n" + code
+        
+        # Generate execution ID if not provided
+        if not exec_id:
+            exec_id = str(uuid.uuid4())
         
         # Track as queued immediately (fixes race condition with status checks)
         session['queued_executions'][exec_id] = {
@@ -505,6 +1012,84 @@ print(_get_var_info())
 """
         return await self._run_and_wait_internal(nb_path, code)
 
+    async def save_checkpoint(self, notebook_path: str, checkpoint_name: str):
+        """Snapshot the kernel heap (variables) to disk."""
+        session = self.sessions.get(str(Path(notebook_path).resolve()))
+        if not session: return "No session"
+        
+        # Execute dill dump inside the kernel
+        # We save to a hidden .mcp folder next to the notebook
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
+        # Ensure directory exists on server side just in case, though kernel writes it
+        ckpt_path.parent.mkdir(exist_ok=True, parents=True)
+        
+        # Path for the kernel (cross-platform safe)
+        path_str = str(ckpt_path).replace("\\", "\\\\")
+        
+        code = f"""
+import dill
+import os
+import pickle
+
+try:
+    os.makedirs(os.path.dirname(r'{path_str}'), exist_ok=True)
+    
+    safe_state = {{}}
+    excluded_vars = []
+    ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
+
+    # Iterate over user variables only (skip system dunders)
+    user_vars = {{k:v for k,v in globals().items() if not k.startswith('_') and k not in ignored}}
+
+    for k, v in user_vars.items():
+        try:
+            # Test pickleability in memory first
+            dill.dumps(v)
+            safe_state[k] = v
+        except:
+            excluded_vars.append(k)
+
+    # Save only the safe state
+    with open(r'{path_str}', 'wb') as f:
+        dill.dump(safe_state, f)
+
+    msg = f"Checkpoint saved. Preserved {{len(safe_state)}} variables."
+    if excluded_vars:
+        msg += f" Skipped {{len(excluded_vars)}} complex objects: {{', '.join(excluded_vars)}}"
+    print(msg)
+
+except ImportError:
+    print("Error: 'dill' is not installed in the kernel environment. Please run '!pip install dill' first.")
+except Exception as e:
+    print(f"Checkpoint error: {{e}}")
+"""
+        # Use -1 index for internal commands
+        await self.execute_cell_async(notebook_path, -1, code)
+        return f"State saved to {ckpt_path}"
+
+    async def load_checkpoint(self, notebook_path: str, checkpoint_name: str):
+        """Restore the kernel heap from disk."""
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
+        path_str = str(ckpt_path).replace("\\", "\\\\")
+        
+        code = f"""
+try:
+    import dill
+    if not os.path.exists(r'{path_str}'):
+        print(f"Checkpoint not found: {path_str}")
+    else:
+        with open(r'{path_str}', 'rb') as f:
+            # We used plain dump, so we load a dict
+            state_dict = dill.load(f)
+            # Update globals with the loaded state
+            globals().update(state_dict)
+        print(f"State restored ({{len(state_dict)}} variables)")
+except Exception as e:
+    print(f"Restore error: {{e}}")
+"""
+        await self.execute_cell_async(notebook_path, -1, code)
+        return "State restored."
+
     async def get_variable_info(self, nb_path: str, var_name: str):
         """
         Surgical inspection of a specific variable in the kernel.
@@ -541,7 +1126,7 @@ def _inspect_var():
     else:
         result['preview'] = str(value)[:200]
     
-    return json.dumps(result, indent=2)
+    return json.dumps(result, indent=2, default=str)
 
 print(_inspect_var())
 """
@@ -612,12 +1197,14 @@ print(_inspect_var())
         return "Kernel interrupted."
 
     async def shutdown_all(self):
-        """Kills all running kernels."""
+        """Kills all running kernels and cleans up persisted session files."""
         for abs_path, session in list(self.sessions.items()):
             if session.get('listener_task'):
                 session['listener_task'].cancel()
             try:
                 await session['km'].shutdown_kernel(now=True)
+                # Remove persisted session info
+                self._remove_persisted_session(abs_path)
             except Exception as e:
                 logging.error(f"Error shutting down kernel for {abs_path}: {e}")
         self.sessions.clear()

@@ -4,6 +4,15 @@ import re
 from pathlib import Path
 from typing import List, Any, Optional
 
+def get_cell_hash(cell_source: str) -> str:
+    """
+    Calculate SHA-256 hash of cell content.
+    Normalizes line endings to prevent Windows/Unix mismatch.
+    """
+    # Normalize line endings to prevent Windows/Unix mismatch
+    normalized = cell_source.replace('\r\n', '\n').strip()
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
 def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
     """
     Convert small HTML tables to markdown for LLM consumption.
@@ -49,29 +58,25 @@ def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
 
 def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
     """
-    Processes raw notebook outputs for LLM consumption.
+    Processes raw notebook outputs for LLM consumption AND Human visualization.
     
-    Key Features:
-    - Saves binary assets (PDF, SVG, PNG, JPEG) to disk to prevent context bloat
-    - Priority handling: PDF > SVG > PNG > JPEG (saves highest priority only per output)
-    - Hash-based deduplication: asset_{hash}.{ext} prevents duplicates
-    - ANSI escape stripping: Removes color codes for LLM readability
-    - HTML table detection: Replaces with indicator to use inspect_variable
-    - Truncation: Text > 1500 chars gets truncated with indicator
-    
-    Args:
-        outputs: Raw NBFormat outputs from cell execution
-        asset_dir: Directory to save extracted binary assets
-        
     Returns:
-        Clean text summary suitable for LLM context
-        
-    Side Effects:
-        Creates asset_dir if doesn't exist
-        Writes binary files (PNG, JPEG, SVG, PDF) to disk
+        JSON String containing:
+        - llm_summary: Text/Markdown optimized for the Agent (truncated, images as paths)
+        - raw_outputs: List of dicts with original data/metadata for VS Code to render (Plotly, etc.)
     """
+    import json
     llm_summary = []
+    raw_outputs = []
+    
     Path(asset_dir).mkdir(parents=True, exist_ok=True)
+    
+    # Auto-gitignore assets/ to prevent pollution (Git-awareness)
+    from src.asset_manager import ensure_assets_gitignored
+    try:
+        ensure_assets_gitignored(asset_dir)
+    except Exception:
+        pass
     
     # Asset priority: PDF > SVG > PNG > JPEG (higher number = higher priority)
     ASSET_PRIORITY = {
@@ -82,9 +87,41 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
     }
     
     for out in outputs:
-        # Access data safely whether it's an object or dict
-        output_type = out.get('output_type') if isinstance(out, dict) else getattr(out, 'output_type', '')
-        data = out.get('data', {}) if isinstance(out, dict) else getattr(out, 'data', {})
+        # Normalize to dict
+        if hasattr(out, 'to_dict'):
+            out_dict = out.to_dict()
+        elif isinstance(out, dict):
+            out_dict = out
+        else:
+            # Fallback for objects that behave like dicts but might not be
+            out_dict = out.__dict__ if hasattr(out, '__dict__') else {}
+            
+        output_type = out_dict.get('output_type', '')
+        data = out_dict.get('data', {})
+        metadata = out_dict.get('metadata', {})
+        
+        # --- 1. Build Raw Outputs for VS Code (Rich Visualization) ---
+        # We need to map NBFormat types to what VS Code expects
+        # NotebookOutput in TS expects { output_type, data, metadata, text, ... }
+        clean_raw = {
+            "output_type": output_type,
+            "metadata": metadata
+        }
+        
+        if output_type == 'stream':
+            clean_raw["name"] = out_dict.get('name', 'stdout')
+            clean_raw["text"] = out_dict.get('text', '')
+        elif output_type == 'error':
+            clean_raw["ename"] = out_dict.get('ename', '')
+            clean_raw["evalue"] = out_dict.get('evalue', '')
+            clean_raw["traceback"] = out_dict.get('traceback', [])
+        elif output_type in ['execute_result', 'display_data']:
+            clean_raw["data"] = data
+            clean_raw["execution_count"] = out_dict.get('execution_count')
+            
+        raw_outputs.append(clean_raw)
+        
+        # --- 2. Build LLM Summary (Text Only + Asset Paths) ---
         
         # Handle Binary Assets (Images, PDFs) with Priority
         if output_type in ['display_data', 'execute_result']:
@@ -139,18 +176,9 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             is_bokeh = 'bokeh' in html.lower() or 'bkroot' in html.lower()
             
             if is_plotly or is_bokeh:
-                # Chart detected but not rendered as image (kaleido/selenium missing)
+                # Chart detected
                 chart_type = 'Plotly' if is_plotly else 'Bokeh'
-                hint = f"[{chart_type} chart detected but not rendered as static image. "
-                
-                if is_plotly:
-                    hint += "Install 'kaleido' in the kernel environment to enable PNG export: "
-                    hint += "`pip install kaleido` or `conda install -c conda-forge python-kaleido`]"
-                else:
-                    hint += "Install 'selenium' and 'pillow' in the kernel environment to enable PNG export: "
-                    hint += "`pip install selenium pillow`]"
-                
-                llm_summary.append(hint)
+                llm_summary.append(f"[{chart_type} Chart - Interactive View available in VS Code]")
             elif '<table' in html.lower():
                 # IMPROVEMENT: Show small tables inline, hide large ones
                 # Limits: 10 rows × 10 columns to prevent context bloat
@@ -174,8 +202,8 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
 
         # Handle Stream Text (stdout/stderr)
         if output_type == 'stream':
-            text = out.get('text', '') if isinstance(out, dict) else getattr(out, 'text', '')
-            # Strip ANSI escape codes (color codes from IPython)
+            text = out_dict.get('text', '')
+            # Strip ANSI escape codes
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             text = ansi_escape.sub('', text)
             
@@ -186,9 +214,9 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             
         # Handle Errors
         if output_type == 'error':
-            ename = out.get('ename', '') if isinstance(out, dict) else getattr(out, 'ename', '')
-            evalue = out.get('evalue', '') if isinstance(out, dict) else getattr(out, 'evalue', '')
-            traceback = out.get('traceback', []) if isinstance(out, dict) else getattr(out, 'traceback', [])
+            ename = out_dict.get('ename', '')
+            evalue = out_dict.get('evalue', '')
+            traceback = out_dict.get('traceback', [])
             
             # Strip ANSI from traceback
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
@@ -200,7 +228,9 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
                 error_msg += "\n" + "\n".join(clean_traceback[-10:])  # Last 10 lines of traceback
             llm_summary.append(error_msg)
 
-    if not llm_summary:
-        return ""
-            
-    return "\n".join(llm_summary)
+    # Return structured data for both LLM (summary) and VS Code (rich output)
+    return json.dumps({
+        "llm_summary": "\n".join(llm_summary),
+        "raw_outputs": raw_outputs
+    })
+
