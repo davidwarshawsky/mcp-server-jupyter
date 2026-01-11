@@ -1,14 +1,17 @@
 from mcp.server.fastmcp import FastMCP
 import asyncio
+import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Any
 import nbformat
 import json
 import sys
 import logging
 import datetime
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from src.session import SessionManager
-from src import notebook, utils, environment
+from src import notebook, utils, environment, validation
+from src.utils import ToolResult
 
 # Configure logging to stderr to avoid corrupting JSON-RPC stdout
 logging.basicConfig(
@@ -18,9 +21,89 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# [BROADCASTER] Connection Manager for Multi-User Notification
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: List[WebSocket] = []
+
+    async def connect(self, websocket: WebSocket):
+        # NOTE: We do NOT call accept() here because mcp.server.websocket handles the ASGI handshake.
+        # We just register the connection.
+        self.active_connections.append(websocket)
+        logger.info(f"Client connected. Total: {len(self.active_connections)}")
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+            logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+
+    async def broadcast(self, message: dict):
+        # Immediate send for status changes or errors
+        if message.get('method') != 'notebook/output':
+            await self._send_raw(message)
+            return
+
+        # For outputs, throttle to ~10 messages per second (100ms delay)
+        now = time.time()
+        if now - getattr(self, 'last_broadcast', 0) > 0.1:
+            await self._send_raw(message)
+            self.last_broadcast = now
+        else:
+            # Drop or aggregate (Dropping intermediate high-frequency output is usually fine for UX)
+            pass 
+
+    async def _send_raw(self, message):
+        """Send raw JSON message to all connected clients"""
+        json_str = json.dumps(message)
+        # Iterate over copy to prevent runtime errors during disconnects
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_text(json_str)
+            except Exception as e:
+                logger.error(f"Broadcast error: {e}")
+                self.disconnect(connection)
+
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
+# Inject connection manager
+connection_manager = ConnectionManager()
+session_manager.connection_manager = connection_manager
+
+@mcp.tool()
+def get_server_status():
+    """Check how many humans are connected to this session."""
+    return json.dumps({
+        "active_connections": len(connection_manager.active_connections),
+        "mode": "multi-user" if len(connection_manager.active_connections) > 1 else "solo"
+    })
+
+
+# Persistence for proposals
+PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
+
+def load_proposals():
+    """Load proposals from disk to survive server restarts."""
+    if PROPOSAL_STORE_FILE.exists():
+        try:
+            with open(PROPOSAL_STORE_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load proposals: {e}")
+    return {}
+
+def save_proposals():
+    """Save proposals to disk."""
+    try:
+        PROPOSAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(PROPOSAL_STORE_FILE, 'w') as f:
+            json.dump(PROPOSAL_STORE, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save proposals: {e}")
+
+# Store for agent proposals to support feedback loop
+# Key: proposal_id, Value: dict with status, result, timestamp
+PROPOSAL_STORE = load_proposals()
 
 @mcp.tool()
 async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
@@ -111,7 +194,6 @@ async def detect_sync_needed(notebook_path: str):
         - reason: Description of mismatch
         - changed_cells: List of cell indices that changed
     """
-    logger.info(f"detect_sync_needed called with: {notebook_path}")
     import os
     from pathlib import Path
     
@@ -216,8 +298,12 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
     This avoids writing to disk directly, preventing conflicts with the editor buffer.
     The Agent should use this instead of 'edit_cell'.
     """
+    import uuid
+    proposal_id = str(uuid.uuid4())
+    
     # Construct proposal
     proposal = {
+        "id": proposal_id,
         "action": "edit_cell",
         "notebook_path": notebook_path,
         "index": index,
@@ -231,12 +317,47 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
     
     return json.dumps({
         "status": "proposal_created", 
+        "proposal_id": proposal_id,
         "proposal": proposal,
         "message": "Edit proposed. Client must apply changes.",
         # SIGNAL PROTOCOL
         "_mcp_action": "apply_edit" 
     })
 
+@mcp.tool()
+def notify_edit_result(notebook_path: str, proposal_id: str, status: str, message: Optional[str] = None):
+    """
+    Callback for the client to report the result of a proposed edit.
+    status: 'accepted' | 'rejected' | 'failed'
+    """
+    logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
+    
+    # Store result for agent to retrieve
+    timestamp = str(datetime.datetime.now())
+    if proposal_id:
+        PROPOSAL_STORE[proposal_id] = {
+            "status": status,
+            "message": message,
+            "notebook_path": notebook_path,
+            "timestamp": timestamp
+        }
+        save_proposals()
+    
+    return json.dumps({
+        "status": "ack",
+        "proposal_id": proposal_id,
+        "timestamp": timestamp
+    })
+
+@mcp.tool()
+def get_proposal_status(proposal_id: str):
+    """
+    Check the status of a specific proposal.
+    Returns: 'pending', 'accepted', 'rejected', 'failed', or 'unknown'.
+    """
+    if proposal_id in PROPOSAL_STORE:
+        return json.dumps(PROPOSAL_STORE[proposal_id])
+    return json.dumps({"status": "unknown"})
 
 @mcp.tool()
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):
@@ -269,12 +390,152 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     return notebook.search_notebook(notebook_path, query, regex)
 
 @mcp.tool()
+async def submit_input(notebook_path: str, text: str):
+    """
+    [Interact] Submit text to a pending input() request.
+    Use this when you receive a 'notebook/input_request' notification.
+    """
+    try:
+        await session_manager.submit_input(notebook_path, text)
+        return json.dumps({"status": "sent", "text_length": len(text)})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+@mcp.tool()
 async def get_kernel_info(notebook_path: str):
     """
     Check active variables without printing them.
     Returns: JSON dictionary of active variables, their types, and string representations (truncated).
     """
     return await session_manager.get_kernel_info(notebook_path)
+
+@mcp.tool()
+async def install_package(package_name: str, notebook_path: Optional[str] = None):
+    """
+    [Magic Import] Install a package in the kernel's environment.
+    Use this when an import fails (ModuleNotFoundError).
+    
+    Args:
+        package_name: Name of package (e.g. 'pandas')
+        notebook_path: Optional notebook path to target specific kernel environment
+    """
+    python_path = None
+    env_vars = None
+    
+    if notebook_path:
+        session = session_manager.get_session(notebook_path)
+        if session and 'env_info' in session:
+            python_path = session['env_info'].get('python_path')
+
+    # Derive environment variables
+    env_vars = _derive_env_vars(python_path) if python_path else None
+
+    success, output = environment.install_package(package_name, python_path, env_vars)
+    
+    return ToolResult(
+        success=success,
+        data={"output": output},
+        error_msg=output if not success else None,
+        user_suggestion="IMPORTANT: You MUST restart the kernel to load the new package." if success else "Check package name"
+    ).to_json()
+
+def _derive_env_vars(python_path: str) -> Optional[dict]:
+    """Helper to derive environment variables from a Python executable path."""
+    import os
+    from pathlib import Path
+    
+    try:
+        path_obj = Path(python_path)
+        
+        # Windows Conda check: python.exe is usually in the root of the env
+        if os.name == 'nt' and path_obj.parent.name != 'Scripts':
+            venv_path = str(path_obj.parent)
+        else:
+            # Standard venv or Unix Conda (bin/python)
+            venv_path = str(path_obj.parent.parent)
+            
+        return environment.get_activated_env_vars(venv_path, python_path)
+    except Exception:
+        return None
+
+@mcp.tool()
+async def run_shell_command(command: str, notebook_path: Optional[str] = None):
+    """
+    [System Diagnostic] Run a safe, non-interactive system command.
+    Use this to debug system dependencies (e.g. 'ldd', 'which', 'uname', 'ls -l /usr/lib').
+    Restricted to non-interactive commands.
+    """
+    import shlex
+    import subprocess
+    
+    # 1. Validation: Block dangerous or interactive commands
+    forbidden_starters = ['vim', 'nano', 'tmux', 'top', 'htop', 'less', 'more', 'ssh', 'git push']
+    cmd_parts = shlex.split(command)
+    if not cmd_parts or cmd_parts[0] in forbidden_starters:
+        return ToolResult(success=False, data={}, error_msg="Command forbidden or interactive.").to_json()
+    
+    # DETERMINE ENVIRONMENT
+    # If notebook_path provided, we try to run in that environment context
+    env = None
+    cwd = None
+    
+    if notebook_path:
+        session = session_manager.get_session(notebook_path)
+        if session:
+            cwd = session.get('cwd')
+            
+            # [CRITICAL] Inject the kernel's environment variables
+            # This ensures 'pip list' or 'python --version' matches the kernel
+            if 'env_info' in session:
+                python_path = session['env_info'].get('python_path')
+                env = _derive_env_vars(python_path)
+
+    try:
+        # Run with timeout to prevent hangs
+        # stdin=subprocess.DEVNULL prevents hanging on prompts like 'sudo password:' or 'apt-get [Y/n]'
+        result = subprocess.run(
+            cmd_parts, 
+            capture_output=True, 
+            text=True, 
+            timeout=10,
+            cwd=cwd,
+            env=env if env else os.environ.copy(),
+            stdin=subprocess.DEVNULL
+        )
+        
+        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+        return ToolResult(
+            success=result.returncode == 0,
+            data={"stdout": result.stdout, "stderr": result.stderr},
+            error_msg=None if result.returncode == 0 else f"Command failed with code {result.returncode}",
+            user_suggestion=output
+        ).to_json()
+        
+    except subprocess.TimeoutExpired:
+        return ToolResult(success=False, data={}, error_msg="Command timed out (limit: 10s)").to_json()
+    except Exception as e:
+         return ToolResult(success=False, data={}, error_msg=str(e)).to_json()
+
+@mcp.tool()
+def check_code_syntax(code: str):
+    """
+    [LSP] Check Python code for syntax errors. 
+    Use this BEFORE running code to avoid wasting time on simple typos.
+    
+    Args:
+        code: Python source code
+        
+    Returns:
+        JSON with 'valid': bool, and 'error': str (if any).
+    """
+    is_valid, error_msg = validation.check_code_syntax(code)
+    
+    return ToolResult(
+        success=is_valid,
+        data={"valid": is_valid},
+        error_msg=error_msg,
+        user_suggestion="Fix syntax error and retry" if not is_valid else None
+    ).to_json()
 
 # --- NEW ASYNC TOOLS ---
 
@@ -1299,12 +1560,69 @@ def get_assets_summary(notebook_path: str):
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
 
-if __name__ == "__main__":
+def main():
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"])
+    parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
+    args = parser.parse_args()
+
     try:
         # Restore any persisted sessions from previous server runs
         asyncio.run(session_manager.restore_persisted_sessions())
         
-        # Start the MCP server
-        mcp.run()
+        if args.transport == "websocket":
+            import uvicorn
+            from starlette.applications import Starlette
+            from starlette.routing import WebSocketRoute
+            from mcp.server.websocket import websocket_server
+            
+            async def mcp_websocket_endpoint(websocket: WebSocket):
+                # A. Register connection
+                await connection_manager.connect(websocket)
+                
+                try:
+                    # B. Bridge FastMCP with this socket
+                    # We use the websocket_server context manager to handle streams
+                    # This allows FastMCP to read/write, while ConnectionManager can also broadcast
+                    async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
+                        await mcp._mcp_server.run(
+                            read_stream,
+                            write_stream,
+                            mcp._mcp_server.create_initialization_options(),
+                        )
+                except WebSocketDisconnect:
+                    logger.info("WebSocket disconnected")
+                    connection_manager.disconnect(websocket)
+                except Exception as e:
+                    logger.error(f"Connection error: {e}")
+                    connection_manager.disconnect(websocket)
+
+            app = Starlette(
+                routes=[
+                    WebSocketRoute("/ws", mcp_websocket_endpoint)
+                ]
+            )
+            
+            # Print port to stderr so parent process can parse it if needed
+            print(f"MCP Server listening on ws://{args.host}:{args.port}/ws", file=sys.stderr)
+            
+            host = args.host if args.host != "0.0.0.0" else "localhost"
+            print(f"\n🚀 MCP Server Running.")
+            print(f"To connect VS Code, open the Command Palette and run:")
+            print(f"  MCP Jupyter: Connect to Existing Server")
+            print(f"  Url: ws://{host}:{args.port}/ws\n")
+            
+            # Run uvicorn
+            uvicorn.run(app, host=args.host, port=args.port, log_level="error")
+             
+        else:
+            # Start the MCP server using Standard IO
+            mcp.run()
     finally:
         asyncio.run(session_manager.shutdown_all())
+
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,22 @@
 import base64
 import hashlib
 import re
+import json
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Any, Optional
+
+@dataclass
+class ToolResult:
+    """Standardized result format for all MCP tools."""
+    success: bool
+    data: Any
+    error_msg: Optional[str] = None
+    user_suggestion: Optional[str] = None
+
+    def to_json(self) -> str:
+        """Convert to JSON string."""
+        return json.dumps(asdict(self), indent=2)
 
 def get_cell_hash(cell_source: str) -> str:
     """
@@ -85,6 +99,19 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         'image/png': (2, 'png', True),
         'image/jpeg': (1, 'jpeg', True),
     }
+
+    # [SECRET REDACTION] Regex to catch common API keys
+    # Catches sk-..., AWS, Google keys.
+    SECRET_PATTERNS = [
+        r'sk-[a-zA-Z0-9]{20,}',  # OpenAI looking keys
+        r'AKIA[0-9A-Z]{16}',     # AWS Access Key
+        r'AIza[0-9A-Za-z-_]{35}', # Google Cloud API Key
+    ]
+
+    def _redact_text(text: str) -> str:
+        for pattern in SECRET_PATTERNS:
+            text = re.sub(pattern, '[REDACTED_SECRET]', text)
+        return text
     
     for out in outputs:
         # Normalize to dict
@@ -162,6 +189,8 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         # Handle Text (execute_result)
         if 'text/plain' in data:
             text = data['text/plain']
+            # [SECRET REDACTION]
+            text = _redact_text(text)
             # Truncate long output
             if len(text) > 1500:
                 text = text[:750] + "\n... [TRUNCATED - Use inspect_variable() for full output] ...\n" + text[-500:]
@@ -170,6 +199,8 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         # Handle HTML (often pandas DataFrames)
         if 'text/html' in data:
             html = data['text/html']
+            # [SECRET REDACTION] (Less likely in HTML but good hygiene)
+            html = _redact_text(html)
             
             # Check for Plotly/Bokeh interactive charts
             is_plotly = 'plotly' in html.lower() or 'plotly.js' in html.lower()
@@ -207,6 +238,9 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             text = ansi_escape.sub('', text)
             
+            # [SECRET REDACTION]
+            text = _redact_text(text)
+            
             # Truncate long stream output
             if len(text) > 1500:
                 text = text[:750] + "\n... [TRUNCATED] ...\n" + text[-500:]
@@ -222,6 +256,10 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             clean_traceback = [ansi_escape.sub('', line) for line in traceback]
             
+            # [SECRET REDACTION]
+            clean_traceback = [_redact_text(line) for line in clean_traceback]
+
+            
             # Build clean error message
             error_msg = f"Error: {ename}: {evalue}"
             if clean_traceback:
@@ -233,4 +271,26 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         "llm_summary": "\n".join(llm_summary),
         "raw_outputs": raw_outputs
     })
+
+def get_project_root(start_path: Path) -> Path:
+    """
+    Finds the project root by looking for common markers (.git, pyproject.toml).
+    Walks up from start_path.
+    """
+    current = start_path.resolve()
+    for _ in range(10): # Limit traversing depth
+        if (current / ".git").exists() or \
+           (current / "pyproject.toml").exists() or \
+           (current / "requirements.txt").exists() or \
+           (current / ".devcontainer").exists() or \
+           (current / ".env").exists():
+            return current
+        
+        parent = current.parent
+        if parent == current: # Reached filesystem root
+            break
+        current = parent
+    
+    return start_path # Fallback to start path if no root marker found
+
 

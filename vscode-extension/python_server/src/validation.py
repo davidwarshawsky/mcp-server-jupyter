@@ -51,6 +51,26 @@ def validate_notebook_path(notebook_path: str, must_exist: bool = False) -> Path
     
     return path
 
+def check_code_syntax(code: str) -> Tuple[bool, Optional[str]]:
+    """
+    Check Python code for syntax errors using the AST parser.
+    
+    Args:
+        code: Python source code string
+        
+    Returns:
+        Tuple (is_valid, error_message)
+    """
+    import ast
+    try:
+        ast.parse(code)
+        return True, None
+    except SyntaxError as e:
+        return False, f"SyntaxError at line {e.lineno}: {e.msg}\n>>> {e.text.strip() if e.text else ''}"
+    except Exception as e:
+        return False, f"Error parsing code: {str(e)}"
+
+
 
 def validate_cell_index(index: int, total_cells: int, allow_negative: bool = True) -> int:
     """

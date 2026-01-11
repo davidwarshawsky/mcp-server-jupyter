@@ -4,7 +4,6 @@ src/
 test/
 out/test/
 scripts/
-node_modules/
 *.vsix
 .gitignore
 .eslintrc.json

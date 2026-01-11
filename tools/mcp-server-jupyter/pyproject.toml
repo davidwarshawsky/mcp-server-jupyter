@@ -17,6 +17,9 @@ GitPython = "^3.1.0"
 uvicorn = "^0.40.0"
 starlette = "^0.51.0"
 
+[tool.poetry.scripts]
+mcp-jupyter = "src.main:main"
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 pytest-asyncio = "^0.23.0"

@@ -1560,7 +1560,7 @@ def get_assets_summary(notebook_path: str):
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
 
-if __name__ == "__main__":
+def main():
     import argparse
     
     parser = argparse.ArgumentParser()
@@ -1623,3 +1623,6 @@ if __name__ == "__main__":
             mcp.run()
     finally:
         asyncio.run(session_manager.shutdown_all())
+
+if __name__ == "__main__":
+    main()

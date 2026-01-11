@@ -166,7 +166,7 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 ### Handoff Protocol (2 tools) ⭐ NEW
 - `detect_sync_needed()` - Check if kernel state is out of sync with disk
 - `sync_state_from_disk()` - Re-execute cells to rebuild kernel state after human edits
-> **Use Case**: When building a VS Code extension or UI on top of this server, these tools solve the "Split Brain" problem where the agent's kernel state diverges from disk after human intervention. See [HANDOFF_PROTOCOL.md](./HANDOFF_PROTOCOL.md) for full details.
+> **Use Case**: When building a VS Code extension or UI on top of this server, these tools solve the "Split Brain" problem where the agent's kernel state diverges from disk after human intervention. See [Handoff Protocol](#-handoff-protocol) below for details.
 
 ### Notebook Management (1 tool)
 - `create_notebook()` - Create new notebooks with metadata
@@ -194,6 +194,134 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 - `list_variables()` - List all variables in kernel
 - `get_variable_info()` - Get structured variable data
 - `inspect_variable()` - Get human-readable summary
+
+---
+
+## 🤝 Handoff Protocol
+
+**Agent ↔ Human Workflow**
+
+### Problem: The "Split Brain" Scenario
+
+When building a VS Code extension (or any UI) on top of `mcp-server-jupyter`, you face a **fundamental architectural challenge**:
+
+- **Agent Mode**: The MCP server's kernel has variables in RAM (`df = load_data()`)
+- **Human Mode**: The user edits the notebook in VS Code with their own kernel
+- **Switch Back to Agent**: The agent's kernel is OUT OF SYNC with disk changes
+
+**Result**: `KeyError`, `NameError`, or stale variable state when agent resumes.
+
+### Solution: The "Handoff Protocol"
+
+Instead of trying to share kernel state (which causes race conditions), we implement a **clear handoff procedure**:
+
+1. **Disk is Source of Truth** (not RAM)
+2. **Agent is responsible for syncing** when resuming work
+3. **Two new MCP tools** enforce this protocol
+
+### New MCP Tools
+
+#### 1. `detect_sync_needed(notebook_path: str)`
+
+**Purpose**: Check if kernel state is out of sync with disk.
+
+**Returns**:
+```json
+{
+  "sync_needed": true,
+  "reason": "Found 3 cells without agent metadata (likely human-added)",
+  "human_cells": [5, 6, 7],
+  "recommendation": "sync_state_from_disk",
+  "suggested_strategy": "smart"
+}
+```
+
+**When to Use**:
+- Agent starts a new session
+- Agent resumes work after human intervention
+- Before executing code that depends on variables
+
+#### 2. `sync_state_from_disk(notebook_path: str, strategy: str)`
+
+**Purpose**: Re-execute cells from disk to rebuild kernel RAM state.
+
+**Strategies**:
+| Strategy | Behavior | Use When |
+|----------|----------|----------|
+| `"incremental"` | **(Recommended)** Finds the first "dirty" cell (content changed vs execution history) and re-runs from there. | Default. Maximizes performance while ensuring correctness. |
+| `"full"` | Re-executes ALL code cells | Fallback if incremental fails or state is corrupted. |
+
+### Agent Workflow (System Prompt Integration)
+
+Add this to your agent's system prompt:
+
+```markdown
+## Handoff Protocol: Resuming Work After Human Edits
+
+When you start a new session or resume work on a notebook:
+
+1. **Always check sync status first**:
+   ```python
+   status = detect_sync_needed("analysis.ipynb")
+   ```
+
+2. **If sync_needed = true, run sync before proceeding**:
+   ```python
+   if status['sync_needed']:
+       result = sync_state_from_disk("analysis.ipynb", strategy="smart")
+       print(f"Synced {result['cells_synced']} cells to rebuild state")
+   ```
+
+3. **Now safe to continue work**:
+   ```python
+   append_cell("analysis.ipynb", "# Agent's new analysis code")
+   ```
+
+**Why This Matters**:
+If you skip step 2, you'll get errors like:
+- `KeyError: 'new_col'` (human added a column you never executed)
+- `NameError: name 'df_clean' is not defined` (human renamed a variable)
+```
+
+### VS Code Extension Integration
+
+**"Traffic Light" UI Pattern**
+
+```typescript
+// extension.ts
+
+let agentMode = false; // false = Human Mode, true = Agent Mode
+
+vscode.commands.registerCommand('jupyter.startAgentMode', async () => {
+    // 1. Lock the editor
+    const editor = vscode.window.activeTextEditor;
+    if (editor) {
+        editor.options = { readOnly: true };
+    }
+    
+    // 2. Check if sync needed
+    const mcpResponse = await mcpClient.call('detect_sync_needed', {
+        notebook_path: currentNotebookPath
+    });
+    
+    if (mcpResponse.sync_needed) {
+        // 3. Show progress notification
+        vscode.window.withProgress({
+            location: vscode.ProgressLocation.Notification,
+            title: "Syncing kernel state with disk...",
+        }, async () => {
+            await mcpClient.call('sync_state_from_disk', {
+                notebook_path: currentNotebookPath,
+                strategy: 'smart'
+            });
+        });
+    }
+    
+    // 4. Agent can now work
+    agentMode = true;
+    vscode.window.showInformationMessage('🤖 Agent Mode Active');
+});
+```
 
 ---
 
@@ -366,7 +494,7 @@ black --check src/ tests/  # Check only, no changes
   - `detect_sync_needed()` - Detects when kernel state diverges from disk
   - `sync_state_from_disk()` - Rebuilds kernel state after human edits
   - Solves "Split Brain" problem for agent ↔ human workflows
-  - See [HANDOFF_PROTOCOL.md](./HANDOFF_PROTOCOL.md) for architecture details
+  - See [Handoff Protocol](#-handoff-protocol) above for architecture details
 - ✅ **Phase 3: Agent Observability Features + Production Hardening**
   - Streaming feedback for long-running cells (poll for incremental outputs)
   - Resource monitoring (CPU/RAM usage for auto-restart logic)

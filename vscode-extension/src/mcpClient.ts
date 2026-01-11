@@ -65,14 +65,29 @@ export class McpClient {
 
         this.outputChannel.appendLine(`Starting MCP server (WebSocket mode)...`);
         this.outputChannel.appendLine(`Python: ${pythonPath}`);
-        this.outputChannel.appendLine(`Server: ${serverPath}`);
+        this.outputChannel.appendLine(`Server: ${serverPath ? serverPath : '(Installed Package)'}`);
         this.outputChannel.appendLine(`Port: ${port}`);
         this.outputChannel.appendLine(`Mode: spawn`);
+        
+        // Validation
+        const outputChannel = this.getOutputChannel();
+        const depsOK = await import('./dependencies').then(m => 
+            m.checkPythonDependencies(pythonPath, serverPath, outputChannel)
+        );
+        
+        if (!depsOK) {
+            throw new Error(`Python environment ${pythonPath} missing required packages (mcp, src.main).`);
+        }
 
-        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], {
-          cwd: serverPath,
+        const spawnOptions: any = {
           stdio: ['pipe', 'pipe', 'pipe'],
-        });
+        };
+        
+        if (serverPath) {
+             spawnOptions.cwd = serverPath;
+        }
+
+        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], spawnOptions);
 
         this.process.stdout?.on('data', (data) => {
           // Log stdout but don't parse it as JSON-RPC if using WebSocket
@@ -260,7 +275,7 @@ export class McpClient {
     const result = await this.callTool('get_execution_stream', {
       notebook_path: notebookPath,
       task_id: taskId,
-      from_index: fromIndex,
+      since_output_index: fromIndex,
     });
     return result;
   }
@@ -289,7 +304,14 @@ export class McpClient {
    * List available Python environments
    */
   async listEnvironments(): Promise<PythonEnvironment[]> {
-    const result = await this.callTool('list_environments', {});
+    const result = await this.callTool('list_available_environments', {});
+    
+    // Result might be the array directly (if server returns list) or wrapped
+    if (Array.isArray(result)) {
+      return result;
+    }
+    
+    // Legacy/Wrapper fallback
     return result.environments || [];
   }
 
@@ -668,7 +690,8 @@ export class McpClient {
   }
 
   /**
-   * Find MCP server path (exposed for dependency checking)
+   * Find MCP server path.
+   * Returns empty string '' if no local source found (implies installed package).
    */
   findServerPath(): string {
     const config = vscode.workspace.getConfiguration('mcp-jupyter');
@@ -693,11 +716,9 @@ export class McpClient {
       return devPath;
     }
     
-    // If neither exists, throw helpful error
-    throw new Error(
-      'MCP server not found. Please configure "mcp-jupyter.serverPath" in settings, ' +
-      'or ensure the Python server is installed.'
-    );
+    // Fallback: Return empty string.
+    // This tells start() to assume the package is installed in the python environment.
+    return ''; 
   }
 
   /**

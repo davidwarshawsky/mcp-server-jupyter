@@ -219,8 +219,10 @@ def create_notebook(
     # Create notebook with proper metadata
     nb = nbformat.v4.new_notebook()
 
-    # Create one empty code cell by default to mimic Jupyter functionality/prevent index errors
-    nb.cells.append(nbformat.v4.new_code_cell(source=""))
+    # Create one empty code cell by default ONLY IF no initial cells provided
+    # This mimics Jupyter functionality/prevents index errors, but respects initial_cells if given
+    if not initial_cells:
+        nb.cells.append(nbformat.v4.new_code_cell(source=""))
     
     # Set kernelspec metadata
     nb.metadata['kernelspec'] = {
