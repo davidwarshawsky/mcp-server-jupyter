@@ -1364,11 +1364,46 @@ def get_assets_summary(notebook_path: str):
     return json.dumps(result, indent=2)
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"])
+    parser.add_argument("--port", type=int, default=3000)
+    args = parser.parse_args()
+
     try:
         # Restore any persisted sessions from previous server runs
         asyncio.run(session_manager.restore_persisted_sessions())
         
-        # Start the MCP server
-        mcp.run()
+        if args.transport == "websocket":
+            import uvicorn
+            from starlette.applications import Starlette
+            from starlette.routing import WebSocketRoute
+            from starlette.websockets import WebSocket
+            from mcp.server.websocket import websocket_server
+            
+            async def mcp_websocket_endpoint(websocket: WebSocket):
+                async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
+                    await mcp._mcp_server.run(
+                        read_stream,
+                        write_stream,
+                        mcp._mcp_server.create_initialization_options(),
+                    )
+
+            app = Starlette(
+                routes=[
+                    WebSocketRoute("/ws", mcp_websocket_endpoint)
+                ]
+            )
+            
+            # Print port to stderr so parent process can parse it if needed
+            print(f"MCP Server listening on ws://127.0.0.1:{args.port}/ws", file=sys.stderr)
+            
+            # Run uvicorn
+            uvicorn.run(app, host="127.0.0.1", port=args.port, log_level="error")
+             
+        else:
+            # Start the MCP server using Standard IO
+            mcp.run()
     finally:
         asyncio.run(session_manager.shutdown_all())

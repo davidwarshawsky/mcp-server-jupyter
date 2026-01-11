@@ -2,11 +2,14 @@ import { ChildProcess, spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as net from 'net';
 import * as vscode from 'vscode';
+import WebSocket from 'ws';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 
 export class McpClient {
   private process?: ChildProcess;
+  private ws?: WebSocket;
   private requestId = 0;
   private pendingRequests = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   private outputChannel: vscode.OutputChannel;
@@ -41,22 +44,25 @@ export class McpClient {
     try {
       const pythonPath = await this.findPythonExecutable();
       const serverPath = this.findServerPath();
+      const port = await this.getFreePort();
 
-      this.outputChannel.appendLine(`Starting MCP server...`);
+      this.outputChannel.appendLine(`Starting MCP server (WebSocket mode)...`);
       this.outputChannel.appendLine(`Python: ${pythonPath}`);
       this.outputChannel.appendLine(`Server: ${serverPath}`);
+      this.outputChannel.appendLine(`Port: ${port}`);
 
-      this.process = spawn(pythonPath, ['-m', 'src.main'], {
+      this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], {
         cwd: serverPath,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
 
       this.process.stdout?.on('data', (data) => {
-        this.handleStdout(data);
+        // Log stdout but don't parse it as JSON-RPC if using WebSocket
+        this.outputChannel.append(`[stdout] ${data.toString()}`);
       });
 
       this.process.stderr?.on('data', (data) => {
-        this.outputChannel.appendLine(`[stderr] ${data.toString()}`);
+        this.outputChannel.append(`[stderr] ${data.toString()}`);
       });
 
       this.process.on('exit', (code, signal) => {
@@ -68,6 +74,9 @@ export class McpClient {
         this.outputChannel.appendLine(`MCP server error: ${error.message}`);
         this.rejectAllPending(new Error(`Server process error: ${error.message}`));
       });
+
+      // Connect WebSocket with retry
+      await this.connectWebSocket(`ws://127.0.0.1:${port}/ws`);
 
       // Initialize MCP Protocol
       try {
@@ -92,12 +101,74 @@ export class McpClient {
     }
   }
 
+  private async getFreePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const server = net.createServer();
+      server.unref();
+      server.on('error', reject);
+      server.listen(0, () => {
+        const port = (server.address() as net.AddressInfo).port;
+        server.close(() => {
+          resolve(port);
+        });
+      });
+    });
+  }
+
+  private async connectWebSocket(url: string, retries = 20, delay = 500): Promise<void> {
+    for (let i = 0; i < retries; i++) {
+        try {
+            await new Promise<void>((resolve, reject) => {
+                this.ws = new WebSocket(url);
+                
+                this.ws.on('open', () => {
+                    this.outputChannel.appendLine('WebSocket connected');
+                    resolve();
+                });
+
+                this.ws.on('error', (err) => {
+                    // Only reject if we haven't opened yet
+                    if (this.ws?.readyState !== WebSocket.OPEN) {
+                         reject(err);
+                    } else {
+                         this.outputChannel.appendLine(`WebSocket error: ${err.message}`);
+                    }
+                });
+
+                this.ws.on('message', (data) => {
+                    try {
+                        const response = JSON.parse(data.toString());
+                        this.handleResponse(response);
+                    } catch (e) {
+                        this.outputChannel.appendLine(`Failed to parse WebSocket message: ${e}`);
+                    }
+                });
+
+                this.ws.on('close', (code, reason) => {
+                     this.outputChannel.appendLine(`WebSocket closed: ${code} ${reason}`);
+                     this.ws = undefined;
+                });
+            });
+            return; // Connected successfully
+        } catch (e) {
+            this.ws = undefined; // Cleanup failed socket
+            if (i === retries - 1) throw e;
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+  }
+
   /**
    * Stop the MCP server process
    */
   async stop(): Promise<void> {
     this.isShuttingDown = true;
     this.autoRestart = false;
+
+    if (this.ws) {
+        this.ws.close();
+        this.ws = undefined;
+    }
 
     if (this.process) {
       this.process.kill();
@@ -218,8 +289,8 @@ export class McpClient {
    * Send a JSON-RPC request to the MCP server
    */
   private async sendRequest(method: string, params: any): Promise<any> {
-    if (!this.process) {
-      throw new Error('MCP server not started');
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('MCP server not connected via WebSocket');
     }
 
     const id = ++this.requestId;
@@ -234,8 +305,8 @@ export class McpClient {
       this.pendingRequests.set(id, { resolve, reject });
     });
 
-    const requestJson = JSON.stringify(request) + '\n';
-    this.process.stdin?.write(requestJson);
+    const requestJson = JSON.stringify(request);
+    this.ws.send(requestJson);
 
     return promise;
   }
@@ -244,13 +315,13 @@ export class McpClient {
    * Send a JSON-RPC notification to the MCP server
    */
   private sendNotification(method: string, params: any): void {
-      if (!this.process) return;
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
       const notification = {
           jsonrpc: '2.0',
           method,
           params
       };
-      this.process.stdin?.write(JSON.stringify(notification) + '\n');
+      this.ws.send(JSON.stringify(notification));
   }
 
   /**
@@ -309,30 +380,6 @@ export class McpClient {
         // If result is directly returned (legacy?)
         return result; 
     });
-  }
-
-  /**
-   * Handle stdout data from MCP server
-   */
-  private handleStdout(data: Buffer): void {
-    this.buffer += data.toString();
-
-    // Process complete JSON-RPC messages (line-delimited)
-    let newlineIndex: number;
-    while ((newlineIndex = this.buffer.indexOf('\n')) !== -1) {
-      const line = this.buffer.slice(0, newlineIndex).trim();
-      this.buffer = this.buffer.slice(newlineIndex + 1);
-
-      if (line) {
-        try {
-          const response: McpResponse = JSON.parse(line);
-          this.handleResponse(response);
-        } catch (error) {
-          this.outputChannel.appendLine(`Failed to parse JSON: ${line}`);
-          this.outputChannel.appendLine(`Error: ${error}`);
-        }
-      }
-    }
   }
 
   /**

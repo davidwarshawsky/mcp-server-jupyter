@@ -14,6 +14,8 @@ nbformat = "^5.0.0"
 ipykernel = "^6.0.0"
 psutil = "^5.9.0"
 GitPython = "^3.1.0"
+uvicorn = "^0.40.0"
+starlette = "^0.51.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
@@ -23,6 +25,7 @@ pytest-cov = "^4.1.0"
 pytest-timeout = "^2.2.0"
 hypothesis = "^6.92.0"
 black = "^24.0.0"
+websockets = "^16.0"
 
 [build-system]
 requires = ["poetry-core"]
