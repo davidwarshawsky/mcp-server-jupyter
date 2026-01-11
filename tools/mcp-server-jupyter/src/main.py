@@ -1,12 +1,13 @@
 from mcp.server.fastmcp import FastMCP
 import asyncio
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Any
 import nbformat
 import json
 import sys
 import logging
 import datetime
+from starlette.websockets import WebSocket, WebSocketDisconnect
 from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
@@ -22,14 +23,14 @@ logger = logging.getLogger(__name__)
 # [BROADCASTER] Connection Manager for Multi-User Notification
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: List[Any] = []
+        self.active_connections: List[WebSocket] = []
 
-    async def connect(self, websocket: Any):
+    async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
         logger.info(f"Client connected. Total: {len(self.active_connections)}")
 
-    def disconnect(self, websocket: Any):
+    def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
@@ -1550,7 +1551,6 @@ if __name__ == "__main__":
             import uvicorn
             from starlette.applications import Starlette
             from starlette.routing import WebSocketRoute
-            from starlette.websockets import WebSocket, WebSocketDisconnect
             from mcp.server.websocket import websocket_server
             
             async def mcp_websocket_endpoint(websocket: WebSocket):
