@@ -85,70 +85,10 @@ def _mcp_inspect(var_name):
         return f"Error inspecting '{var_name}': {str(e)}"
 """
 
-def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[str, str]]:
-    # UPDATED: Using safer "conda run" approach instead of manual PATH hacking
-    """
-    Get fully activated environment variables for conda/venv environments.
-    
-    Critical for conda environments where packages like PyTorch/TensorFlow need
-    LD_LIBRARY_PATH, CUDA_HOME, and other env vars set by activation scripts.
-    
-    Args:
-        venv_path: Path to the environment directory
-        python_exe: Python executable within that environment
-    
-    Returns:
-        Dict of environment variables after activation, or None if not conda
-    """
-    venv_path_obj = Path(venv_path).resolve()
-    
-    # Detect if this is a conda environment
-    is_conda = (venv_path_obj / "conda-meta").exists()
-    
-    if not is_conda:
-        # For regular venv, just updating Python path is usually sufficient
-        # Return current environment with updated PATH
-        env = os.environ.copy()
-        bin_dir = str(Path(python_exe).parent)
-        if bin_dir not in env.get('PATH', ''):
-            env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
-        return env
-    
-    # For conda, we implement a safer approach than direct path manipulation.
-    # While path manipulation is faster, it is brittle.
-    # We will try to rely on 'conda run' if possible, but that requires
-    # changing how the kernel is started, which is handled by KernelManager.
-    #
-    # Since we are returning ENV VARS here to be passed to Popen, we do our best
-    # to emulate activation.
-    #
-    # IMPROVED LOGIC: Replicate what 'conda shell.bash activate' does more faithfully
-    # but acknowledge this is still a heuristic.
-    
-    env = os.environ.copy()
-    bin_dir = str(Path(python_exe).parent)
-    
-    # 1. Essential Conda Vars
-    env['CONDA_PREFIX'] = str(venv_path_obj)
-    env['CONDA_DEFAULT_ENV'] = venv_path_obj.name
-    
-    # 2. Update PATH (Priority to environment bin)
-    # On Windows: env/Scripts; env/Library/bin; env/Library/usr/bin; env/Library/mingw-w64/bin; env
-    # On Unix: env/bin
-    if os.name == 'nt':
-        scripts = venv_path_obj / "Scripts"
-        lib_bin = venv_path_obj / "Library" / "bin"
-        lib_usr_bin = venv_path_obj / "Library" / "usr" / "bin"
-        
-        paths_to_add = [str(p) for p in [scripts, lib_bin, lib_usr_bin, venv_path_obj] if p.exists()]
-        env['PATH'] = os.pathsep.join(paths_to_add) + os.pathsep + env.get('PATH', '')
-    else:
-        # Unix
-        # Note: Some conda envs might have separate library paths, but bin/ usually covers it for execution
-        env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
-        
-    logger.info(f"Resolved conda env: {venv_path}")
-    return env
+# START: Moved to environment.py but kept for backward compatibility if needed
+# Better to import it
+from src.environment import get_activated_env_vars as _get_activated_env_vars
+# END
 
 class SessionManager:
     def __init__(self, default_execution_timeout: int = 300):
@@ -328,7 +268,18 @@ class SessionManager:
                         if not psutil.pid_exists(pid):
                             logger.info(f"Kernel PID {pid} for {nb_path} is dead, cleaning up")
                         else:
-                            logger.info(f"Connection file {connection_file} missing, cleaning up session")
+                            # [GRIM REAPER] If PID exists but we can't connect/verify, kill it to prevent zombies
+                            logger.warning(f"Kernel PID {pid} exists but connection file is missing/invalid. Killing zombie process.")
+                            try:
+                                proc = psutil.Process(pid)
+                                proc.terminate()
+                                # Give it a moment to die gracefully
+                                try:
+                                    proc.wait(timeout=2.0)
+                                except psutil.TimeoutExpired:
+                                    proc.kill()
+                            except Exception as cleanup_error:
+                                logger.warning(f"Failed to kill zombie kernel {pid}: {cleanup_error}")
                         session_file.unlink()
                         cleaned_count += 1
                 except ImportError:
@@ -740,9 +691,13 @@ except ImportError:
     async def _stdin_listener(self, nb_path: str, session_data: Dict):
         """
         Background task to handle input() requests from the kernel.
+        Runs the blocking ZMQ call in a separate threadexecutor to prevent loop blocking.
         """
         kc = session_data['kc']
         logger.info(f"Starting stdin listener for {nb_path}")
+        
+        # Get the running loop to schedule executor jobs
+        loop = asyncio.get_running_loop()
         
         try:
             while True:
@@ -752,8 +707,23 @@ except ImportError:
                     if not kc.stdin_channel.is_alive():
                          await asyncio.sleep(0.5)
                          continue
-                         
-                    msg = await kc.stdin_channel.get_msg(timeout=0.1)
+                    
+                    # [ASYNC SAFETY] Run blocking ZMQ polling in executor
+                    # get_msg can trigger underlying socket polling which might conflict 
+                    # with the main loop if implementation is not pure async
+                    
+                    def _poll_stdin():
+                         if kc.stdin_channel.msg_ready():
+                             return kc.stdin_channel.get_msg(timeout=0)
+                         return None
+
+                    # Run poll in thread
+                    msg = await loop.run_in_executor(None, _poll_stdin)
+                    
+                    if not msg:
+                        await asyncio.sleep(0.1)
+                        continue
+                        
                 except Exception:
                     # Timeout or Empty, just loop
                     await asyncio.sleep(0.1)

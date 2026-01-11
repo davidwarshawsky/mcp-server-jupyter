@@ -456,19 +456,23 @@ def create_venv(path: str, python_executable: str = None) -> Dict[str, Any]:
             'error': str(e)
         }
 
-def install_package(package_name: str, python_path: str = None) -> Tuple[bool, str]:
+def install_package(package_name: str, python_path: str = None, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
     """
     Install a package using pip in the specified environment.
     
     Args:
         package_name: Name of package (e.g. 'pandas' or 'pandas==2.0.0')
         python_path: Path to python executable. Defaults to sys.executable.
+        env_vars: Optional environment variables dictionary (needed for Conda)
         
     Returns:
         (success, output)
     """
     if not python_path:
         python_path = sys.executable
+    
+    # Use provided env vars or current environment
+    run_env = env_vars if env_vars else os.environ.copy()
         
     try:
         # Use simple pip install
@@ -479,7 +483,8 @@ def install_package(package_name: str, python_path: str = None) -> Tuple[bool, s
             cmd,
             capture_output=True,
             text=True,
-            timeout=300
+            timeout=300,
+            env=run_env
         )
         
         if result.returncode == 0:
@@ -489,3 +494,52 @@ def install_package(package_name: str, python_path: str = None) -> Tuple[bool, s
             
     except Exception as e:
         return False, f"Error installing package: {str(e)}"
+
+def get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[str, str]]:
+    # UPDATED: Using safer "conda run" approach instead of manual PATH hacking
+    """
+    Get fully activated environment variables for conda/venv environments.
+    
+    Critical for conda environments where packages like PyTorch/TensorFlow need
+    LD_LIBRARY_PATH, CUDA_HOME, and other env vars set by activation scripts.
+    
+    Args:
+        venv_path: Path to the environment directory
+        python_exe: Python executable within that environment
+    
+    Returns:
+        Dict of environment variables after activation, or None if not conda
+    """
+    venv_path_obj = Path(venv_path).resolve()
+    
+    # Detect if this is a conda environment
+    is_conda = (venv_path_obj / "conda-meta").exists()
+    
+    if not is_conda:
+        # For regular venv, just updating Python path is usually sufficient
+        # Return current environment with updated PATH
+        env = os.environ.copy()
+        bin_dir = str(Path(python_exe).parent)
+        if bin_dir not in env.get('PATH', ''):
+            env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        return env
+    
+    env = os.environ.copy()
+    bin_dir = str(Path(python_exe).parent)
+    
+    # 1. Essential Conda Vars
+    env['CONDA_PREFIX'] = str(venv_path_obj)
+    env['CONDA_DEFAULT_ENV'] = venv_path_obj.name
+    
+    # 2. Update PATH (Priority to environment bin)
+    if os.name == 'nt':
+        scripts = venv_path_obj / "Scripts"
+        lib_bin = venv_path_obj / "Library" / "bin"
+        lib_usr_bin = venv_path_obj / "Library" / "usr" / "bin"
+        
+        paths_to_add = [str(p) for p in [scripts, lib_bin, lib_usr_bin, venv_path_obj] if p.exists()]
+        env['PATH'] = os.pathsep.join(paths_to_add) + os.pathsep + env.get('PATH', '')
+    else:
+        env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
+        
+    return env

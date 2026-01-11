@@ -364,18 +364,40 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
         notebook_path: Optional notebook path to target specific kernel environment
     """
     python_path = None
+    env_vars = None
+    
     if notebook_path:
         session = session_manager.get_session(notebook_path)
         if session and 'env_info' in session:
             python_path = session['env_info'].get('python_path')
+            # Extract basic env usage info, but we need the full activated variables
+            # We can re-derive them if we have the venv path
+            # Ideally session.py stores the full `env` passed to Popen in session['env']?
+            # session['env_info'] only has metadata.
+            # Let's verify what start_kernel does.
             
-    success, output = environment.install_package(package_name, python_path)
+            # The session manager determines env vars during start_kernel.
+            # We should probably expose a method in SessionManager to get the environment
+            pass
+
+    # If we are in a session, we should try to get the environment variables that the kernel uses.
+    # Currently session_manager doesn't expose the Popen 'env'.
+    # But we can reconstruct it using environment.get_activated_env_vars if we know the venv path/python path.
+    
+    # Let's try to find venv path relative to python path
+    if python_path:
+         from pathlib import Path
+         venv_path = str(Path(python_path).parent.parent) 
+         # This is a heuristic. Ideally SessionManager passed this.
+         env_vars = environment.get_activated_env_vars(venv_path, python_path)
+
+    success, output = environment.install_package(package_name, python_path, env_vars)
     
     return ToolResult(
         success=success,
         data={"output": output},
         error_msg=output if not success else None,
-        user_suggestion="Restart kernel to load new package" if success else "Check package name"
+        user_suggestion="IMPORTANT: You MUST restart the kernel to load the new package." if success else "Check package name"
     ).to_json()
 
 @mcp.tool()
