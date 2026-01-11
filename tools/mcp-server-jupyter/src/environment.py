@@ -455,3 +455,37 @@ def create_venv(path: str, python_executable: str = None) -> Dict[str, Any]:
             'python_path': None,
             'error': str(e)
         }
+
+def install_package(package_name: str, python_path: str = None) -> Tuple[bool, str]:
+    """
+    Install a package using pip in the specified environment.
+    
+    Args:
+        package_name: Name of package (e.g. 'pandas' or 'pandas==2.0.0')
+        python_path: Path to python executable. Defaults to sys.executable.
+        
+    Returns:
+        (success, output)
+    """
+    if not python_path:
+        python_path = sys.executable
+        
+    try:
+        # Use simple pip install
+        # Note: In production, consider --no-input or --quiet
+        cmd = [python_path, "-m", "pip", "install", package_name]
+        
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300
+        )
+        
+        if result.returncode == 0:
+            return True, f"Successfully installed {package_name}\n{result.stdout}"
+        else:
+            return False, f"Installation failed:\n{result.stderr}"
+            
+    except Exception as e:
+        return False, f"Error installing package: {str(e)}"

@@ -8,7 +8,8 @@ import sys
 import logging
 import datetime
 from src.session import SessionManager
-from src import notebook, utils, environment
+from src import notebook, utils, environment, validation
+from src.utils import ToolResult
 
 # Configure logging to stderr to avoid corrupting JSON-RPC stdout
 logging.basicConfig(
@@ -333,12 +334,70 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     return notebook.search_notebook(notebook_path, query, regex)
 
 @mcp.tool()
+async def submit_input(notebook_path: str, text: str):
+    """
+    [Interact] Submit text to a pending input() request.
+    Use this when you receive a 'notebook/input_request' notification.
+    """
+    try:
+        await session_manager.submit_input(notebook_path, text)
+        return json.dumps({"status": "sent", "text_length": len(text)})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+
+@mcp.tool()
 async def get_kernel_info(notebook_path: str):
     """
     Check active variables without printing them.
     Returns: JSON dictionary of active variables, their types, and string representations (truncated).
     """
     return await session_manager.get_kernel_info(notebook_path)
+
+@mcp.tool()
+async def install_package(package_name: str, notebook_path: Optional[str] = None):
+    """
+    [Magic Import] Install a package in the kernel's environment.
+    Use this when an import fails (ModuleNotFoundError).
+    
+    Args:
+        package_name: Name of package (e.g. 'pandas')
+        notebook_path: Optional notebook path to target specific kernel environment
+    """
+    python_path = None
+    if notebook_path:
+        session = session_manager.get_session(notebook_path)
+        if session and 'env_info' in session:
+            python_path = session['env_info'].get('python_path')
+            
+    success, output = environment.install_package(package_name, python_path)
+    
+    return ToolResult(
+        success=success,
+        data={"output": output},
+        error_msg=output if not success else None,
+        user_suggestion="Restart kernel to load new package" if success else "Check package name"
+    ).to_json()
+
+@mcp.tool()
+def check_code_syntax(code: str):
+    """
+    [LSP] Check Python code for syntax errors. 
+    Use this BEFORE running code to avoid wasting time on simple typos.
+    
+    Args:
+        code: Python source code
+        
+    Returns:
+        JSON with 'valid': bool, and 'error': str (if any).
+    """
+    is_valid, error_msg = validation.check_code_syntax(code)
+    
+    return ToolResult(
+        success=is_valid,
+        data={"valid": is_valid},
+        error_msg=error_msg,
+        user_suggestion="Fix syntax error and retry" if not is_valid else None
+    ).to_json()
 
 # --- NEW ASYNC TOOLS ---
 

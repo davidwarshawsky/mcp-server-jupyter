@@ -504,21 +504,8 @@ import sys
 import json
 import traceback
 
-# [STDIN BLOCKING] Prevent input() from hanging the kernel
-
-# Override built-in input() to raise error immediately instead of waiting forever
-def _mcp_blocked_input(prompt=''):
-    raise RuntimeError(
-        "input() is disabled in MCP-managed kernels. "
-        "AI agents cannot provide interactive input. "
-        "Use hardcoded values or environment variables instead."
-    )
-
-# Replace builtins
-import builtins
-builtins.input = _mcp_blocked_input
-# Python 2 compatibility (though ipykernel requires Python 3)
-builtins.raw_input = _mcp_blocked_input
+# [STDIN ENABLED] MCP handles input() requests via stdin channel
+# Interactive input is now supported via MCP notifications
 
 # [SECURITY] Safe Inspection Helper
 {INSPECT_HELPER_CODE}
@@ -628,6 +615,11 @@ except ImportError:
         # Start the background listener
         session_data['listener_task'] = asyncio.create_task(
             self._kernel_listener(abs_path, kc, session_data['executions'])
+        )
+
+        # Start the stdin listener (Handles input() requests)
+        session_data['stdin_listener_task'] = asyncio.create_task(
+            self._stdin_listener(abs_path, session_data)
         )
         
         # Start the execution queue processor
@@ -744,6 +736,56 @@ except ImportError:
             logger.info(f"Listener cancelled for {nb_path}")
         except Exception as e:
             logger.error(f"Listener error for {nb_path}: {e}")
+
+    async def _stdin_listener(self, nb_path: str, session_data: Dict):
+        """
+        Background task to handle input() requests from the kernel.
+        """
+        kc = session_data['kc']
+        logger.info(f"Starting stdin listener for {nb_path}")
+        
+        try:
+            while True:
+                # Wait for stdin message
+                try:
+                    # check if stdin_channel is defined and alive
+                    if not kc.stdin_channel.is_alive():
+                         await asyncio.sleep(0.5)
+                         continue
+                         
+                    msg = await kc.stdin_channel.get_msg(timeout=0.1)
+                except Exception:
+                    # Timeout or Empty, just loop
+                    await asyncio.sleep(0.1)
+                    continue
+
+                msg_type = msg['header']['msg_type']
+                content = msg['content']
+                
+                if msg_type == 'input_request':
+                    logger.info(f"Kernel requested input: {content.get('prompt', '')}")
+                    
+                    # Notify Client to Ask User
+                    await self._send_notification("notebook/input_request", {
+                        "notebook_path": nb_path,
+                        "prompt": content.get('prompt', ''),
+                        "password": content.get('password', False)
+                    })
+                    
+        except asyncio.CancelledError:
+            logger.info(f"Stdin listener cancelled for {nb_path}")
+        except Exception as e:
+            logger.error(f"Stdin listener error for {nb_path}: {e}")
+
+    async def submit_input(self, notebook_path: str, text: str):
+        """Send user input back to the kernel."""
+        session = self.get_session(notebook_path)
+        if not session:
+            raise ValueError("No active session")
+            
+        kc = session['kc']
+        kc.input(text)
+        logger.info(f"Sent input to {notebook_path}")
 
     async def _queue_processor(self, nb_path: str, session_data: Dict):
         """
@@ -1197,6 +1239,14 @@ print(_inspect_var())
             session['listener_task'].cancel()
             try:
                 await session['listener_task']
+            except asyncio.CancelledError:
+                pass
+
+        # Cancel Stdin Listener
+        if session.get('stdin_listener_task'):
+            session['stdin_listener_task'].cancel()
+            try:
+                await session['stdin_listener_task']
             except asyncio.CancelledError:
                 pass
 

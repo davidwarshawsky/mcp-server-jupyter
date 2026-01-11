@@ -1,8 +1,22 @@
 import base64
 import hashlib
 import re
+import json
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Any, Optional
+
+@dataclass
+class ToolResult:
+    """Standardized result format for all MCP tools."""
+    success: bool
+    data: Any
+    error_msg: Optional[str] = None
+    user_suggestion: Optional[str] = None
+
+    def to_json(self) -> str:
+        """Convert to JSON string."""
+        return json.dumps(asdict(self), indent=2)
 
 def get_cell_hash(cell_source: str) -> str:
     """

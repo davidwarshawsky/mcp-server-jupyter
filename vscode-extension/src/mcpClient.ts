@@ -210,8 +210,16 @@ export class McpClient {
     return result.task_id;
   }
 
-  /**
-   * Get execution status for a task
+  /**   * Submit input to a pending kernel request
+   */
+  async submitInput(notebookPath: string, text: string): Promise<void> {
+    await this.callTool('submit_input', {
+      notebook_path: notebookPath,
+      text
+    });
+  }
+
+  /**   * Get execution status for a task
    */
   async getExecutionStatus(notebookPath: string, taskId: string): Promise<ExecutionStatus> {
     return this.callTool('get_execution_status', {

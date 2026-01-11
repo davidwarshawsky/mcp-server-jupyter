@@ -86,6 +86,19 @@ export class McpNotebookController {
             this.completionResolvers.delete(exec_id);
         }
       }
+    } else if (event.method === 'notebook/input_request') {
+      const { notebook_path, prompt, password } = event.params;
+      
+      // Use VS Code input box
+      const value = await vscode.window.showInputBox({
+        prompt: prompt || 'Input requested by kernel',
+        password: password === true,
+        ignoreFocusOut: true,
+        placeHolder: 'Enter value for input() request'
+      });
+      
+      // Submit back to kernel
+      await this.mcpClient.submitInput(notebook_path, value || '');
     }
   }
 
