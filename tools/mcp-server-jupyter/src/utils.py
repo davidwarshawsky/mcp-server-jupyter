@@ -99,6 +99,19 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         'image/png': (2, 'png', True),
         'image/jpeg': (1, 'jpeg', True),
     }
+
+    # [SECRET REDACTION] Regex to catch common API keys
+    # Catches sk-..., AWS, Google keys.
+    SECRET_PATTERNS = [
+        r'sk-[a-zA-Z0-9]{20,}',  # OpenAI looking keys
+        r'AKIA[0-9A-Z]{16}',     # AWS Access Key
+        r'AIza[0-9A-Za-z-_]{35}', # Google Cloud API Key
+    ]
+
+    def _redact_text(text: str) -> str:
+        for pattern in SECRET_PATTERNS:
+            text = re.sub(pattern, '[REDACTED_SECRET]', text)
+        return text
     
     for out in outputs:
         # Normalize to dict
@@ -176,6 +189,8 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         # Handle Text (execute_result)
         if 'text/plain' in data:
             text = data['text/plain']
+            # [SECRET REDACTION]
+            text = _redact_text(text)
             # Truncate long output
             if len(text) > 1500:
                 text = text[:750] + "\n... [TRUNCATED - Use inspect_variable() for full output] ...\n" + text[-500:]
@@ -184,6 +199,8 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         # Handle HTML (often pandas DataFrames)
         if 'text/html' in data:
             html = data['text/html']
+            # [SECRET REDACTION] (Less likely in HTML but good hygiene)
+            html = _redact_text(html)
             
             # Check for Plotly/Bokeh interactive charts
             is_plotly = 'plotly' in html.lower() or 'plotly.js' in html.lower()
@@ -221,6 +238,9 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             text = ansi_escape.sub('', text)
             
+            # [SECRET REDACTION]
+            text = _redact_text(text)
+            
             # Truncate long stream output
             if len(text) > 1500:
                 text = text[:750] + "\n... [TRUNCATED] ...\n" + text[-500:]
@@ -235,6 +255,10 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             # Strip ANSI from traceback
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             clean_traceback = [ansi_escape.sub('', line) for line in traceback]
+            
+            # [SECRET REDACTION]
+            clean_traceback = [_redact_text(line) for line in clean_traceback]
+
             
             # Build clean error message
             error_msg = f"Error: {ename}: {evalue}"

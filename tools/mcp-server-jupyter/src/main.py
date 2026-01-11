@@ -370,20 +370,7 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
         session = session_manager.get_session(notebook_path)
         if session and 'env_info' in session:
             python_path = session['env_info'].get('python_path')
-            # Extract basic env usage info, but we need the full activated variables
-            # We can re-derive them if we have the venv path
-            # Ideally session.py stores the full `env` passed to Popen in session['env']?
-            # session['env_info'] only has metadata.
-            # Let's verify what start_kernel does.
-            
-            # The session manager determines env vars during start_kernel.
-            # We should probably expose a method in SessionManager to get the environment
-            pass
 
-    # If we are in a session, we should try to get the environment variables that the kernel uses.
-    # Currently session_manager doesn't expose the Popen 'env'.
-    # But we can reconstruct it using environment.get_activated_env_vars if we know the venv path/python path.
-    
     # Let's try to find venv path relative to python path
     if python_path:
         from pathlib import Path
@@ -409,6 +396,59 @@ async def install_package(package_name: str, notebook_path: Optional[str] = None
         error_msg=output if not success else None,
         user_suggestion="IMPORTANT: You MUST restart the kernel to load the new package." if success else "Check package name"
     ).to_json()
+
+@mcp.tool()
+async def run_shell_command(command: str, notebook_path: Optional[str] = None):
+    """
+    [System Diagnostic] Run a safe, non-interactive system command.
+    Use this to debug system dependencies (e.g. 'ldd', 'which', 'uname', 'ls -l /usr/lib').
+    Restricted to non-interactive commands.
+    """
+    import shlex
+    import subprocess
+    
+    # 1. Validation: Block dangerous or interactive commands
+    forbidden_starters = ['vim', 'nano', 'tmux', 'top', 'htop', 'less', 'more', 'ssh', 'git push']
+    cmd_parts = shlex.split(command)
+    if not cmd_parts or cmd_parts[0] in forbidden_starters:
+        return ToolResult(success=False, data={}, error_msg="Command forbidden or interactive.").to_json()
+    
+    # DETERMINE ENVIRONMENT
+    # If notebook_path provided, we try to run in that environment context
+    env = None
+    cwd = None
+    
+    if notebook_path:
+        session = session_manager.get_session(notebook_path)
+        if session:
+            # Reconstruct environment if possible
+             # ... (Similar logic to install_package could go here, but for now system commands 
+             # usually care about system libs mostly)
+             cwd = session.get('cwd')
+
+    try:
+        # Run with timeout to prevent hangs
+        result = subprocess.run(
+            cmd_parts, 
+            capture_output=True, 
+            text=True, 
+            timeout=10,
+            cwd=cwd,
+            env=env if env else os.environ.copy()
+        )
+        
+        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
+        return ToolResult(
+            success=result.returncode == 0,
+            data={"stdout": result.stdout, "stderr": result.stderr},
+            error_msg=None if result.returncode == 0 else f"Command failed with code {result.returncode}",
+            user_suggestion=output
+        ).to_json()
+        
+    except subprocess.TimeoutExpired:
+        return ToolResult(success=False, data={}, error_msg="Command timed out (limit: 10s)").to_json()
+    except Exception as e:
+         return ToolResult(success=False, data={}, error_msg=str(e)).to_json()
 
 @mcp.tool()
 def check_code_syntax(code: str):
