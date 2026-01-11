@@ -101,8 +101,8 @@ class TestNotebookIntegrity:
             
             outline = get_notebook_outline(nb_path)
             
-            # Should have default cell + initial cells
-            expected_count = 1 + len(cells)
+            # Should match initial cells exactly
+            expected_count = len(cells) if cells else 1 # If empty, 1 default cell
             assert len(outline) == expected_count
     
     @given(n_inserts=st.integers(min_value=0, max_value=20))

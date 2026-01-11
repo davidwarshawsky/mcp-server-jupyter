@@ -525,7 +525,7 @@ builtins.raw_input = _mcp_blocked_input
 
 # [PHASE 4: Smart Error Recovery]
 # Inject a custom exception handler to provide context-aware error reports
-def _mcp_handler(shell, etype, value, tb, tb_offset=None):
+def _mcp_handler(shell, etype, value, tb, tb_offset=None, **kwargs):
     # Print standard traceback
     if hasattr(sys, 'last_type'):
         del sys.last_type

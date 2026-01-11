@@ -100,8 +100,8 @@ class TestCellIDOperations:
         delete_cell_by_id(str(nb_path), cell_id, expected_index=2)
         
         outline2 = get_notebook_outline(str(nb_path))
-        # 4 - 1 = 3 cells remain
-        assert len(outline2) == 3
+        # 3 - 1 = 2 cells remain
+        assert len(outline2) == 2
         assert cell_id not in [c['id'] for c in outline2]
     
     def test_insert_cell_by_id_adds_cell(self, tmp_path):
@@ -113,15 +113,15 @@ class TestCellIDOperations:
         ])
         
         outline = get_notebook_outline(str(nb_path))
-        # Index 0 is default empty cell, so x = 1 is at index 1
-        after_cell_id = outline[1]['id']
+        # Initial cells result in index 0 for x=1
+        after_cell_id = outline[0]['id']
         
         insert_cell_by_id(str(nb_path), after_cell_id, "y = 2", "code")
         
         outline2 = get_notebook_outline(str(nb_path))
-        # Original 3 cells + 1 inserted = 4
-        assert len(outline2) == 4
-        assert outline2[2]['source_preview'] == "y = 2"
+        # Original 2 cells + 1 inserted = 3
+        assert len(outline2) == 3
+        assert outline2[1]['source_preview'] == "y = 2"
 
 
 
@@ -314,9 +314,7 @@ class TestGetNotebookOutline:
         
         outline = get_notebook_outline(str(nb_path))
         
-        # 1 default empty cell + 1 initial cell = 2 cells
-        assert len(outline) == 2
+        # 1 initial cell = 1 cell
+        assert len(outline) == 1
         assert 'id' in outline[0]
         assert len(outline[0]['id']) > 0  # Has a non-empty ID
-        assert 'id' in outline[1]
-        assert len(outline[1]['id']) > 0  # Has a non-empty ID

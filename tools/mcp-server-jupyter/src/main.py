@@ -254,17 +254,19 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
     logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
     
     # Store result for agent to retrieve
+    timestamp = str(datetime.datetime.now())
     if proposal_id:
         PROPOSAL_STORE[proposal_id] = {
             "status": status,
             "message": message,
             "notebook_path": notebook_path,
-            "timestamp": str(datetime.datetime.now())
+            "timestamp": timestamp
         }
     
     return json.dumps({
         "status": "ack",
-        "proposal_id": proposal_id
+        "proposal_id": proposal_id,
+        "timestamp": timestamp
     })
 
 @mcp.tool()

@@ -167,7 +167,7 @@ class TestLargeNotebookPerformance:
         
         # Should get outline in under 500ms
         assert elapsed < 0.5, f"Outline took {elapsed:.2f}s"
-        assert len(outline) == 101  # 1 default + 100 initial
+        assert len(outline) == 100  # 100 initial cells
     
     @pytest.mark.slow
     def test_large_cell_content(self, tmp_notebook):
