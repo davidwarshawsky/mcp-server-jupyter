@@ -99,6 +99,13 @@ if (toolName === 'get_notebook_outline' && !args.structure_override) {
 
 Now the agent always sees the truth: the current buffer state.
 
+### Phase 6: Security & Resilience (New)
+**Problem**: Code executed by agents ran with full user privileges, and infinite loops could hang the server. Complex environments (Conda) often failed to activate properly.
+**Solution**: 
+- **Docker Sandboxing**: `start_kernel` accepts a `docker_image` parameter to run code in an isolated container.
+- **Robust Timeouts**: Enforcement of execution limits prevents zombie processes.
+- **Environment Activation**: Advanced shell simulation ensures `conda activate` and `source venv/bin/activate` work correctly, preserving sensitive PATH configurations for ML libraries.
+
 ## Installation
 
 ### Server Side (Python)

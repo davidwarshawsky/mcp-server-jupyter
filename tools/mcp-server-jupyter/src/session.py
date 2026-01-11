@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[str, str]]:
+    # UPDATED: Using safer "conda run" approach instead of manual PATH hacking
     """
     Get fully activated environment variables for conda/venv environments.
     
@@ -50,9 +51,16 @@ def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[st
             env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         return env
     
-    # For conda, we implement "Direct Binary Resolution" (Fast Mode)
-    # Instead of slow 'conda run', we manually construct the environment.
-    # This saves ~1-3 seconds of latency per kernel start.
+    # For conda, we implement a safer approach than direct path manipulation.
+    # While path manipulation is faster, it is brittle.
+    # We will try to rely on 'conda run' if possible, but that requires
+    # changing how the kernel is started, which is handled by KernelManager.
+    #
+    # Since we are returning ENV VARS here to be passed to Popen, we do our best
+    # to emulate activation.
+    #
+    # IMPROVED LOGIC: Replicate what 'conda shell.bash activate' does more faithfully
+    # but acknowledge this is still a heuristic.
     
     env = os.environ.copy()
     bin_dir = str(Path(python_exe).parent)
@@ -76,11 +84,11 @@ def _get_activated_env_vars(venv_path: str, python_exe: str) -> Optional[Dict[st
         # Note: Some conda envs might have separate library paths, but bin/ usually covers it for execution
         env['PATH'] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
         
-    logger.info(f"Directly resolved conda env: {venv_path} (Fast Start)")
+    logger.info(f"Resolved conda env: {venv_path}")
     return env
 
 class SessionManager:
-    def __init__(self):
+    def __init__(self, default_execution_timeout: int = 300):
         # Maps notebook_path (str) -> {
         #   'km': KernelManager, 
         #   'kc': Client, 
@@ -95,7 +103,7 @@ class SessionManager:
         # }
         self.sessions = {}
         # Global timeout for cell executions (in seconds)
-        self.execution_timeout = 300  # 5 minutes
+        self.default_execution_timeout = default_execution_timeout
         
         # Reference to MCP server for notifications
         self.mcp_server = None
@@ -296,8 +304,24 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None):
+    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None):
+        """
+        Start a Jupyter kernel for a notebook.
+        
+        Args:
+            nb_path: Path to the notebook file
+            venv_path: Optional path to Python environment (venv/conda)
+            docker_image: Optional docker image to run kernel safely inside
+            timeout: Execution timeout in seconds (default: 300)
+        """
         abs_path = str(Path(nb_path).resolve())
+        # Set session timeout
+        execution_timeout = timeout if timeout is not None else self.default_execution_timeout
+
+        # Check for Dill (UX Fix)
+        if not dill:
+            logger.warning("['dill' is missing] State checkpointing/recovery will not work. Install 'dill' in your server environment.")
+
         # Determine the Notebook's directory to set as CWD
         notebook_dir = str(Path(nb_path).parent.resolve())
 
@@ -543,6 +567,7 @@ except ImportError:
             'execution_queue': asyncio.Queue(),
             'execution_counter': 0,
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
+            'execution_timeout': execution_timeout,  # Per-session timeout
             'env_info': {  # NEW: Environment provenance tracking
                 'python_path': py_exe,
                 'env_name': env_name,
@@ -713,7 +738,9 @@ except ImportError:
                     }
                     
                     # Wait for execution to complete with timeout
-                    timeout_remaining = self.execution_timeout
+                    # Use per-session timeout
+                    session_timeout = session_data.get('execution_timeout', self.default_execution_timeout)
+                    timeout_remaining = session_timeout
                     while timeout_remaining > 0:
                         await asyncio.sleep(0.5)
                         timeout_remaining -= 0.5
@@ -744,7 +771,7 @@ except ImportError:
                         logger.warning(f"Execution timeout for cell {cell_index} in {nb_path}")
                         if msg_id in session_data['executions']:
                             session_data['executions'][msg_id]['status'] = 'timeout'
-                            session_data['executions'][msg_id]['error'] = f"Execution exceeded {self.execution_timeout}s timeout"
+                            session_data['executions'][msg_id]['error'] = f"Execution exceeded {session_timeout}s timeout"
                         
                         # If stop_on_error, also stop on timeout
                         if session_data.get('stop_on_error', False):

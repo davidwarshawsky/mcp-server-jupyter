@@ -40,6 +40,9 @@ poetry shell
 
 # Run tests to verify setup
 pytest tests/ -m "not optional" -n 4
+
+# Run specific session enhancement tests (env activation, docker logic)
+pytest tests/test_session_enhancements.py
 ```
 
 ### Install Pre-commit Hooks (Optional)

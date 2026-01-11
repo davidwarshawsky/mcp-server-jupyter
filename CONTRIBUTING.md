@@ -46,14 +46,20 @@ pip install dill pytest pytest-asyncio
 pytest tests/
 ```
 
-### Client-Side Setup
+### Client-Side Setup (VS Code Extension)
+
+The extension contains **Integration Tests** that spawn the real Python server in a VS Code Extension Host environment.
 
 ```bash
 cd vscode-extension
 npm install
 npm run compile
-npm run test
+
+# Run the Integration Test Suite (This launches a VS Code window for E2E testing)
+npm test
 ```
+
+> **Note**: These tests require a valid Python environment with `fastmcp` installed. The test harness attempts to locate `.venv` in the project root.
 
 ### Running Locally
 

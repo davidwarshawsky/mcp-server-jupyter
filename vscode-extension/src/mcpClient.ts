@@ -436,7 +436,7 @@ export class McpClient {
     return new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         reject(new Error('Server startup timeout'));
-      }, 10000);
+      }, 30000);
 
       // Try to list environments as a health check
       this.callTool('list_environments', {})
