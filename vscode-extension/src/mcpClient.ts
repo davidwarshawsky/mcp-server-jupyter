@@ -154,7 +154,10 @@ export class McpClient {
     for (let i = 0; i < retries; i++) {
         try {
             await new Promise<void>((resolve, reject) => {
-                this.ws = new WebSocket(url);
+          // MCP WebSocket servers negotiate the 'mcp' subprotocol.
+          // If we don't request it, servers may reject the upgrade or select a protocol
+          // we didn't offer, causing clients (and VS Code activation) to fail.
+          this.ws = new WebSocket(url, ['mcp']);
                 
                 this.ws.on('open', () => {
                     this.outputChannel.appendLine('WebSocket connected');

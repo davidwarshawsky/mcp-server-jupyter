@@ -1580,14 +1580,18 @@ def main():
             from mcp.server.websocket import websocket_server
             
             async def mcp_websocket_endpoint(websocket: WebSocket):
-                # A. Register connection
-                await connection_manager.connect(websocket)
-                
+                logger.info(f"WebSocket endpoint called! Client: {websocket.client}")
                 try:
                     # B. Bridge FastMCP with this socket
                     # We use the websocket_server context manager to handle streams
                     # This allows FastMCP to read/write, while ConnectionManager can also broadcast
+                    # NOTE: websocket_server() performs the WebSocket handshake (accept)
+                    logger.info("Entering websocket_server context manager...")
                     async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
+                        logger.info("✅ WebSocket handshake completed!")
+                        # A. Register connection AFTER handshake is complete
+                        await connection_manager.connect(websocket)
+                        
                         await mcp._mcp_server.run(
                             read_stream,
                             write_stream,
@@ -1597,7 +1601,7 @@ def main():
                     logger.info("WebSocket disconnected")
                     connection_manager.disconnect(websocket)
                 except Exception as e:
-                    logger.error(f"Connection error: {e}")
+                    logger.error(f"Connection error: {e}", exc_info=True)
                     connection_manager.disconnect(websocket)
 
             app = Starlette(

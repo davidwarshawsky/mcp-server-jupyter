@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as sinon from 'sinon';
+import WebSocket, { WebSocketServer } from 'ws';
 import { McpClient } from '../../mcpClient';
 
 suite('McpClient Test Suite', () => {
@@ -65,5 +66,39 @@ suite('McpClient Test Suite', () => {
         });
 
         assert.strictEqual(eventFired, true);
+    });
+
+    test('connectWebSocket negotiates MCP subprotocol', async () => {
+        // Create a WS server that *requires* the 'mcp' subprotocol.
+        const wss = new WebSocketServer({
+            port: 0,
+            handleProtocols: (protocols) => {
+                // In ws@8, protocols is a Set<string>
+                return protocols.has('mcp') ? 'mcp' : false;
+            }
+        });
+
+        const address = wss.address();
+        assert.ok(address && typeof address === 'object', 'Expected server to be listening');
+        const port = (address as any).port as number;
+
+        let negotiated: string | undefined;
+        wss.on('connection', (socket: WebSocket) => {
+            negotiated = socket.protocol;
+            // Close immediately; we only care about handshake negotiation.
+            socket.close();
+        });
+
+        try {
+            await (client as any).connectWebSocket(`ws://127.0.0.1:${port}/ws`, 3, 50);
+            assert.strictEqual(negotiated, 'mcp');
+        } finally {
+            try {
+                (client as any).ws?.close();
+            } catch {
+                // ignore
+            }
+            await new Promise<void>((resolve) => wss.close(() => resolve()));
+        }
     });
 });
