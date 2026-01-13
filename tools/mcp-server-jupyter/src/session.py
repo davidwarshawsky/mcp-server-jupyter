@@ -1344,6 +1344,11 @@ print(_inspect_var())
         
         output = f"Stdout: {stdout.decode()}\nStderr: {stderr.decode()}"
         if proc.returncode == 0:
+            # FIXED: Invalidate import caches so kernel sees new package immediately
+            invalidation_code = "import importlib; importlib.invalidate_caches(); print('Caches invalidated.')"
+            # Use -1 index for internal/maintenance commands
+            await self.execute_cell_async(nb_path, -1, invalidation_code)
+            
             return f"Successfully installed {package_name}.\n{output}"
         else:
             return f"Failed to install {package_name}.\n{output}"

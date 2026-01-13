@@ -1,6 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 import asyncio
 import time
+import os
 from pathlib import Path
 from typing import List, Optional, Any
 import nbformat
@@ -22,21 +23,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# [HEARTBEAT] Auto-shutdown configuration
+HEARTBEAT_INTERVAL = 60  # Check every minute
+IDLE_TIMEOUT = 600       # Shutdown after 10 minutes of no connections
+
 # [BROADCASTER] Connection Manager for Multi-User Notification
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.last_activity = time.time()
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._start_heartbeat()
+    
+    def _start_heartbeat(self):
+        """Initialize heartbeat task if event loop is available."""
+        try:
+            loop = asyncio.get_running_loop()
+            self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
+        except RuntimeError:
+            # No running event loop (unit tests or synchronous context)
+            pass
 
     async def connect(self, websocket: WebSocket):
         # NOTE: We do NOT call accept() here because mcp.server.websocket handles the ASGI handshake.
         # We just register the connection.
         self.active_connections.append(websocket)
+        self.last_activity = time.time()
         logger.info(f"Client connected. Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            self.last_activity = time.time()
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+
+    async def _monitor_heartbeat(self):
+        """Shutdown server if no clients connected for IDLE_TIMEOUT seconds"""
+        while True:
+            await asyncio.sleep(HEARTBEAT_INTERVAL)
+            if not self.active_connections:
+                idle_duration = time.time() - self.last_activity
+                if idle_duration > IDLE_TIMEOUT:
+                    logger.warning(f"No active clients for {idle_duration:.0f}s. Shutting down to prevent zombie process.")
+                    os._exit(0)  # Force exit
 
     async def broadcast(self, message: dict):
         # Immediate send for status changes or errors
@@ -1020,8 +1049,12 @@ def read_asset(
     from pathlib import Path
     import os
     
+    # FIXED: Enforce hard caps on return size
+    MAX_RETURN_CHARS = 20000  # 20KB safety limit
+    MAX_RETURN_LINES = 500    # 500 lines safety limit
+    
     # Limit max_lines to prevent context overflow
-    max_lines = min(max_lines, 5000)
+    max_lines = min(max_lines, MAX_RETURN_LINES)
     
     # Security: Prevent path traversal
     asset_path = str(Path(asset_path).resolve())
@@ -1082,8 +1115,14 @@ def read_asset(
                     if i >= end_line:
                         break
                 
+                content = "\n".join(selected_lines)
+                
+                # Truncate content if too large
+                if len(content) > MAX_RETURN_CHARS:
+                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                
                 return json.dumps({
-                    "content": "\n".join(selected_lines),
+                    "content": content,
                     "file_size_bytes": file_size,
                     "line_range": [start_line, min(end_line, i)],
                     "lines_returned": len(selected_lines)
@@ -1098,8 +1137,14 @@ def read_asset(
                         break
                     content_lines.append(line.rstrip())
                 
+                content = "\n".join(content_lines)
+                
+                # Truncate content if too large
+                if len(content) > MAX_RETURN_CHARS:
+                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                
                 return json.dumps({
-                    "content": "\n".join(content_lines),
+                    "content": content,
                     "file_size_bytes": file_size,
                     "lines_returned": len(content_lines),
                     "note": "Use 'lines' or 'search' parameters for targeted retrieval"

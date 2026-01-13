@@ -351,6 +351,8 @@ if __name__ == "__main__":
         test_prune_unused_assets()
         test_read_asset_tool()
         test_integration_full_workflow()
+        test_regex_captures_diverse_assets()
+        test_read_asset_enforces_limits()
         
         print("\n" + "=" * 70)
         print("✓ ALL TESTS PASSED")
@@ -363,3 +365,73 @@ if __name__ == "__main__":
         print(f"\n✗ UNEXPECTED ERROR: {e}")
         import traceback
         traceback.print_exc()
+
+def test_regex_captures_diverse_assets():
+    """Verify regex catches Plotly JSON, short hashes, and SVGs.
+    
+    Fixes "Binary Asset Ghosting" - Ensures the relaxed regex [a-f0-9]{12,32}
+    captures both image hashes (12-char) and text hashes (32-char), plus 
+    various extensions (.json, .svg, .html).
+    """
+    print("\n=== Test: Regex Captures Diverse Assets (12/32-char hashes) ===")
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        nb_path = Path(tmpdir) / "test.ipynb"
+        nb = nbformat.v4.new_notebook()
+        
+        # Scenario: Plotly JSON (short hash), SVG (long hash), and Text Stub
+        source_text = """
+        Here is a plot: assets/asset_abc123456789.json
+        And an SVG: assets/asset_11112222333344445555666677778888.svg
+        """
+        
+        nb.cells.append(nbformat.v4.new_markdown_cell(source_text))
+        
+        # Add output stub with text asset reference
+        code_cell = nbformat.v4.new_code_cell("print('log')")
+        code_cell.outputs = [nbformat.v4.new_output(
+            "stream", 
+            name="stdout", 
+            text=">>> FULL OUTPUT SAVED TO: text_abcdef123456abcdef123456abcdef12.txt <<<"
+        )]
+        nb.cells.append(code_cell)
+
+        with open(nb_path, 'w') as f:
+            nbformat.write(nb, f)
+            
+        refs = get_referenced_assets(str(nb_path))
+        
+        assert "asset_abc123456789.json" in refs, "Failed to catch JSON asset with short hash"
+        assert "asset_11112222333344445555666677778888.svg" in refs, "Failed to catch SVG asset"
+        assert "text_abcdef123456abcdef123456abcdef12.txt" in refs, "Failed to catch Text asset"
+        
+        print(f"✓ Captured all diverse assets: {refs}")
+
+
+def test_read_asset_enforces_limits():
+    """Ensure read_asset truncates massive files.
+    
+    Fixes "Context Window Limit" - Enforces hard caps on MAX_RETURN_CHARS (20KB)
+    and MAX_RETURN_LINES (500) to prevent context window overflow even when
+    searching large files.
+    """
+    print("\n=== Test: Read Asset Enforces 20KB Limit ===")
+    
+    from src.main import read_asset
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Create a 50KB file (limit is 20KB)
+        huge_file = Path(tmpdir) / "huge.txt"
+        huge_content = "x" * 50000
+        huge_file.write_text(huge_content)
+        
+        # Call the tool (it returns a JSON string)
+        result_json = read_asset(str(huge_file))
+        result = json.loads(result_json)
+        
+        content = result['content']
+        
+        assert len(content) <= 20500, f"Content not truncated: {len(content)} chars"
+        assert "Truncated" in content, "Missing truncation warning message"
+        
+        print(f"✓ Content truncated from 50000 to {len(content)} chars with warning")

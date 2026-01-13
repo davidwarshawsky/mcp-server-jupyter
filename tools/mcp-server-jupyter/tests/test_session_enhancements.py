@@ -129,3 +129,48 @@ class TestSessionFeatures:
         """Verify timeout parameter is stored in session."""
         manager = SessionManager(default_execution_timeout=60)
         assert manager.default_execution_timeout == 60
+
+@pytest.mark.asyncio
+async def test_install_package_invalidates_caches():
+    """Verify importlib.invalidate_caches() is injected after pip install.
+    
+    Fixes "Module Not Found" - After successful pip install, the kernel's import
+    cache must be invalidated so it sees the newly installed package immediately.
+    """
+    from src.session import SessionManager
+    from unittest.mock import AsyncMock, patch
+    
+    manager = SessionManager()
+    
+    # Mock the session parts
+    manager.sessions["/tmp/nb.ipynb"] = {
+        "km": MagicMock(),
+        "kc": MagicMock()
+    }
+    # Mock kernel command
+    manager.sessions["/tmp/nb.ipynb"]["km"].kernel_cmd = ["python"]
+    
+    # Mock execute_cell_async to verify it receives the invalidation code
+    manager.execute_cell_async = AsyncMock()
+    
+    # Mock subprocess to simulate successful pip install
+    with patch("asyncio.create_subprocess_exec") as mock_exec:
+        mock_proc = AsyncMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate.return_value = (b"Successfully installed simplejson", b"")
+        mock_exec.return_value = mock_proc
+        
+        result = await manager.install_package("/tmp/nb.ipynb", "simplejson")
+        
+        # Verify install succeeded
+        assert "Successfully installed" in result, f"Install failed: {result}"
+        
+        # Verify execute_cell_async was called with invalidation code
+        calls = manager.execute_cell_async.call_args_list
+        assert len(calls) > 0, "execute_cell_async was not called"
+        
+        # Get the code passed to the call: args[0] = nb_path, args[1] = index, args[2] = code
+        code_sent = calls[0][0][2]  # Third positional argument
+        assert "importlib.invalidate_caches()" in code_sent, f"Cache invalidation not found in: {code_sent}"
+        
+        print("✓ Cache invalidation code injected after package install")

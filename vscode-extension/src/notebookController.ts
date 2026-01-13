@@ -442,12 +442,21 @@ export class McpNotebookController {
             // Check if data is a file path (e.g., "assets/plot_123.png")
             if (dataStr.startsWith('assets/') || dataStr.startsWith('./assets/')) {
               try {
-                // Get MCP server directory from config or use relative path
-                const config = vscode.workspace.getConfiguration('mcp-jupyter');
-                const serverPath = config.get<string>('serverPath') || 
-                  path.join(path.dirname(__dirname), '..', 'tools', 'mcp-server-jupyter');
+                // FIXED: Resolve assets relative to the NOTEBOOK, not the server
+                let assetPath = dataStr;
                 
-                const assetPath = path.isAbsolute(dataStr) ? dataStr : path.join(serverPath, dataStr);
+                if (!path.isAbsolute(dataStr)) {
+                    if (execution) {
+                        // Best case: Resolve relative to notebook file
+                        const notebookDir = path.dirname(execution.cell.notebook.uri.fsPath);
+                        assetPath = path.join(notebookDir, dataStr);
+                    } else {
+                        // Fallback: Use server path (legacy behavior)
+                        const config = vscode.workspace.getConfiguration('mcp-jupyter');
+                        const serverPath = config.get<string>('serverPath') || '';
+                        assetPath = path.join(serverPath, dataStr);
+                    }
+                }
                 
                 if (fs.existsSync(assetPath)) {
                   buffer = fs.readFileSync(assetPath);
