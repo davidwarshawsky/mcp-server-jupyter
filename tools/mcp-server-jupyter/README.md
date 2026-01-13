@@ -295,16 +295,35 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 - `delete_metadata()` / `delete_cell_metadata()` - Remove metadata
 - `list_metadata_keys()` - List available keys
 
-### Information & Inspection (3 tools)
+### Information & Inspection (4 tools)
 - `list_variables()` - List all variables in kernel
 - `get_variable_info()` - Get structured variable data
 - `inspect_variable()` - Get human-readable summary
+- `get_variable_manifest()` - Lightweight manifest with name/type/size (optimized for UI polling) ⭐ **NEW**
 
-### Asset Management (2 tools) ⭐ **NEW**
+### Asset Management (2 tools)
 - `read_asset()` - Read content from offloaded output files with pagination/search
 - `prune_unused_assets()` - Garbage collect orphaned asset files (runs automatically on kernel stop)
 
 > **Use Case**: When cells produce massive outputs (50MB training logs, large arrays), the system automatically offloads them to `assets/text_*.txt` files. Agents can use `read_asset()` to grep for errors or read specific line ranges without loading the entire output into context. Automatic cleanup prevents disk bloat.
+
+### Variable Dashboard ⭐ **NEW**
+The `get_variable_manifest()` tool bridges the gap between human and agent workflows by providing a lightweight view of kernel state:
+
+**For Humans**: VS Code extension can poll this tool to populate a Variable Explorer sidebar, giving visibility into what the agent has in memory.
+
+**For Agents**: Quick overview of available variables without expensive inspection operations.
+
+**Output Format**:
+```json
+[
+  {"name": "df", "type": "DataFrame", "size": "2.4 MB"},
+  {"name": "model", "type": "Sequential", "size": "145.3 MB"},
+  {"name": "epochs", "type": "int", "size": "28 B"}
+]
+```
+
+**Performance**: Optimized for frequent polling (typically <100ms for 50 variables)
 
 ---
 
@@ -638,7 +657,13 @@ black --check src/ tests/  # Check only, no changes
 ## 📋 Recent Updates
 
 ### January 2026
-- ✅ **Asset-Based Output Storage** ⭐ **NEW**
+- ✅ **Variable Dashboard** ⭐ **NEW**
+  - `get_variable_manifest()` tool for lightweight kernel state visibility
+  - Returns name, type, and memory size for all variables
+  - Optimized for UI polling (typically <100ms for 50 variables)
+  - Bridges gap between human visibility and agent workflows
+  - Test coverage: 3 new tests in `tests/test_variable_manifest.py`
+- ✅ **Asset-Based Output Storage**
   - Large text outputs (>2KB or >50 lines) automatically offloaded to `assets/text_*.txt`
   - Preview stubs sent to VS Code/Agent with truncation markers
   - `read_asset()` tool for selective retrieval (grep, pagination, line ranges)

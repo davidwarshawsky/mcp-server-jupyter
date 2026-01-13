@@ -131,7 +131,29 @@ read_asset("assets/text_abc123.txt", lines=[900, 1000])
     # }
 ```
 
-### Phase 6: Buffer-Aware Navigation
+### Phase 6: Variable Dashboard ⭐ **NEW**
+**Problem**: Humans can't see kernel state, agents don't know what's in memory.  
+**Solution**: Lightweight `get_variable_manifest()` tool for real-time visibility.
+
+```python
+# Agent or human calls:
+get_variable_manifest()
+
+# Returns:
+# [
+#   {"name": "df", "type": "DataFrame", "size": "2.3 MB"},
+#   {"name": "model", "type": "Sequential", "size": "45.6 MB"},
+#   {"name": "results", "type": "dict", "size": "128.5 KB"}
+# ]
+```
+
+**Benefits**:
+- Human visibility: See what agent created without executing cells
+- Agent awareness: Check if variable exists before using it
+- Memory monitoring: Identify large objects before offloading
+- Performance: <100ms for typical workspaces (50 variables)
+
+### Phase 7: Buffer-Aware Navigation
 **Problem**: Agent calls `get_notebook_outline()` which reads stale disk state.  
 **Solution**: VS Code Client injects the live buffer structure into the tool call.
 
@@ -146,7 +168,7 @@ if (toolName === 'get_notebook_outline' && !args.structure_override) {
 
 Now the agent always sees the truth: the current buffer state.
 
-### Phase 7: Security & Resilience (New)
+### Phase 8: Security & Resilience
 **Problem**: Code executed by agents ran with full user privileges, and infinite loops could hang the server. Complex environments (Conda) often failed to activate properly.
 **Solution**: 
 - **Docker Sandboxing**: `start_kernel` accepts a `docker_image` parameter to run code in an isolated container.

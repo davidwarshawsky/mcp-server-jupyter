@@ -896,6 +896,73 @@ print(json.dumps(result))
     return await session_manager.run_simple_code(notebook_path, code)
 
 @mcp.tool()
+async def get_variable_manifest(notebook_path: str):
+    """
+    [VARIABLE DASHBOARD] Lightweight manifest of all kernel variables.
+    Returns name, type, and memory size for each variable (optimized for UI polling).
+    
+    **Use Case**: VS Code extension can poll this after each execution to populate
+    a Variable Explorer sidebar, giving humans visibility into the agent's kernel state.
+    
+    **Performance**: Much lighter than list_variables() - includes memory size for sorting.
+    
+    Returns:
+        JSON array: [{"name": "df", "type": "DataFrame", "size": "2.4 MB"}, ...]
+    """
+    code = """
+import json
+import sys
+
+def get_size_str(obj):
+    '''Get human-readable size string'''
+    try:
+        # Try to get actual memory usage
+        size = sys.getsizeof(obj)
+        
+        # For containers, estimate recursively (limit depth to avoid infinite recursion)
+        if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes)):
+            try:
+                if hasattr(obj, 'memory_usage'):  # pandas DataFrame/Series
+                    size = obj.memory_usage(deep=True).sum()
+                elif isinstance(obj, (list, tuple, set)):
+                    size += sum(sys.getsizeof(item) for item in obj[:100])  # Sample first 100
+                elif isinstance(obj, dict):
+                    items = list(obj.items())[:100]
+                    size += sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in items)
+            except:
+                pass
+        
+        # Format size
+        if size < 1024:
+            return f"{size} B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f} KB"
+        elif size < 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f} MB"
+        else:
+            return f"{size / (1024 * 1024 * 1024):.1f} GB"
+    except:
+        return "?"
+
+manifest = []
+for name in sorted(dir()):
+    if not name.startswith('_'):
+        try:
+            obj = globals()[name]
+            if not isinstance(obj, type(sys)):  # Skip modules
+                manifest.append({
+                    "name": name,
+                    "type": type(obj).__name__,
+                    "size": get_size_str(obj)
+                })
+        except:
+            pass
+
+print(json.dumps(manifest))
+"""
+    return await session_manager.run_simple_code(notebook_path, code)
+
+@mcp.tool()
 async def inspect_variable(notebook_path: str, variable_name: str):
     """
     Surgical Inspection: Returns a human-readable markdown summary of a variable.

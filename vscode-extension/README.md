@@ -18,6 +18,7 @@ This extension acts as a "Proxy Kernel" for Jupyter notebooks in VSCode. Instead
 ### ✅ Core Functionality
 - **Jupyter Notebook Support**: Execute Python code in `.ipynb` files
 - **Incremental Output Streaming**: See print statements and outputs as they happen
+- **Variable Dashboard**: See all kernel variables with name, type, and memory size ⭐ **NEW**
 - **Asset-Based Output Storage**: Large outputs (>2KB) automatically offloaded to `assets/` folder, preventing UI crashes ⭐ **NEW**
 - **Environment Selection**: Quick-pick UI to switch Python environments (conda, venv, system)
 - **Automatic Kernel Management**: Kernels start on-demand and stop when notebooks close
@@ -150,6 +151,31 @@ The extension automatically finds:
 - Compares with kernel state timestamp
 - If disk is newer → sync is needed
 - Sync re-runs cells in order to rebuild variables/imports
+
+### Variable Dashboard ⭐ **NEW**
+
+**Scenario**: AI agent creates 10 variables, but you don't know what's in memory.
+
+**What You See**:
+```json
+[
+  {"name": "df", "type": "DataFrame", "size": "2.3 MB"},
+  {"name": "model", "type": "Sequential", "size": "45.6 MB"},
+  {"name": "results", "type": "dict", "size": "128.5 KB"}
+]
+```
+
+**Benefits**:
+- **Visibility**: See what the agent created without re-running cells
+- **Memory Monitoring**: Identify large objects before they cause issues
+- **Debugging**: Check if expected variables exist with correct types
+- **Fast**: Typically <100ms for 50 variables
+
+**How It Works**:
+- MCP server introspects kernel's `user_ns` namespace
+- Filters out system variables (`_`, `__`, internal modules)
+- Uses `sys.getsizeof()` to estimate memory usage
+- Returns JSON array with name, type, and human-readable size
 
 ### Asset-Based Output Storage ⭐ **NEW**
 
