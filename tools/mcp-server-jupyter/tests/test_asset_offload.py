@@ -131,17 +131,19 @@ def test_asset_reference_tracking():
         # Create a notebook with asset references
         nb = nbformat.v4.new_notebook()
         
-        # Add a cell with stream output containing asset reference
+        # Add a cell with stream output containing an offload stub asset reference
+        asset_hex = "a" * 32
+        asset_name = f"text_{asset_hex}.txt"
         cell = nbformat.v4.new_code_cell()
         # Use NotebookNode for outputs
         output = nbformat.v4.new_output(
             output_type="stream",
             name="stdout",
-            text="Some output\n\n>>> FULL OUTPUT (50KB) SAVED TO: text_abc123def456789012345678901234.txt <<<"
+            text=f"Some output\n\n>>> FULL OUTPUT (50KB) SAVED TO: {asset_name} <<<"
         )
         output.metadata = {
             "mcp_asset": {
-                "path": f"{assets_dir}/text_abc123def456789012345678901234.txt"
+                "path": f"{assets_dir}/{asset_name}"
             }
         }
         cell.outputs = [output]
@@ -157,18 +159,15 @@ def test_asset_reference_tracking():
             print(f"  Notebook content sample: {content[500:700]}")
         
         # Create the actual asset file
-        asset_file = assets_dir / "text_abc123def456789012345678901234.txt"
+        asset_file = assets_dir / asset_name
         asset_file.write_text("Original large content")
         
         # Test reference detection
         referenced = get_referenced_assets(str(nb_path))
         
-        # Should find the text asset
-        if len(referenced) == 0:
-            print(f"  Warning: No assets found. Check regex pattern.")
-            # Don't fail the test, just warn
-        else:
-            print(f"✓ Referenced assets detected: {referenced}")
+        # Should find the text asset referenced via the "SAVED TO:" stub
+        assert asset_name in referenced, f"Expected {asset_name} to be detected, got: {referenced}"
+        print(f"✓ Referenced assets detected: {referenced}")
 
 
 def test_prune_unused_assets():
@@ -183,12 +182,14 @@ def test_prune_unused_assets():
         # Create notebook
         nb = nbformat.v4.new_notebook()
         
-        # Add cell with one asset reference
+        # Add cell with one asset reference (via stub)
+        referenced_hex = "b" * 32
+        referenced_name = f"text_{referenced_hex}.txt"
         cell = nbformat.v4.new_code_cell()
         output = nbformat.v4.new_output(
             output_type="stream",
             name="stdout",
-            text=">>> FULL OUTPUT SAVED TO: text_referenced123456789012345678901234.txt <<<"
+            text=f">>> FULL OUTPUT SAVED TO: {referenced_name} <<<"
         )
         cell.outputs = [output]
         nb.cells.append(cell)
@@ -196,26 +197,32 @@ def test_prune_unused_assets():
         with open(nb_path, 'w') as f:
             nbformat.write(nb, f)
         
-        # Create assets: one referenced, one orphaned
-        (assets_dir / "text_referenced123456789012345678901234.txt").write_text("Referenced content")
-        (assets_dir / "text_orphaned1234567890123456789012345.txt").write_text("Orphaned content")
-        (assets_dir / "asset_image1234567890ab.png").write_bytes(b"fake png")
+        orphaned_hex = "c" * 32
+        orphaned_name = f"text_{orphaned_hex}.txt"
+
+        # Create assets: one referenced, one orphaned, one extra orphaned image-like file
+        (assets_dir / referenced_name).write_text("Referenced content")
+        (assets_dir / orphaned_name).write_text("Orphaned content")
+        (assets_dir / ("d" * 32 + ".png")).write_bytes(b"fake png")
         
         # Run dry run
         result_dry = prune_unused_assets(str(nb_path), dry_run=True)
         print(f"  Dry run: {result_dry['message']}")
-        
-        # Verify files still exist
-        assert (assets_dir / "text_orphaned1234567890123456789012345.txt").exists()
+
+        # Verify dry-run doesn't delete anything
+        assert (assets_dir / referenced_name).exists()
+        assert (assets_dir / orphaned_name).exists()
         
         # Run actual cleanup
         result = prune_unused_assets(str(nb_path), dry_run=False)
         print(f"  Actual: {result['message']}")
         
-        # Note: The orphaned file might not be deleted if the regex doesn't match
-        # Let's check what was deleted
         print(f"  Deleted: {result['deleted']}")
         print(f"  Kept: {result['kept']}")
+
+        # Assert referenced remains, orphan is deleted
+        assert (assets_dir / referenced_name).exists(), "Referenced asset should be kept"
+        assert not (assets_dir / orphaned_name).exists(), "Orphaned asset should be deleted"
 
 
 def test_read_asset_tool():

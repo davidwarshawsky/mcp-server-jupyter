@@ -1359,6 +1359,16 @@ print(_inspect_var())
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
              return "Error: No running kernel."
+
+        # [ASSET CLEANUP] Run GC before restart to clean up orphaned assets.
+        # This ensures "Clear Output + Save" or manual edits don't leave assets behind across restarts.
+        try:
+            from src.asset_manager import prune_unused_assets
+            cleanup_result = prune_unused_assets(abs_path, dry_run=False)
+            logger.info(f"Asset cleanup on kernel restart: {cleanup_result.get('message', 'completed')}")
+        except Exception as e:
+            logger.warning(f"Asset cleanup on restart failed: {e}")
+
         session = self.sessions[abs_path]
         await session['km'].restart_kernel()
         # Note: Restarting might break the listener connection? 

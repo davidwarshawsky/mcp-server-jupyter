@@ -227,6 +227,18 @@ export class McpClient {
   }
 
   /**
+   * Garbage collect orphaned assets for a notebook.
+   *
+   * Intended to be called after notebook edits are saved to disk (e.g., cleared outputs / deleted cells).
+   */
+  async pruneUnusedAssets(notebookPath: string, dryRun = false): Promise<any> {
+    return this.callTool('prune_unused_assets', {
+      notebook_path: notebookPath,
+      dry_run: dryRun,
+    });
+  }
+
+  /**
    * Execute a cell asynchronously and return task ID
    */
   async runCellAsync(notebookPath: string, index: number, codeContent: string, taskId?: string): Promise<string> {

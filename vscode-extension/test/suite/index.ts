@@ -11,11 +11,19 @@ export function run(): Promise<void> {
   });
 
   const testsRoot = path.resolve(__dirname, '..');
+  // Note: most tests live under test/suite -> out/test/suite.
+  // Some targeted tests may live under src/test/suite -> out/src/test/suite.
+  const srcTestsRoot = path.resolve(__dirname, '../../src/test');
 
   return new Promise((resolve, reject) => {
-    glob('**/**.test.js', { cwd: testsRoot }).then((files) => {
+    Promise.all([
+      glob('**/**.test.js', { cwd: testsRoot }),
+      // Only include the GC lifecycle test from src tests to avoid pulling in legacy/unused suites.
+      glob('suite/garbageCollection.test.js', { cwd: srcTestsRoot })
+    ]).then(([testFiles, gcFiles]) => {
       // Add files to the test suite
-      files.forEach((f: string) => mocha.addFile(path.resolve(testsRoot, f)));
+      testFiles.forEach((f: string) => mocha.addFile(path.resolve(testsRoot, f)));
+      gcFiles.forEach((f: string) => mocha.addFile(path.resolve(srcTestsRoot, f)));
 
       try {
         // Run the mocha test

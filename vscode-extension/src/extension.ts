@@ -78,6 +78,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     syncStatusBar.tooltip = 'Click to sync notebook state from disk';
     context.subscriptions.push(syncStatusBar);
 
+    // [GC HOOK] Trigger asset cleanup when the notebook is saved to disk.
+    // The server can only see deletions/clears after Save, so this makes:
+    // "Clear Output + Save" => "Delete backing assets".
+    context.subscriptions.push(
+      vscode.workspace.onDidSaveNotebookDocument((notebook) => {
+        if (notebook.notebookType !== 'jupyter-notebook') {
+          return;
+        }
+
+        // Fire-and-forget: don't block the save pipeline/UI.
+        mcpClient.pruneUnusedAssets(notebook.uri.fsPath, false)
+          .then(() => console.log(`[GC] Cleaned assets for ${notebook.uri.fsPath}`))
+          .catch((e) => console.error('GC failed:', e));
+      })
+    );
+
     // Setup file watcher for notebook changes
     const notebookWatcher = vscode.workspace.createFileSystemWatcher('**/*.ipynb');
     

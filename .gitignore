@@ -2,3 +2,6 @@
 **/__pycache__
 **/my-ai-memory.db
 **/.hypothesis/*
+
+# Auto-generated: Prevent notebook assets from polluting Git history
+assets/
