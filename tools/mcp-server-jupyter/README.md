@@ -48,6 +48,110 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 - **Python**: 3.10, 3.11, or 3.12
 - **OS**: Windows, macOS, Linux
 - **Dependencies**: Jupyter Client, nbformat, ipykernel, MCP SDK, psutil
+
+### Setup
+
+1.  **Clone and Install**:
+    ```bash
+    git clone https://github.com/yourusername/mcp-server-jupyter.git
+    cd mcp-server-jupyter
+    pip install -e tools/mcp-server-jupyter
+    ```
+
+---
+
+## 🏗️ Architecture: The "Hub and Spoke" Model
+
+To enable collaboration between an AI Agent and a Human (typing in VS Code), both must share the **same** running Jupyter kernel. We achieve this using a "Hub and Spoke" architecture:
+
+1.  **The Hub (Server)**: A single `mcp-jupyter` process running in the background (e.g., in `tmux`) acting as the source of truth for kernel state.
+2.  **Spoke 1 (VS Code)**: The editor connects via WebSocket to visualize results and allow human edits.
+3.  **Spoke 2 (Agent)**: The AI connects via a "Bridge" mode to execute code and analyze data.
+
+### 🚀 Quick Start
+
+#### 1. Start the "Hub" (Server)
+Run this in a dedicated terminal (or `tmux`/`screen` session):
+
+```bash
+# Start the server on port 3000
+mcp-jupyter --transport websocket --port 3000
+```
+*   **Windows**: Use a dedicated Command Prompt or PowerShell window.
+*   **Linux/Mac**: Use `tmux new -s jupyter` or `screen -S jupyter` to keep it running in the background.
+
+#### 2. Connect Your Agent (Spoke 1)
+Configure your MCP client (like Claude Desktop or Copilot) with `mcp.json`. This tells the agent to connect to your running server instead of starting a new one.
+
+**`mcp.json` Configuration**:
+```json
+{
+  "mcpServers": {
+    "jupyter": {
+      "command": "mcp-jupyter",
+      "args": [
+        "--mode", "client",
+        "--port", "3000"
+      ]
+    }
+  }
+}
+```
+
+#### 3. Connect VS Code (Spoke 2)
+1.  Install the **MCP Jupyter** VS Code extension.
+2.  Open Settings (`Ctrl+,`) and search for `mcp-jupyter`.
+3.  Set **Server Mode** to `connect`.
+4.  Set **Remote Port** to `3000`.
+5.  Run **Developer: Reload Window** to apply changes.
+
+Now, when you define a variable in VS Code (`x = 42`), the Agent can immediately see it (`inspect_variable('x')`), and vice versa.
+
+---
+
+## 💻 Windows Setup
+
+Windows requires slightly different handling for paths and background processes.
+
+1.  **Start the Hub**:
+    Open PowerShell or Command Prompt and run:
+    ```powershell
+    mcp-jupyter --transport websocket --port 3000
+    ```
+    *Keep this window open.*
+
+2.  **`mcp.json` for Windows**:
+    You must use double backslashes for paths in JSON.
+    ```json
+    {
+      "mcpServers": {
+        "jupyter": {
+          "command": "mcp-jupyter.exe", 
+          "args": [
+            "--mode", "client",
+            "--port", "3000"
+          ]
+        }
+      }
+    }
+    ```
+    *Note: If `mcp-jupyter` is not in your PATH, provide the full path to the executable script in your python scripts folder (e.g., `C:\\Users\\You\\AppData\\Roaming\\Python\\Scripts\\mcp-jupyter.exe`).*
+
+---
+
+## 🤖 The "Jupyter Expert" Agent
+
+The file [.github/agents/Jupyter Expert.agent.md](../../.github/agents/Jupyter%20Expert.agent.md) is a **System Prompt** designed to turn a generic LLM into a specialized Data Science assistant.
+
+### How it Works
+When you load this agent definition (e.g., in GitHub Copilot or a custom Agent UI), it instructs the model to:
+1.  **Respect the Disk**: Checks `detect_sync_needed` before execution to prevent overwriting user edits.
+2.  **Use Stable IDs**: Always calls `get_notebook_outline` to get valid Cell IDs before editing.
+3.  **Sync State**: Automatically runs `sync_state_from_disk` if it detects you changed the code.
+
+To use it, copy the content of that file into your Custom Instructions or System Prompt configuration.
+
+
 - **Optional**: kaleido (for Plotly static PNG rendering), matplotlib, bokeh
 
 ### Quick Start

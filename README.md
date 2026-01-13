@@ -16,6 +16,16 @@ This project implements a **Buffer-Based, State-Aware Architecture** that:
 - Injects notebook structure into tool calls (prevents index drift).
 - Proposes edits via JSON (clean WorkspaceEdit, no conflicts).
 
+## Architecture: The "Hub and Spoke" Model
+
+**To allow true collaboration where the Agent and Human share variables in real-time, we use a Hub and Spoke architecture.**
+
+1.  **The Hub**: `mcp-jupyter` running in the background (via `tmux`/`screen`).
+2.  **Spoke 1**: VS Code connects to the Hub.
+3.  **Spoke 2**: The Agent connects to the Hub via a "Bridge Mode".
+
+See [tools/mcp-server-jupyter/README.md](tools/mcp-server-jupyter/README.md) for full setup instructions.
+
 ## Architecture: The Four Pillars
 
 ### Phase 1: Robust Environment & State Management

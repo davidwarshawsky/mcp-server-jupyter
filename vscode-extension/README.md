@@ -94,22 +94,28 @@ Access via Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`):
 
 ### Configuration
 
-Settings available in VSCode Settings (`Ctrl+,` / `Cmd+,`):
+The extension now supports **Hub and Spoke** mode for collaboration.
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `mcp-jupyter.serverPath` | (auto) | Path to MCP server directory |
-| `mcp-jupyter.pythonPath` | (auto) | Python executable for MCP server |
-| `mcp-jupyter.pollingInterval` | 500 | Polling interval (ms) for output streaming |
-| `mcp-jupyter.autoRestart` | true | Auto-restart server on crash |
+| `mcp-jupyter.serverMode` | `managed` | `managed` (spawns process) or `connect` (joins existing hub) |
+| `mcp-jupyter.remotePort` | 3000 | WebSocket port for `connect` mode |
+| `mcp-jupyter.serverPath` | (auto) | Path to MCP server directory (Managed mode only) |
+| `mcp-jupyter.pythonPath` | (auto) | Python executable (Managed mode only) |
 
-#### Example `.vscode/settings.json`
+#### Example: Connecting to a Shared Hub (Recommended for Agents)
 ```json
 {
-  "mcp-jupyter.serverPath": "/path/to/mcp-server-jupyter",
-  "mcp-jupyter.pythonPath": "/opt/conda/envs/data-science/bin/python",
-  "mcp-jupyter.pollingInterval": 1000,
-  "mcp-jupyter.autoRestart": true
+  "mcp-jupyter.serverMode": "connect",
+  "mcp-jupyter.remotePort": 3000
+}
+```
+
+#### Example: Isolated Managed Mode (Default)
+```json
+{
+  "mcp-jupyter.serverMode": "managed",
+  "mcp-jupyter.pythonPath": "/opt/conda/envs/data-science/bin/python"
 }
 ```
 
