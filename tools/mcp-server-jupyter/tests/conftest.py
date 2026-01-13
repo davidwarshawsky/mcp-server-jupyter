@@ -374,15 +374,16 @@ def mock_python_executable(tmp_path):
     return _create_mock_exe
 
 
-# Event loop fixture for async tests
+# Asyncio policy fixture (preferred over redefining event_loop)
+# See pytest-asyncio deprecation: use event_loop_policy instead of overriding event_loop
 @pytest.fixture(scope="session")
-def event_loop():
-    """Create an instance of the default event loop for the test session."""
-    # Fix for Windows: Use WindowsSelectorEventLoopPolicy to avoid zmq warning
+def event_loop_policy():
+    """Provide an event loop policy without overriding pytest-asyncio's event_loop fixture.
+
+    On Windows, use WindowsSelectorEventLoopPolicy to avoid known zmq compatibility warnings.
+    On other platforms, use the default policy.
+    """
     import sys
     if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    
-    loop = asyncio.get_event_loop_policy().new_event_loop()
-    yield loop
-    loop.close()
+        return asyncio.WindowsSelectorEventLoopPolicy()
+    return asyncio.DefaultEventLoopPolicy()
