@@ -12,6 +12,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
+import websockets
 
 # Configure logging to stderr to avoid corrupting JSON-RPC stdout
 logging.basicConfig(
@@ -1560,15 +1561,91 @@ def get_assets_summary(notebook_path: str):
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
 
+# --- NEW: Client Bridge Logic ---
+async def run_bridge(uri: str):
+    """
+    Client Mode: Connects stdin/stdout to the running WebSocket server.
+    """
+    logger.info(f"[Bridge] Connecting to {uri}...")
+    
+    async def forward_stdin_to_ws(ws):
+        loop = asyncio.get_event_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+
+        while True:
+            line = await reader.readline()
+            if not line:
+                break
+            try:
+                # Verify valid JSON before sending to avoid breaking the pipe
+                json.loads(line) 
+                await ws.send(line.decode())
+            except Exception as e:
+                logger.error(f"[Bridge] Error reading stdin: {e}")
+
+    async def forward_ws_to_stdout(ws):
+        async for msg in ws:
+            sys.stdout.write(msg + "\n")
+            sys.stdout.flush()
+
+    try:
+        # Connect with the required subprotocol
+        async with websockets.connect(uri, subprotocols=['mcp']) as ws:
+            logger.info("[Bridge] Connected successfully.")
+            await asyncio.gather(
+                forward_stdin_to_ws(ws),
+                forward_ws_to_stdout(ws)
+            )
+    except Exception as e:
+        logger.error(f"[Bridge] Connection failed: {e}")
+        # Emit a JSON-RPC error to the agent so it fails gracefully
+        print(json.dumps({
+            "jsonrpc": "2.0", 
+            "error": {"code": -32603, "message": f"Bridge connection failed: {str(e)}"},
+            "id": None
+        }))
+        sys.exit(1)
+
 def main():
     import argparse
     
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"])
-    parser.add_argument("--port", type=int, default=3000)
-    parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
+    parser = argparse.ArgumentParser(description="MCP Jupyter Server")
+    
+    # Mode selection
+    parser.add_argument("--mode", default="server", choices=["server", "client"], 
+                       help="Run as a 'server' (host) or 'client' (bridge to existing server)")
+    
+    # Server args
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"],
+                       help="[Server Mode] Transport type")
+    parser.add_argument("--host", default="127.0.0.1", 
+                       help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
+    parser.add_argument("--port", type=int, default=3000, 
+                       help="Port number")
+    
+    # Client args
+    parser.add_argument("--uri", default=None,
+                       help="[Client Mode] WebSocket URI to connect to (e.g. ws://127.0.0.1:3000/ws)")
+
     args = parser.parse_args()
 
+    # Windows event loop policy fix
+    if sys.platform == 'win32':
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # --- CLIENT MODE ---
+    if args.mode == "client":
+        # Determine URI
+        uri = args.uri if args.uri else f"ws://{args.host}:{args.port}/ws"
+        try:
+            asyncio.run(run_bridge(uri))
+        except KeyboardInterrupt:
+            pass
+        return
+
+    # --- SERVER MODE (Existing Logic) ---
     try:
         # Restore any persisted sessions from previous server runs
         asyncio.run(session_manager.restore_persisted_sessions())

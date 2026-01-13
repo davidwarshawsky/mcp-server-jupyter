@@ -1,0 +1,11 @@
+{
+  "servers": {
+    "mcp-jupyter": {
+      "command": "mcp-jupyter",
+      "args": [
+        "--mode", "client",
+        "--port", "3000"
+      ]
+    }
+  }
+}
