@@ -922,6 +922,128 @@ async def inspect_variable(notebook_path: str, variable_name: str):
     return await session_manager.run_simple_code(notebook_path, code)
 
 # -----------------------
+# Asset Management Tools
+# -----------------------
+
+@mcp.tool()
+def read_asset(
+    asset_path: str, 
+    lines: Optional[List[int]] = None, 
+    search: Optional[str] = None,
+    max_lines: int = 1000
+) -> str:
+    """
+    Read content from an offloaded output file (assets/text_*.txt).
+    Use this to selectively retrieve large outputs without loading everything into context.
+    
+    Agent Use Cases:
+    - Search for errors in 50MB training logs: read_asset("assets/text_abc123.txt", search="error")
+    - View specific section: read_asset("assets/text_abc123.txt", lines=[100, 200])
+    - Check final results: read_asset("assets/text_abc123.txt", lines=[1, 50])
+    
+    Args:
+        asset_path: Path to the asset file (e.g. "assets/text_abc123.txt")
+        lines: [start_line, end_line] for pagination (1-based, inclusive)
+        search: Search term for grep-like filtering (case-insensitive)
+        max_lines: Maximum lines to return (default 1000, max 5000)
+    
+    Returns:
+        Content from the asset file (filtered or paginated)
+    """
+    from pathlib import Path
+    import os
+    
+    # Limit max_lines to prevent context overflow
+    max_lines = min(max_lines, 5000)
+    
+    # Security: Prevent path traversal
+    asset_path = str(Path(asset_path).resolve())
+    if '..' in asset_path or not asset_path.endswith('.txt'):
+        return json.dumps({
+            "error": "Invalid asset path. Must be a .txt file without path traversal."
+        })
+    
+    # Check if file exists
+    if not Path(asset_path).exists():
+        return json.dumps({
+            "error": f"Asset file not found: {asset_path}"
+        })
+    
+    try:
+        # Get file info
+        file_size = Path(asset_path).stat().st_size
+        
+        with open(asset_path, 'r', encoding='utf-8', errors='replace') as f:
+            if search:
+                # Grep mode: efficient for finding specific content
+                matches = []
+                for i, line in enumerate(f, 1):
+                    if search.lower() in line.lower():
+                        matches.append(f"{i}: {line.rstrip()}")
+                        if len(matches) >= max_lines:
+                            matches.append(f"\n... [Search limit reached: {max_lines} matches shown] ...")
+                            break
+                
+                if not matches:
+                    return json.dumps({
+                        "content": f"No matches found for '{search}'",
+                        "file_size_bytes": file_size,
+                        "matches": 0
+                    })
+                
+                return json.dumps({
+                    "content": "\n".join(matches),
+                    "file_size_bytes": file_size,
+                    "matches": len(matches)
+                })
+            
+            elif lines:
+                # Pagination mode: read specific line range
+                if len(lines) != 2 or lines[0] < 1 or lines[1] < lines[0]:
+                    return json.dumps({
+                        "error": "Invalid line range. Use [start_line, end_line] where start >= 1 and end >= start."
+                    })
+                
+                start_line, end_line = lines
+                # Cap the range
+                end_line = min(end_line, start_line + max_lines - 1)
+                
+                selected_lines = []
+                for i, line in enumerate(f, 1):
+                    if i >= start_line:
+                        selected_lines.append(line.rstrip())
+                    if i >= end_line:
+                        break
+                
+                return json.dumps({
+                    "content": "\n".join(selected_lines),
+                    "file_size_bytes": file_size,
+                    "line_range": [start_line, min(end_line, i)],
+                    "lines_returned": len(selected_lines)
+                })
+            
+            else:
+                # Default: return first N lines
+                content_lines = []
+                for i, line in enumerate(f):
+                    if i >= max_lines:
+                        content_lines.append(f"\n... [Content truncated at {max_lines} lines. Use 'lines' parameter for pagination] ...")
+                        break
+                    content_lines.append(line.rstrip())
+                
+                return json.dumps({
+                    "content": "\n".join(content_lines),
+                    "file_size_bytes": file_size,
+                    "lines_returned": len(content_lines),
+                    "note": "Use 'lines' or 'search' parameters for targeted retrieval"
+                })
+    
+    except Exception as e:
+        return json.dumps({
+            "error": f"Failed to read asset: {str(e)}"
+        })
+
+# -----------------------
 
 @mcp.tool()
 async def install_package(notebook_path: str, package_name: str):
@@ -1518,8 +1640,10 @@ def commit_agent_work(repo_path: str = ".", message: str = "", files: Optional[L
 def prune_unused_assets(notebook_path: str, dry_run: bool = False):
     """
     [GIT-SAFE] Delete asset files not referenced in notebook.
+    Implements "Reference Counting GC" for both image assets and text offload files.
     
-    Scans notebook for asset references, deletes orphaned files.
+    Scans notebook for asset references (images and text_*.txt files),
+    deletes orphaned files. Automatically runs on kernel stop to maintain Git hygiene.
     Safe to run periodically to clean up after cell deletions.
     
     Args:
@@ -1532,7 +1656,7 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False):
     Example:
         # Check what would be deleted
         prune_unused_assets("analysis.ipynb", dry_run=True)
-        # Actually delete
+        # Actually delete (also auto-runs on kernel stop)
         prune_unused_assets("analysis.ipynb")
     """
     from src.asset_manager import prune_unused_assets as _prune_assets

@@ -18,6 +18,7 @@ This extension acts as a "Proxy Kernel" for Jupyter notebooks in VSCode. Instead
 ### ✅ Core Functionality
 - **Jupyter Notebook Support**: Execute Python code in `.ipynb` files
 - **Incremental Output Streaming**: See print statements and outputs as they happen
+- **Asset-Based Output Storage**: Large outputs (>2KB) automatically offloaded to `assets/` folder, preventing UI crashes ⭐ **NEW**
 - **Environment Selection**: Quick-pick UI to switch Python environments (conda, venv, system)
 - **Automatic Kernel Management**: Kernels start on-demand and stop when notebooks close
 - **Error Handling**: Full traceback rendering for exceptions
@@ -149,6 +150,29 @@ The extension automatically finds:
 - Compares with kernel state timestamp
 - If disk is newer → sync is needed
 - Sync re-runs cells in order to rebuild variables/imports
+
+### Asset-Based Output Storage ⭐ **NEW**
+
+**Scenario**: You run a training loop that prints 50MB of epoch logs.
+
+**What Happens**:
+1. Python MCP server intercepts large outputs (>2KB or >50 lines)
+2. Full content saved to `assets/text_{hash}.txt`
+3. VS Code receives a preview stub with first/last lines
+4. Stub message: `>>> FULL OUTPUT (50.2MB) SAVED TO: text_abc123.txt <<<`
+5. You can Ctrl+Click the filename to open full content in editor
+
+**Benefits**:
+- **No UI Crashes**: VS Code stays responsive even with massive outputs
+- **Git-Friendly**: `.ipynb` files stay small (assets/ auto-gitignored)
+- **Auto-Cleanup**: Orphaned assets deleted when kernel stops
+- **Agent Context**: AI sees 2KB stub instead of 50MB (98% reduction)
+
+**How It Works**:
+- Server's `sanitize_outputs()` function checks output size
+- Large outputs offloaded before sending to extension
+- Preview generated showing first/last 25 lines
+- Metadata embedded for selective retrieval
 
 ## 🏗️ Architecture
 

@@ -81,14 +81,16 @@ def get_referenced_assets(notebook_path: str) -> Set[str]:
             nb = nbformat.read(f, as_version=4)
         
         # Pattern to match asset references
-        # Matches: assets/abc123.png, ./assets/def456.pdf, etc.
-        asset_pattern = re.compile(r'assets/([a-f0-9]{32}\.[a-z]+)')
+        # Matches: assets/abc123.png, ./assets/def456.pdf, assets/text_abc123.txt, etc.
+        # Updated to handle both image assets and text offload files
+        # We want to capture the full filename (with text_ prefix and extension)
+        asset_pattern = re.compile(r'assets/((?:text_)?[a-f0-9]{32}\.[a-z]+)')
         
         for cell in nb.cells:
             # Check cell source (markdown cells with images)
             if hasattr(cell, 'source'):
                 for match in asset_pattern.finditer(cell.source):
-                    referenced.add(match.group(1))
+                    referenced.add(match.group(1))  # Full filename with extension
             
             # Check cell outputs (code cells)
             if cell.cell_type == 'code' and hasattr(cell, 'outputs'):
@@ -128,9 +130,11 @@ def get_referenced_assets(notebook_path: str) -> Set[str]:
 def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, any]:
     """
     Delete asset files not referenced in notebook outputs.
+    Implements "Reference Counting GC" for both images and text offload files.
     
     Scans notebook for asset references, deletes orphaned files.
     Safe to run periodically to clean up after cell deletions.
+    Automatically runs on kernel stop to maintain Git hygiene.
     
     Args:
         notebook_path: Path to notebook file
@@ -153,11 +157,11 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, 
             "message": f"No assets directory found at {assets_dir}"
         }
     
-    # Get referenced assets from notebook
+    # Get referenced assets from notebook (now includes text_*.txt files)
     referenced = get_referenced_assets(str(path))
     
-    # Get all asset files
-    all_assets = [f.name for f in assets_dir.iterdir() if f.is_file()]
+    # Get all asset files (both images and text offload files)
+    all_assets = [f.name for f in assets_dir.iterdir() if f.is_file() and not f.name.startswith('.')]
     
     # Find orphaned assets
     orphaned = [f for f in all_assets if f not in referenced]

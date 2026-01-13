@@ -73,6 +73,10 @@ def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
 def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
     """
     Processes raw notebook outputs for LLM consumption AND Human visualization.
+    Implements "Asset-Based Output Storage" to prevent VS Code crashes and context overflow.
+    
+    Large text outputs (>2KB or >50 lines) are offloaded to assets/text_{hash}.txt,
+    with preview stubs sent to VS Code/Agent.
     
     Returns:
         JSON String containing:
@@ -91,6 +95,10 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         ensure_assets_gitignored(asset_dir)
     except Exception:
         pass
+    
+    # Configuration for text offloading ("Stubbing & Paging")
+    MAX_INLINE_CHARS = 2000
+    MAX_INLINE_LINES = 50
     
     # Asset priority: PDF > SVG > PNG > JPEG (higher number = higher priority)
     ASSET_PRIORITY = {
@@ -112,6 +120,53 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
         for pattern in SECRET_PATTERNS:
             text = re.sub(pattern, '[REDACTED_SECRET]', text)
         return text
+    
+    def _make_preview(text: str, max_lines: int) -> str:
+        """Create a preview of text by showing first and last lines."""
+        lines = text.split('\n')
+        if len(lines) <= max_lines:
+            return text
+        
+        preview_lines = max_lines // 2
+        head = '\n'.join(lines[:preview_lines])
+        tail = '\n'.join(lines[-preview_lines:])
+        return f"{head}\n... [{len(lines) - max_lines} lines omitted] ...\n{tail}"
+    
+    def _offload_text_to_asset(raw_text: str, asset_dir: str, max_inline_chars: int, max_inline_lines: int) -> tuple:
+        """
+        Offload large text to asset file and return (stub_text, asset_path, metadata).
+        Returns (None, None, None) if text is small enough to keep inline.
+        """
+        if len(raw_text) <= max_inline_chars and raw_text.count('\n') <= max_inline_lines:
+            return None, None, None
+        
+        # 1. Save to Asset
+        content_hash = hashlib.md5(raw_text.encode()).hexdigest()
+        asset_filename = f"text_{content_hash}.txt"
+        asset_path = Path(asset_dir) / asset_filename
+        
+        with open(asset_path, 'w', encoding='utf-8') as f:
+            f.write(raw_text)
+        
+        # 2. Create Preview Stub
+        preview = _make_preview(raw_text, max_inline_lines)
+        line_count = raw_text.count('\n') + 1
+        size_kb = len(raw_text) / 1024
+        
+        stub_msg = f"\n\n>>> FULL OUTPUT ({size_kb:.1f}KB, {line_count} lines) SAVED TO: {asset_filename} <<<"
+        stub_text = preview + stub_msg
+        
+        # 3. Create Metadata
+        metadata = {
+            "mcp_asset": {
+                "path": str(asset_path).replace("\\", "/"),
+                "type": "text/plain",
+                "size_bytes": len(raw_text),
+                "line_count": line_count
+            }
+        }
+        
+        return stub_text, asset_path, metadata
     
     for out in outputs:
         # Normalize to dict
@@ -186,15 +241,26 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
-        # Handle Text (execute_result)
+        # Handle Text (execute_result) with Asset Offloading
         if 'text/plain' in data:
             text = data['text/plain']
             # [SECRET REDACTION]
             text = _redact_text(text)
-            # Truncate long output
-            if len(text) > 1500:
-                text = text[:750] + "\n... [TRUNCATED - Use inspect_variable() for full output] ...\n" + text[-500:]
-            llm_summary.append(text)
+            
+            # Check if text should be offloaded
+            stub_text, asset_path, asset_metadata = _offload_text_to_asset(
+                text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
+            )
+            
+            if stub_text:
+                # Text was offloaded - update both raw output and LLM summary
+                data['text/plain'] = stub_text
+                out_dict['metadata'].update(asset_metadata)
+                clean_raw['metadata'].update(asset_metadata)
+                llm_summary.append(stub_text)
+            else:
+                # Text is small enough to keep inline
+                llm_summary.append(text)
         
         # Handle HTML (often pandas DataFrames)
         if 'text/html' in data:
@@ -231,7 +297,7 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
                     clean_text = clean_text[:750] + "... [TRUNCATED]"
                 llm_summary.append(f"[HTML Content]: {clean_text}")
 
-        # Handle Stream Text (stdout/stderr)
+        # Handle Stream Text (stdout/stderr) with Asset Offloading
         if output_type == 'stream':
             text = out_dict.get('text', '')
             # Strip ANSI escape codes
@@ -241,10 +307,23 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
-            # Truncate long stream output
-            if len(text) > 1500:
-                text = text[:750] + "\n... [TRUNCATED] ...\n" + text[-500:]
-            llm_summary.append(text)
+            # Check if text should be offloaded
+            stub_text, asset_path, asset_metadata = _offload_text_to_asset(
+                text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
+            )
+            
+            if stub_text:
+                # Text was offloaded - update both raw output and LLM summary
+                out_dict['text'] = stub_text
+                if 'metadata' not in out_dict:
+                    out_dict['metadata'] = {}
+                out_dict['metadata'].update(asset_metadata)
+                clean_raw['text'] = stub_text
+                clean_raw['metadata'].update(asset_metadata)
+                llm_summary.append(stub_text)
+            else:
+                # Text is small enough to keep inline
+                llm_summary.append(text)
             
         # Handle Errors
         if output_type == 'error':

@@ -1226,6 +1226,15 @@ print(_inspect_var())
         
         session = self.sessions[abs_path]
         
+        # [ASSET CLEANUP] Run garbage collection before shutdown
+        # This ensures orphaned assets are cleaned up when kernel stops
+        try:
+            from src.asset_manager import prune_unused_assets
+            cleanup_result = prune_unused_assets(abs_path, dry_run=False)
+            logger.info(f"Asset cleanup on kernel stop: {cleanup_result.get('message', 'completed')}")
+        except Exception as e:
+            logger.warning(f"Asset cleanup failed: {e}")
+        
         # Signal queue processor to stop
         if session.get('queue_processor_task'):
             await session['execution_queue'].put(None)  # Shutdown signal

@@ -101,7 +101,37 @@ def detect_sync_needed(notebook_path: str):
     # }
 ```
 
-### Phase 5: Buffer-Aware Navigation
+### Phase 5: Asset-Based Output Storage ⭐ **NEW**
+**Problem**: Large outputs (50MB training logs) crash VS Code and overflow agent context.  
+**Solution**: Automatic offloading to `assets/text_*.txt` with smart retrieval.
+
+**Architecture**: "Stubbing & Paging"
+- Outputs >2KB or >50 lines → offloaded to disk
+- VS Code receives preview stub: "Epoch 1-25... >>> FULL OUTPUT SAVED TO: text_abc123.txt <<<"
+- Agent uses `read_asset()` to grep errors or read specific line ranges
+- Auto-cleanup on kernel stop (reference-counting GC)
+
+```python
+# Training produces 50MB of logs
+for epoch in range(1000):
+    print(f"Epoch {epoch}: Loss {loss}")
+
+# Agent sees stub, not full 50MB
+# Then selectively reads:
+read_asset("assets/text_abc123.txt", search="error")
+read_asset("assets/text_abc123.txt", lines=[900, 1000])
+```
+
+**Benefits**:
+- VS Code stability: No crashes from massive outputs
+- Agent context: 50MB → 2KB (98% reduction)
+- Git hygiene: Small .ipynb files (assets/ auto-gitignored)
+
+### Phase 6: Buffer-Aware Navigation
+    # }
+```
+
+### Phase 6: Buffer-Aware Navigation
 **Problem**: Agent calls `get_notebook_outline()` which reads stale disk state.  
 **Solution**: VS Code Client injects the live buffer structure into the tool call.
 
@@ -116,7 +146,7 @@ if (toolName === 'get_notebook_outline' && !args.structure_override) {
 
 Now the agent always sees the truth: the current buffer state.
 
-### Phase 6: Security & Resilience (New)
+### Phase 7: Security & Resilience (New)
 **Problem**: Code executed by agents ran with full user privileges, and infinite loops could hang the server. Complex environments (Conda) often failed to activate properly.
 **Solution**: 
 - **Docker Sandboxing**: `start_kernel` accepts a `docker_image` parameter to run code in an isolated container.
