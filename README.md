@@ -417,7 +417,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and pull 
 
 ## License
 
-MIT
+Apache-2.0
 
 ## Acknowledgments
 

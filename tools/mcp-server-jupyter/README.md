@@ -766,7 +766,7 @@ Built with:
 
 ## 📝 License
 
-[Your License Here]
+Apache-2.0
 
 ---
 

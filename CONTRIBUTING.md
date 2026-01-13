@@ -808,6 +808,6 @@ Before submitting a PR:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
 
 Thank you for helping make collaborative AI notebooks a reality! 🚀

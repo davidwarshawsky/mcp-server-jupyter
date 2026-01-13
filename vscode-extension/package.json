@@ -4,7 +4,7 @@
   "description": "Jupyter notebook kernel powered by MCP server for AI agent collaboration",
   "version": "0.1.0",
   "publisher": "warshawsky-research",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/warshawsky-research/mcp-agent-kernel"
