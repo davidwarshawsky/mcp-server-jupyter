@@ -3,11 +3,13 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { McpClient } from './mcpClient';
+import { VariableDashboardProvider } from './variableDashboard';
 import { ExecutionStatus, NotebookOutput } from './types';
 
 export class McpNotebookController {
   private controller: vscode.NotebookController;
   private mcpClient: McpClient;
+  private variableDashboard?: VariableDashboardProvider;
   private executionQueue = new Map<string, vscode.NotebookCellExecution>();
   private activeTaskIds = new Map<string, string>(); // execution key -> MCP task ID
   private notebookKernels = new Map<string, boolean>(); // track which notebooks have started kernels
@@ -40,6 +42,13 @@ export class McpNotebookController {
     this.statusBar.tooltip = 'Click to change Python environment';
     this.updateStatusBar();
     this.statusBar.show();
+  }
+
+  /**
+   * Set variable dashboard instance (called by extension.ts)
+   */
+  setVariableDashboard(dashboard: VariableDashboardProvider): void {
+    this.variableDashboard = dashboard;
   }
 
   /**
@@ -148,6 +157,10 @@ export class McpNotebookController {
       });
 
       // Start async execution with explicit ID
+      // Suspend variable polling while kernel is busy
+      if (this.variableDashboard) {
+        this.variableDashboard.setBusy(true);
+      }
       await this.mcpClient.runCellAsync(
         notebook.uri.fsPath,
         cell.index,
@@ -182,6 +195,10 @@ export class McpNotebookController {
           execution.end(false, Date.now());
       } finally {
           this.completionResolvers.delete(taskId);
+          // Resume variable polling when kernel returns to idle
+          if (this.variableDashboard) {
+            this.variableDashboard.setBusy(false);
+          }
       }
 
     } catch (error) {
@@ -339,9 +356,19 @@ export class McpNotebookController {
 
     this.notebookKernels.set(notebookPath, true);
 
+    // Start variable dashboard polling
+    if (this.variableDashboard) {
+      this.variableDashboard.startPolling(notebookPath);
+    }
+
     // Watch for notebook close to stop kernel
     const disposable = vscode.workspace.onDidCloseNotebookDocument(async (closed) => {
       if (closed.uri.fsPath === notebookPath) {
+        // Stop variable dashboard polling
+        if (this.variableDashboard) {
+          this.variableDashboard.stopPolling();
+        }
+        
         await this.mcpClient.stopKernel(notebookPath);
         this.notebookKernels.delete(notebookPath);
         disposable.dispose();

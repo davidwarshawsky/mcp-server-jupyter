@@ -2,16 +2,19 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import { McpClient } from './mcpClient';
 import { McpNotebookController } from './notebookController';
+import { VariableDashboardProvider } from './variableDashboard';
 import { checkPythonDependencies, promptInstallDependencies } from './dependencies';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
+let variableDashboard: VariableDashboardProvider;
 let syncStatusBar: vscode.StatusBarItem;
 const notebooksNeedingSync = new Set<string>();
 
 export interface ExtensionApi {
   mcpClient: McpClient;
   notebookController: McpNotebookController;
+  variableDashboard: VariableDashboardProvider;
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<ExtensionApi | void> {
@@ -57,6 +60,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     // Initialize notebook controller
     notebookController = new McpNotebookController(mcpClient);
     context.subscriptions.push(notebookController);
+
+    // Initialize Variable Dashboard
+    variableDashboard = new VariableDashboardProvider(mcpClient);
+    const variableView = vscode.window.createTreeView('mcpVariables', {
+      treeDataProvider: variableDashboard,
+      showCollapseAll: false
+    });
+    context.subscriptions.push(variableView);
+
+    // Pass variable dashboard to controller for lifecycle management
+    notebookController.setVariableDashboard(variableDashboard);
 
     // Create sync status bar item
     syncStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
@@ -117,13 +131,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       })
     );
 
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.refreshVariables', async () => {
+        await variableDashboard.refresh();
+      })
+    );
+
     // Show success message
     vscode.window.showInformationMessage('MCP Agent Kernel is ready!');
     console.log('MCP Agent Kernel extension activated successfully');
     
     return {
       mcpClient,
-      notebookController
+      notebookController,
+      variableDashboard
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);

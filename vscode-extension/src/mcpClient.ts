@@ -339,6 +339,78 @@ export class McpClient {
   }
 
   /**
+   * Get variable manifest (Variable Dashboard)
+   */
+  async getVariableManifest(notebookPath: string): Promise<any[]> {
+    const result = await this.callTool('get_variable_manifest', {
+      notebook_path: notebookPath,
+    });
+    // Result can be:
+    // 1) Array directly
+    // 2) Wrapper object { llm_summary: string, raw_outputs: [...] }
+    // 3) Stringified wrapper
+    try {
+      if (Array.isArray(result)) {
+        return result;
+      }
+      // If it's a string, try to parse
+      if (typeof result === 'string') {
+        try {
+          const parsed = JSON.parse(result);
+          return this.extractManifestFromWrapper(parsed);
+        } catch {
+          return [];
+        }
+      }
+      // If it's an object, try to extract
+      if (typeof result === 'object' && result) {
+        return this.extractManifestFromWrapper(result);
+      }
+    } catch (e) {
+      console.warn('Failed to parse variable manifest:', e);
+    }
+    return [];
+  }
+
+  /**
+   * Extract manifest array from sanitize_outputs wrapper
+   */
+  private extractManifestFromWrapper(wrapper: any): any[] {
+    try {
+      const llm = wrapper?.llm_summary;
+      if (typeof llm === 'string') {
+        // Try direct parse
+        try {
+          const arr = JSON.parse(llm);
+          if (Array.isArray(arr)) return arr;
+        } catch {
+          // Fallback: extract bracketed JSON array
+          const match = llm.match(/\[[\s\S]*\]/);
+          if (match) {
+            const arr = JSON.parse(match[0]);
+            if (Array.isArray(arr)) return arr;
+          }
+        }
+      }
+      // Fallback: check raw_outputs for text/plain containing JSON
+      if (Array.isArray(wrapper?.raw_outputs)) {
+        for (const ro of wrapper.raw_outputs) {
+          const tp = ro?.text || ro?.data?.['text/plain'];
+          if (tp && typeof tp === 'string' && tp.trim().startsWith('[')) {
+            try {
+              const arr = JSON.parse(tp);
+              if (Array.isArray(arr)) return arr;
+            } catch { /* ignore */ }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to extract manifest from wrapper:', e);
+    }
+    return [];
+  }
+
+  /**
    * Send a JSON-RPC request to the MCP server
    */
   private async sendRequest(method: string, params: any): Promise<any> {

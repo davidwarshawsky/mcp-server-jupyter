@@ -73,8 +73,40 @@
       {
         "command": "mcp-jupyter.syncNotebook",
         "title": "MCP Jupyter: Sync Notebook from Disk"
+      },
+      {
+        "command": "mcp-jupyter.refreshVariables",
+        "title": "MCP Jupyter: Refresh Variables",
+        "icon": "$(refresh)"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mcp-jupyter",
+          "title": "MCP Jupyter",
+          "icon": "$(notebook)"
+        }
+      ]
+    },
+    "views": {
+      "mcp-jupyter": [
+        {
+          "id": "mcpVariables",
+          "name": "Variable Dashboard",
+          "when": "true"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "mcp-jupyter.refreshVariables",
+          "when": "view == mcpVariables",
+          "group": "navigation"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle-python && npm run compile",
