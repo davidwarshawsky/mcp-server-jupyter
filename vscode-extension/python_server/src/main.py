@@ -1839,7 +1839,11 @@ def main():
     # --- SERVER MODE (Existing Logic) ---
     try:
         # Restore any persisted sessions from previous server runs
-        asyncio.run(session_manager.restore_persisted_sessions())
+        # Wrap in timeout to prevent hanging on stale session files
+        try:
+            asyncio.run(asyncio.wait_for(session_manager.restore_persisted_sessions(), timeout=10.0))
+        except asyncio.TimeoutError:
+            logger.warning("Session restoration timed out, skipping")
         
         if args.transport == "websocket":
             import uvicorn

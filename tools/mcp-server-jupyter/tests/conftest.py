@@ -387,3 +387,16 @@ def event_loop_policy():
     if sys.platform == 'win32':
         return asyncio.WindowsSelectorEventLoopPolicy()
     return asyncio.DefaultEventLoopPolicy()
+
+
+@pytest.fixture(autouse=True)
+def isolate_home(monkeypatch, tmp_path):
+    """
+    Isolates the HOME directory for each test to prevent side effects 
+    and race conditions in parallel execution (pytest-xdist).
+    This ensures ~/.mcp-jupyter/sessions is unique per test.
+    """
+    fake_home = tmp_path / "fake_home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+

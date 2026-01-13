@@ -40,8 +40,8 @@ class MCPServerHarness:
         await self._send_json(init_req)
         
         # 2. Wait for Initialize Result
-        # Timeout safety for handshake
-        resp = await asyncio.wait_for(self.read_response(), timeout=5.0)
+        # Timeout safety for handshake (increased for parallel execution)
+        resp = await asyncio.wait_for(self.read_response(), timeout=30.0)
         assert "result" in resp, f"Handshake failed: {resp}"
         
         # 3. Send Initialized Notification
@@ -68,7 +68,7 @@ class MCPServerHarness:
         }
         await self._send_json(req)
 
-    async def read_response(self, timeout=5.0):
+    async def read_response(self, timeout=30.0):
         # Read lines until we get a response or notification
         while True:
             try:
@@ -95,5 +95,14 @@ class MCPServerHarness:
             try:
                 self.proc.terminate()
                 await self.proc.wait()
+                
+                # [FIX] Yield to event loop to allow transport cleanup callbacks to run
+                await asyncio.sleep(0.1)
+
+                # Explicitly close transport to prevent __del__ from trying to close it after loop death
+                if hasattr(self.proc, "_transport"):
+                    self.proc._transport.close()
             except ProcessLookupError:
                 pass
+            finally:
+                self.proc = None

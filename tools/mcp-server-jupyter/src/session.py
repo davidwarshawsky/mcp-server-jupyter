@@ -1209,7 +1209,7 @@ print(_inspect_var())
         if not exec_id: return "Error starting internal execution."
         
         # Wait loop
-        for _ in range(20): # Write max wait 10s (20 * 0.5)
+        for _ in range(60): # Write max wait 30s (60 * 0.5)
             await asyncio.sleep(0.5)
             status = self.get_execution_status(nb_path, exec_id)
             if status['status'] in ['completed', 'error']:

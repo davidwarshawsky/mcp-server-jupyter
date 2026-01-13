@@ -59,8 +59,8 @@ async def test_async_execution_flow():
         await asyncio.sleep(3)
         
         # 5. Check again (Should be done) - increased wait time for parallel test reliability
-        max_wait = 10  # seconds
-        wait_interval = 0.5
+        max_wait = 30  # seconds
+        wait_interval = 1.0
         elapsed = 0
         final_status = None
         

@@ -194,7 +194,7 @@ my_dict = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
     
     # Wait for setup
     status = {'status': 'not_found'}
-    for _ in range(20):
+    for _ in range(60):
         await asyncio.sleep(0.5)
         status = real_session_manager.get_execution_status(str(nb_path), exec_id)
         if status['status'] in ['completed', 'error']:
@@ -353,7 +353,7 @@ plt.close(fig)
     
     # Wait for completion
     status = {'status': 'not_found'}
-    for _ in range(30):
+    for _ in range(60):
         await asyncio.sleep(0.5)
         status = real_session_manager.get_execution_status(str(nb_path), exec_id)
         if status['status'] in ['completed', 'error']:

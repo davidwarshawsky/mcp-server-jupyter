@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Minimal Starlette WebSocket server to test the setup"""
+"""Minimal Starlette WebSocket server to test the setup
+
+Note: This is a manual utility script. Automated coverage exists in
+tools/mcp-server-jupyter/tests/ (Starlette routing/WS). Marked skipped for pytest.
+"""
+import pytest
+pytestmark = pytest.mark.skip("Manual script, not a pytest test. See automated tests under tools/mcp-server-jupyter/tests/.")
 import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute

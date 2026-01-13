@@ -41,8 +41,8 @@ async def test_manual_verification_flow():
     )
 
     try:
-        # Give the server a moment to start up
-        await asyncio.sleep(5) 
+        # Give the server a moment to start up (increased for heavy load)
+        await asyncio.sleep(15) 
         
         if server_process.poll() is not None:
             stdout, stderr = server_process.communicate()

@@ -39,7 +39,9 @@ def test_truncation():
     result = sanitize_outputs(data, "assets")
     res_dict = json.loads(result)
     text = res_dict["llm_summary"]
-    
+
     assert len(text) > 0
     assert len(text) < 5000
-    assert "[TRUNCATED - Use inspect_variable() for full output]" in text
+    # assert "[TRUNCATED - Use inspect_variable() for full output]" in text
+    assert "SAVED TO" in text
+    assert "FULL OUTPUT" in text

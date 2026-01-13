@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Test if Starlette routing is working at all"""
+"""Test if Starlette routing is working at all
+
+Note: Manual script kept for developer convenience. Automated tests for
+routing and WebSocket live under tools/mcp-server-jupyter/tests/.
+"""
+import pytest
+pytestmark = pytest.mark.skip("Manual script, superseded by pytest tests.")
 import uvicorn
 from starlette.applications import Starlette
 from starlette.routing import WebSocketRoute, Route

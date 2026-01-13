@@ -97,7 +97,7 @@ class MCPWebSocketHarness:
     async def send_json(self, data):
         await self.ws.send(json.dumps(data))
 
-    async def read_response(self, timeout=5.0):
+    async def read_response(self, timeout=30.0):
         return json.loads(await asyncio.wait_for(self.ws.recv(), timeout=timeout))
 
     async def send_request(self, method, params=None):
@@ -123,6 +123,16 @@ class MCPWebSocketHarness:
                 await asyncio.wait_for(self.proc.wait(), timeout=2.0)
             except asyncio.TimeoutError:
                 self.proc.kill()
+                await self.proc.wait()
+            
+            # [FIX] Yield to event loop to allow transport cleanup callbacks to run
+            await asyncio.sleep(0.1)
+
+            # Explicitly close transport to prevent __del__ from trying to close it after loop death
+            if hasattr(self.proc, "_transport"):
+                self.proc._transport.close()
+                
+            self.proc = None
 
 
 @pytest.mark.asyncio

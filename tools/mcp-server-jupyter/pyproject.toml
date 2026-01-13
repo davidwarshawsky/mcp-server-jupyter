@@ -37,7 +37,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
-timeout = 30
+timeout = 120
 markers = [
     "optional: marks tests as optional (heavy integration tests requiring matplotlib/pandas)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

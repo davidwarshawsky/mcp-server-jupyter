@@ -116,6 +116,7 @@ class TestSessionIsolation:
         await session_manager.stop_kernel(str(nb2))
     
     @pytest.mark.asyncio
+    @pytest.mark.timeout(60)
     async def test_stop_one_doesnt_affect_other(self, session_manager, tmp_path):
         """Stopping one kernel shouldn't affect another."""
         nb1 = tmp_path / "notebook1.ipynb"

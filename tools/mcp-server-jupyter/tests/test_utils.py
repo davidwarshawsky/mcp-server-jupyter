@@ -24,7 +24,10 @@ def test_sanitize_outputs_truncation():
     summary = sanitize_outputs([mock_output], "dummy/path")
     # Updated: New truncation message includes "TRUNCATED" in uppercase
     summary_dict = json.loads(summary)
-    assert "TRUNCATED" in summary_dict['llm_summary']
+    # NOTE: Output is no longer "TRUNCATED", it's "SAVED TO" an asset.
+    # The new behavior offloads large text to a file.
+    # assert "TRUNCATED" in summary_dict['llm_summary']
+    assert "SAVED TO" in summary_dict['llm_summary']
     assert len(summary_dict['llm_summary']) < 5000
 
 def test_sanitize_outputs_html_conversion():

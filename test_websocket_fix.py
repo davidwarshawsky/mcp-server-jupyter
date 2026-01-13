@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Test WebSocket connection to MCP server"""
+"""Test WebSocket connection to MCP server
+
+Note: Manual script. Automated WebSocket tests exist (see test_mcp_websocket_subprotocol.py
+and test_websocket_transport.py). Mark skipped for pytest.
+"""
+import pytest
+pytestmark = pytest.mark.skip("Manual script, covered by automated tests.")
 import asyncio
 import json
 import websockets

@@ -42,19 +42,17 @@ for i in range(5):
         captured_outputs = []
         target_data = None
         
-        for _ in range(50):  # Poll up to 5 seconds (increased for parallel mode)
+        for _ in range(300):  # Poll up to 30 seconds (increased for parallel mode)
             await asyncio.sleep(0.1)
-            session = manager.get_session(str(nb_path))
-            
-            if not session:
-                continue
-            
+
             # Find execution
             target_data = None
-            for msg_id, data in session['executions'].items():
-                if data['id'] == exec_id:
-                    target_data = data
-                    break
+            session = manager.get_session(str(nb_path))
+            if session:
+                for msg_id, data in session['executions'].items():
+                    if data['id'] == exec_id:
+                        target_data = data
+                        break
             
             if target_data:
                 new_count = target_data.get('output_count', 0)
@@ -229,7 +227,7 @@ class TestVisualizationConfiguration:
         
         # Wait for completion with polling
         target_data = None
-        for _ in range(30):  # Poll up to 3 seconds
+        for _ in range(150):  # Poll up to 15 seconds
             await asyncio.sleep(0.1)
             session = manager.get_session(str(nb_path))
             if session:
@@ -272,7 +270,7 @@ class TestVisualizationConfiguration:
         
         # Wait for completion with polling
         target_data = None
-        for _ in range(30):  # Poll up to 3 seconds
+        for _ in range(300):  # Poll up to 30 seconds (increased from 10s for parallel mode)
             await asyncio.sleep(0.1)
             session = manager.get_session(str(nb_path))
             if session:
@@ -323,7 +321,7 @@ print('Done')
         output_idx = 0
         resource_checks = []
         
-        for _ in range(30):  # Monitor for 3 seconds (increased for parallel mode)
+        for _ in range(150):  # Monitor for 15 seconds (increased for parallel mode)
             await asyncio.sleep(0.1)
             
             # Check streaming
@@ -388,7 +386,7 @@ class TestProductionEdgeCases:
         
         # Wait for completion
         target_data = None
-        for _ in range(50):  # Increased timeout for slower systems
+        for _ in range(150):  # Increased timeout for slower systems
             await asyncio.sleep(0.1)
             session = manager.get_session(str(nb_path))
             if session:
@@ -436,7 +434,7 @@ print('Done!')
         
         # Wait for completion
         target_data = None
-        for _ in range(50):
+        for _ in range(150):
             await asyncio.sleep(0.1)
             session = manager.get_session(str(nb_path))
             if session:

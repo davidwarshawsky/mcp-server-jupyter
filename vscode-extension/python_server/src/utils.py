@@ -123,8 +123,12 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
     
     def _make_preview(text: str, max_lines: int) -> str:
         """Create a preview of text by showing first and last lines."""
-        lines = text.split('\n')
-        if len(lines) <= max_lines:
+        # First, truncate by chars if single line is huge
+        MAX_PREVIEW_CHARS = 1000
+        if len(text) > MAX_PREVIEW_CHARS * 2: # heuristic: if crazy large
+            half = MAX_PREVIEW_CHARS
+            text = text[:half] + "\n... [long line truncated] ...\n" + text[-half:]
+
             return text
         
         preview_lines = max_lines // 2
@@ -255,7 +259,12 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             if stub_text:
                 # Text was offloaded - update both raw output and LLM summary
                 data['text/plain'] = stub_text
+                
+                # Ensure metadata exists in out_dict
+                if 'metadata' not in out_dict:
+                    out_dict['metadata'] = {}
                 out_dict['metadata'].update(asset_metadata)
+                
                 clean_raw['metadata'].update(asset_metadata)
                 llm_summary.append(stub_text)
             else:

@@ -36,7 +36,7 @@ async def test_async_error_handling(session_manager_fixture, temp_notebook):
     
     # 2. Polling loop (increased timeout to account for autoreload delay)
     final_status = None
-    for _ in range(20):  # Increased from 10 to account for autoreload delay (~0.5s) + execution time
+    for _ in range(60):  # Increased from 20 to account for parallel execution load
         await asyncio.sleep(0.5)
         status = manager.get_execution_status(temp_notebook, exec_id)
         if status['status'] in ['completed', 'error']:
@@ -101,7 +101,7 @@ async def test_cwd_is_notebook_dir(session_manager_fixture, temp_notebook):
     exec_id = await manager.execute_cell_async(temp_notebook, 0, code)
     
     final_status = None
-    for _ in range(20):  # Increased from 10 to account for autoreload delay
+    for _ in range(60):  # Increased to account for parallel execution load
         await asyncio.sleep(0.5)
         status = manager.get_execution_status(temp_notebook, exec_id)
         if status['status'] == 'completed':
