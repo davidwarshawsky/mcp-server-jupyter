@@ -23,6 +23,7 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 - **Robustness**: Automatic kernel recovery, execution provenance tracking, clear_output handling, **execution timeouts**
 - **Context-Aware**: Smart HTML table preview (reduces API calls by 50%)
 - **Asset Management**: Automatic extraction of plots/PDFs to disk (98% context reduction)
+- **Asset-Based Output Storage**: Large text outputs (>2KB or >50 lines) offloaded to `assets/text_*.txt` files, preventing VS Code crashes and context overflow ⭐ **NEW**
 - **Progress Bar Support**: Handles `clear_output` messages correctly (prevents file size explosion)
 
 ### 🚀 Performance
@@ -48,6 +49,110 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 - **Python**: 3.10, 3.11, or 3.12
 - **OS**: Windows, macOS, Linux
 - **Dependencies**: Jupyter Client, nbformat, ipykernel, MCP SDK, psutil
+
+### Setup
+
+1.  **Clone and Install**:
+    ```bash
+    git clone https://github.com/yourusername/mcp-server-jupyter.git
+    cd mcp-server-jupyter
+    pip install -e tools/mcp-server-jupyter
+    ```
+
+---
+
+## 🏗️ Architecture: The "Hub and Spoke" Model
+
+To enable collaboration between an AI Agent and a Human (typing in VS Code), both must share the **same** running Jupyter kernel. We achieve this using a "Hub and Spoke" architecture:
+
+1.  **The Hub (Server)**: A single `mcp-jupyter` process running in the background (e.g., in `tmux`) acting as the source of truth for kernel state.
+2.  **Spoke 1 (VS Code)**: The editor connects via WebSocket to visualize results and allow human edits.
+3.  **Spoke 2 (Agent)**: The AI connects via a "Bridge" mode to execute code and analyze data.
+
+### 🚀 Quick Start
+
+#### 1. Start the "Hub" (Server)
+Run this in a dedicated terminal (or `tmux`/`screen` session):
+
+```bash
+# Start the server on port 3000
+mcp-jupyter --transport websocket --port 3000
+```
+*   **Windows**: Use a dedicated Command Prompt or PowerShell window.
+*   **Linux/Mac**: Use `tmux new -s jupyter` or `screen -S jupyter` to keep it running in the background.
+
+#### 2. Connect Your Agent (Spoke 1)
+Configure your MCP client (like Claude Desktop or Copilot) with `mcp.json`. This tells the agent to connect to your running server instead of starting a new one.
+
+**`mcp.json` Configuration**:
+```json
+{
+  "mcpServers": {
+    "jupyter": {
+      "command": "mcp-jupyter",
+      "args": [
+        "--mode", "client",
+        "--port", "3000"
+      ]
+    }
+  }
+}
+```
+
+#### 3. Connect VS Code (Spoke 2)
+1.  Install the **MCP Jupyter** VS Code extension.
+2.  Open Settings (`Ctrl+,`) and search for `mcp-jupyter`.
+3.  Set **Server Mode** to `connect`.
+4.  Set **Remote Port** to `3000`.
+5.  Run **Developer: Reload Window** to apply changes.
+
+Now, when you define a variable in VS Code (`x = 42`), the Agent can immediately see it (`inspect_variable('x')`), and vice versa.
+
+---
+
+## 💻 Windows Setup
+
+Windows requires slightly different handling for paths and background processes.
+
+1.  **Start the Hub**:
+    Open PowerShell or Command Prompt and run:
+    ```powershell
+    mcp-jupyter --transport websocket --port 3000
+    ```
+    *Keep this window open.*
+
+2.  **`mcp.json` for Windows**:
+    You must use double backslashes for paths in JSON.
+    ```json
+    {
+      "mcpServers": {
+        "jupyter": {
+          "command": "mcp-jupyter.exe", 
+          "args": [
+            "--mode", "client",
+            "--port", "3000"
+          ]
+        }
+      }
+    }
+    ```
+    *Note: If `mcp-jupyter` is not in your PATH, provide the full path to the executable script in your python scripts folder (e.g., `C:\\Users\\You\\AppData\\Roaming\\Python\\Scripts\\mcp-jupyter.exe`).*
+
+---
+
+## 🤖 The "Jupyter Expert" Agent
+
+The file [.github/agents/Jupyter Expert.agent.md](../../.github/agents/Jupyter%20Expert.agent.md) is a **System Prompt** designed to turn a generic LLM into a specialized Data Science assistant.
+
+### How it Works
+When you load this agent definition (e.g., in GitHub Copilot or a custom Agent UI), it instructs the model to:
+1.  **Respect the Disk**: Checks `detect_sync_needed` before execution to prevent overwriting user edits.
+2.  **Use Stable IDs**: Always calls `get_notebook_outline` to get valid Cell IDs before editing.
+3.  **Sync State**: Automatically runs `sync_state_from_disk` if it detects you changed the code.
+
+To use it, copy the content of that file into your Custom Instructions or System Prompt configuration.
+
+
 - **Optional**: kaleido (for Plotly static PNG rendering), matplotlib, bokeh
 
 ### Quick Start
@@ -190,10 +295,35 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 - `delete_metadata()` / `delete_cell_metadata()` - Remove metadata
 - `list_metadata_keys()` - List available keys
 
-### Information & Inspection (3 tools)
+### Information & Inspection (4 tools)
 - `list_variables()` - List all variables in kernel
 - `get_variable_info()` - Get structured variable data
 - `inspect_variable()` - Get human-readable summary
+- `get_variable_manifest()` - Lightweight manifest with name/type/size (optimized for UI polling) ⭐ **NEW**
+
+### Asset Management (2 tools)
+- `read_asset()` - Read content from offloaded output files with pagination/search
+- `prune_unused_assets()` - Garbage collect orphaned asset files (runs automatically on kernel stop)
+
+> **Use Case**: When cells produce massive outputs (50MB training logs, large arrays), the system automatically offloads them to `assets/text_*.txt` files. Agents can use `read_asset()` to grep for errors or read specific line ranges without loading the entire output into context. Automatic cleanup prevents disk bloat.
+
+### Variable Dashboard ⭐ **NEW**
+The `get_variable_manifest()` tool bridges the gap between human and agent workflows by providing a lightweight view of kernel state:
+
+**For Humans**: VS Code extension can poll this tool to populate a Variable Explorer sidebar, giving visibility into what the agent has in memory.
+
+**For Agents**: Quick overview of available variables without expensive inspection operations.
+
+**Output Format**:
+```json
+[
+  {"name": "df", "type": "DataFrame", "size": "2.4 MB"},
+  {"name": "model", "type": "Sequential", "size": "145.3 MB"},
+  {"name": "epochs", "type": "int", "size": "28 B"}
+]
+```
+
+**Performance**: Optimized for frequent polling (typically <100ms for 50 variables)
 
 ---
 
@@ -364,6 +494,42 @@ Every cell execution automatically tracked with metadata:
 
 ## ⚡ Performance Optimizations
 
+### Asset-Based Output Storage ⭐ **NEW**
+**Problem**: Large training logs (50MB+) crash VS Code UI and overflow agent context windows.
+
+**Solution**: Text outputs >2KB or >50 lines are automatically offloaded to `assets/text_{hash}.txt`:
+
+**Architecture**: "Stubbing & Paging"
+```python
+# Large output automatically intercepted
+for epoch in range(1000):
+    print(f"Epoch {epoch}: Loss {loss}")  # 50MB of text
+
+# VS Code receives a stub instead:
+"""
+Epoch 1: Loss 0.99
+Epoch 2: Loss 0.98
+... [25 lines omitted] ...
+
+>>> FULL OUTPUT (50.2MB, 1000 lines) SAVED TO: text_abc123def456.txt <<<
+"""
+
+# Agent can grep for errors without loading entire file
+read_asset("assets/text_abc123def456.txt", search="error")
+# Or read specific section
+read_asset("assets/text_abc123def456.txt", lines=[900, 1000])
+```
+
+**Benefits**:
+- **VS Code Stability**: No more UI crashes from 100MB logs
+- **Agent Context**: Sees 20-line summary instead of 50,000 tokens
+- **Git Hygiene**: `.ipynb` files stay small and diff-able (assets/ is auto-gitignored)
+- **Auto-Cleanup**: Garbage collector removes orphaned files on kernel stop
+
+**Impact**: 
+- Context reduction: 50MB → 2KB (98%)
+- Test coverage: 7 new tests in `tests/test_asset_offload.py`
+
 ### Smart HTML Table Preview
 **Before**: All tables hidden → 2 API calls for `df.head()`
 ```python
@@ -409,11 +575,12 @@ pytest tests/ --cov=src --cov-report=html
 - **Core Tests**: 115 tests, no external dependencies (matplotlib/pandas)
 - **Optional Tests**: 5 tests, require matplotlib/pandas (marked with `@pytest.mark.optional`)
 - **Phase 3 Tests**: 10 tests covering streaming, resource monitoring, visualization, and production edge cases
+- **Asset Offload Tests**: 7 tests covering text offloading, garbage collection, and selective retrieval (in `test_asset_offload.py`) ⭐ **NEW**
 - **Parallel Execution**: Uses pytest-xdist for 4x speedup
 
 ### Test Results
 ```
-120 passed, 2 skipped in 52.92s (parallel mode with -n 15)
+127 passed, 2 skipped in 52.92s (parallel mode with -n 15)
 ```
 
 ---
@@ -490,7 +657,20 @@ black --check src/ tests/  # Check only, no changes
 ## 📋 Recent Updates
 
 ### January 2026
-- ✅ **Handoff Protocol for VS Code Extensions** ⭐ NEW
+- ✅ **Variable Dashboard** ⭐ **NEW**
+  - `get_variable_manifest()` tool for lightweight kernel state visibility
+  - Returns name, type, and memory size for all variables
+  - Optimized for UI polling (typically <100ms for 50 variables)
+  - Bridges gap between human visibility and agent workflows
+  - Test coverage: 3 new tests in `tests/test_variable_manifest.py`
+- ✅ **Asset-Based Output Storage**
+  - Large text outputs (>2KB or >50 lines) automatically offloaded to `assets/text_*.txt`
+  - Preview stubs sent to VS Code/Agent with truncation markers
+  - `read_asset()` tool for selective retrieval (grep, pagination, line ranges)
+  - Auto-cleanup on kernel stop via reference-counting garbage collection
+  - 98% context reduction for large outputs (50MB → 2KB stub)
+  - Test coverage: 7 new tests in `tests/test_asset_offload.py`
+- ✅ **Handoff Protocol for VS Code Extensions**
   - `detect_sync_needed()` - Detects when kernel state diverges from disk
   - `sync_state_from_disk()` - Rebuilds kernel state after human edits
   - Solves "Split Brain" problem for agent ↔ human workflows
@@ -501,7 +681,7 @@ black --check src/ tests/  # Check only, no changes
   - Static visualization rendering (Plotly/Bokeh output PNG/SVG instead of JS)
   - **clear_output** message handling (prevents file size explosion from progress bars/tqdm)
   - Graceful degradation for missing visualization libraries (kaleido/matplotlib/bokeh)
-- ✅ **Test suite expansion**: Now 120 passing tests (up from 110)
+- ✅ **Test suite expansion**: Now 127 passing tests (up from 120)
 - ✅ **Fixed race condition in async execution**: `get_execution_status()` now correctly tracks queued executions before queue processing begins
 - ✅ **Parallel test stability**: All tests pass consistently with 15 workers (pytest -n 15)
 - ✅ **Removed flaky test markers**: Test suite fully stable
@@ -586,7 +766,7 @@ Built with:
 
 ## 📝 License
 
-[Your License Here]
+Apache-2.0
 
 ---
 

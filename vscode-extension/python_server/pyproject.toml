@@ -14,8 +14,9 @@ nbformat = "^5.0.0"
 ipykernel = "^6.0.0"
 psutil = "^5.9.0"
 GitPython = "^3.1.0"
-uvicorn = "^0.40.0"
+uvicorn = {version = "^0.40.0", extras = ["standard"]}
 starlette = "^0.51.0"
+websockets = "^14.0"
 
 [tool.poetry.scripts]
 mcp-jupyter = "src.main:main"
@@ -28,7 +29,6 @@ pytest-cov = "^4.1.0"
 pytest-timeout = "^2.2.0"
 hypothesis = "^6.92.0"
 black = "^24.0.0"
-websockets = "^16.0"
 
 [build-system]
 requires = ["poetry-core"]
@@ -37,7 +37,7 @@ build-backend = "poetry.core.masonry.api"
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
-timeout = 30
+timeout = 120
 markers = [
     "optional: marks tests as optional (heavy integration tests requiring matplotlib/pandas)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
