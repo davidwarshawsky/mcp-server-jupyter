@@ -17,6 +17,8 @@ GitPython = "^3.1.0"
 uvicorn = {version = "^0.40.0", extras = ["standard"]}
 starlette = "^0.51.0"
 websockets = "^14.0"
+structlog = "^24.1.0"
+pydantic = "^2.0.0"
 
 [tool.poetry.scripts]
 mcp-jupyter = "src.main:main"

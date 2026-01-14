@@ -15,13 +15,15 @@ from src import notebook, utils, environment, validation
 from src.utils import ToolResult
 import websockets
 
-# Configure logging to stderr to avoid corrupting JSON-RPC stdout
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stderr
-)
-logger = logging.getLogger(__name__)
+# Pydantic models and decorator for strict validation
+from src.models import StartKernelArgs, RunCellArgs
+from src.validation import validated_tool
+
+# Initialize structured logging via structlog (observability)
+from src.observability import configure_logging, get_logger
+import traceback
+
+logger = configure_logging()
 
 # [HEARTBEAT] Auto-shutdown configuration
 HEARTBEAT_INTERVAL = 60  # Check every minute
@@ -123,6 +125,11 @@ class ConnectionManager:
                 logger.error(f"Broadcast error: {e}")
                 self.disconnect(connection)
 
+def fatal_exception_handler(loop, context):
+    """Asyncio exception handler that ensures JSON logs before death."""
+    msg = context.get("exception", context.get("message", ""))
+    logger.critical("fatal_async_error", error=str(msg), context=context)
+
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
@@ -166,6 +173,7 @@ def save_proposals():
 PROPOSAL_STORE = load_proposals()
 
 @mcp.tool()
+@validated_tool(StartKernelArgs)
 async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
     """
     Boot a background process.
@@ -600,6 +608,7 @@ def check_code_syntax(code: str):
 # --- NEW ASYNC TOOLS ---
 
 @mcp.tool()
+@validated_tool(RunCellArgs)
 async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
     """
     Submits a cell for execution in the background.
@@ -1911,6 +1920,11 @@ def main():
     # Windows event loop policy fix
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Bind global exception handler and set a dedicated loop so fatal errors are caught
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(fatal_exception_handler)
 
     # --- CLIENT MODE ---
     if args.mode == "client":
