@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import List, Any, Optional
 
 # Global thread pool for CPU-bound tasks (JSON serialization, Pydantic validation)
-# Size is configurable via environment variable `MCP_IO_POOL_SIZE` to match expected concurrency.
-# Default: 10 (suitable for ~5 agents with ~2 concurrent heavy ops each)
+# Size is configurable via Settings (pydantic-settings). Update via environment variable MCP_IO_POOL_SIZE.
+from src.config import settings
+
 import os
-_io_pool_workers = int(os.getenv('MCP_IO_POOL_SIZE', '10'))
+
+_io_pool_workers = int(os.getenv('MCP_IO_POOL_SIZE') or getattr(settings, 'MCP_IO_POOL_SIZE', 4))
 io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 
 

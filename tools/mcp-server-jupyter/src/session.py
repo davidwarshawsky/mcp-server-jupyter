@@ -516,6 +516,20 @@ class SessionManager:
                 cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
                 km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
 
+        # [CRUCIBLE] Resource Limits: if not using Docker, ensure prlimit is prepended when available
+        try:
+            import shutil
+            if sys.platform != 'win32' and not docker_image and shutil.which('prlimit'):
+                # Avoid double-prepending
+                if not (isinstance(km.kernel_cmd, list) and km.kernel_cmd and km.kernel_cmd[0] == 'prlimit'):
+                    from src.config import settings
+                    limit_bytes = int(getattr(settings, 'MCP_MEMORY_LIMIT_BYTES', 8 * 1024**3))
+                    km.kernel_cmd = ['prlimit', f'--as={limit_bytes}'] + (km.kernel_cmd if isinstance(km.kernel_cmd, list) else [km.kernel_cmd])
+                    logger.info(f"resource_limits_applied limit={limit_bytes}")
+        except Exception:
+            # Non-fatal: log and continue
+            logger.warning("prlimit_check_failed")
+
         # 2. Start Kernel with Correct CWD and Environment (wrapped in try/except to ensure clean shutdown)
         try:
             await km.start_kernel(cwd=notebook_dir, env=kernel_env)
@@ -1622,6 +1636,54 @@ print(_inspect_var())
     def get_session(self, nb_path: str):
         abs_path = str(Path(nb_path).resolve())
         return self.sessions.get(abs_path)
+
+    async def reconcile_zombies(self):
+        """
+        [CRUCIBLE] Startup Task: Kill orphan kernels from previous runs.
+        """
+        try:
+            import psutil
+            import json
+        except Exception:
+            logger.warning("reaper_skipped_no_psutil")
+            return
+
+        logger.info("reaper_start: Scanning for zombie kernels...")
+
+        for session_file in list(self.persistence_dir.glob("session_*.json")):
+            try:
+                with open(session_file, 'r') as f:
+                    data = json.load(f)
+
+                pid = data.get('pid')
+
+                if pid and psutil.pid_exists(pid):
+                    try:
+                        proc = psutil.Process(pid)
+                        cmdline = " ".join(proc.cmdline())
+                        # Heuristic checks: ipykernel / jupyter / python
+                        if any(x in cmdline for x in ('ipykernel', 'ipython', 'jupyter', 'python')):
+                            logger.warning(f"reaper_kill pid={pid} notebook={data.get('notebook_path')}")
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2)
+                            except psutil.TimeoutExpired:
+                                proc.kill()
+                    except Exception as e:
+                        logger.warning(f"reaper_proc_check_failed pid={pid} error={str(e)}")
+
+                # Remove persisted session file unconditionally (best-effort cleanup)
+                try:
+                    session_file.unlink()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                logger.error(f"reaper_error file={str(session_file)} error={str(e)}")
+                try:
+                    session_file.unlink()
+                except Exception:
+                    pass
 
 
 # --- Compatibility wrapper for finalizing executions synchronously ---

@@ -137,6 +137,16 @@ session_manager.set_mcp_server(mcp)
 connection_manager = ConnectionManager()
 session_manager.connection_manager = connection_manager
 
+# Health endpoint used by external orchestrators (module-level so tests can import it)
+from starlette.responses import JSONResponse
+async def health_check(request=None):
+    active_sessions = len(session_manager.sessions)
+    return JSONResponse({
+        "status": "healthy",
+        "active_kernels": active_sessions,
+        "version": "0.1.0"
+    })
+
 @mcp.tool()
 def get_server_status():
     """Check how many humans are connected to this session."""
@@ -1977,6 +1987,12 @@ def main():
             asyncio.run(asyncio.wait_for(session_manager.restore_persisted_sessions(), timeout=10.0))
         except asyncio.TimeoutError:
             logger.warning("Session restoration timed out, skipping")
+
+        # [CRUCIBLE] Reap previously orphaned kernels before accepting new work
+        try:
+            loop.run_until_complete(session_manager.reconcile_zombies())
+        except Exception as e:
+            logger.error("reaper_failed", error=str(e))
         
         if args.transport == "websocket":
             import uvicorn
@@ -2009,8 +2025,11 @@ def main():
                     logger.error(f"Connection error: {e}", exc_info=True)
                     connection_manager.disconnect(websocket)
 
+            from starlette.routing import Route
+
             app = Starlette(
                 routes=[
+                    Route("/health", health_check),
                     WebSocketRoute("/ws", mcp_websocket_endpoint)
                 ]
             )
@@ -2040,8 +2059,15 @@ def main():
             try:
                 server.run()
             finally:
+                # [CRUCIBLE] Graceful shutdown sequence
+                try:
+                    asyncio.run(session_manager.shutdown_all())
+                except Exception as e:
+                    logger.warning(f"shutdown_sequence_error: {e}")
                 try:
                     sock.close()
+                except Exception:
+                    pass
                 except Exception:
                     pass
              
