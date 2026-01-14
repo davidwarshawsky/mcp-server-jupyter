@@ -1972,28 +1972,35 @@ def main():
                 ]
             )
             
-            # If port was 0, pre-bind to get an available port and avoid small race windows
-            if args.port == 0:
-                import socket
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                s.bind((args.host, 0))
-                assigned_port = s.getsockname()[1]
-                s.close()
-                args.port = assigned_port
+            # [FIX] Bind a socket and hand the FD to Uvicorn to avoid TOCTOU races
+            import socket
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind((args.host, args.port if args.port != 0 else 0))
+            sock.listen(1)
+            actual_port = sock.getsockname()[1]
 
             # Print port to stderr so parent process can parse it if needed
-            print(f"[MCP_PORT]: {args.port}", file=sys.stderr)
-            print(f"MCP Server listening on ws://{args.host}:{args.port}/ws", file=sys.stderr)
+            print(f"[MCP_PORT]: {actual_port}", file=sys.stderr)
+            print(f"MCP Server listening on ws://{args.host}:{actual_port}/ws", file=sys.stderr)
             
             host = args.host if args.host != "0.0.0.0" else "localhost"
             print(f"\n🚀 MCP Server Running.")
             print(f"To connect VS Code, open the Command Palette and run:")
             print(f"  MCP Jupyter: Connect to Existing Server")
-            print(f"  Url: ws://{host}:{args.port}/ws\n")
-            
-            # Run uvicorn
-            uvicorn.run(app, host=args.host, port=args.port, log_level="error")
+            print(f"  Url: ws://{host}:{actual_port}/ws\n")
+
+            # Configure Uvicorn to use existing socket FD (prevents TOCTOU)
+            config = uvicorn.Config(app=app, fd=sock.fileno(), log_level="error", loop="asyncio")
+            server = uvicorn.Server(config)
+
+            try:
+                server.run()
+            finally:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
              
         else:
             # Start the MCP server using Standard IO

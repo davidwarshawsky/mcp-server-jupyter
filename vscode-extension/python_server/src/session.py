@@ -90,8 +90,17 @@ def _mcp_inspect(var_name):
 from src.environment import get_activated_env_vars as _get_activated_env_vars
 # END
 
+import hmac
+import secrets
+
+# Generate a per-process session secret used to sign local checkpoints.
+# This ensures checkpoints cannot be trivially loaded across different server processes.
+SESSION_SECRET = secrets.token_bytes(32)
+
 class SessionManager:
-    def __init__(self, default_execution_timeout: int = 300):
+    def __init__(self, default_execution_timeout: int = 300, input_request_timeout: int = 60):
+        # Input request timeout (seconds)
+        self.input_request_timeout = input_request_timeout
         # Maps notebook_path (str) -> {
         #   'km': KernelManager, 
         #   'kc': Client, 
@@ -408,6 +417,7 @@ class SessionManager:
                  'docker', 'run', 
                  '--rm',                     # Cleanup container on exit
                  '-i',                       # Interactive (keeps stdin open)
+                 '--init',                   # Ensure PID 1 forwards signals to children
                  '--network', 'none',        # [SECURITY] Disable networking
                  '-v', f'{mount_source}:{mount_target}',
                  '-v', '{connection_file}:/kernel.json',
@@ -451,21 +461,26 @@ class SessionManager:
                      return f"Error: Could not find python executable in {venv_path}"
 
                 if is_conda:
-                    # [ACTIVATION FIX] Use 'conda run' instead of brittle env var manipulation
-                    # This ensures activation scripts (SetVars.bat, activate.d) run correctly.
-                    # We assume 'conda' is in PATH or could be found relative to the environment?
-                    
-                    # Proper Conda Activation
-                    km.kernel_cmd = [
-                        'conda', 'run', 
-                        '-p', str(venv_path_obj), 
-                        '--no-capture-output', 
-                        'python', '-m', 'ipykernel_launcher', 
-                        '-f', '{connection_file}'
-                    ]
-                    logger.info(f"Configured Conda kernel with 'conda run': {km.kernel_cmd}")
-                    # We rely on conda run to set up the environment, but we might pass some system envs
-                    # kernel_env is already os.environ.copy()
+                    # [FIX] Avoid using 'conda run' since it can swallow signals.
+                    # Prefer resolving env vars and running the env's python directly.
+                    try:
+                        resolved_env = _get_activated_env_vars(venv_path, py_exe)
+                    except Exception:
+                        resolved_env = None
+
+                    if resolved_env and 'CONDA_PREFIX' in resolved_env:
+                        kernel_env = resolved_env
+                        km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                        logger.info(f"Configured Conda kernel by invoking env python: {km.kernel_cmd}")
+                    else:
+                        logger.warning("Could not resolve conda env activation. Falling back to 'conda run' (interrupts may be unreliable).")
+                        km.kernel_cmd = [
+                            'conda', 'run', 
+                            '-p', str(venv_path_obj), 
+                            '--no-capture-output', 
+                            'python', '-m', 'ipykernel_launcher', 
+                            '-f', '{connection_file}'
+                        ]
                     
                 else: 
                     # Standard Venv
@@ -493,8 +508,13 @@ class SessionManager:
             raise RuntimeError(f"Kernel failed to start: {str(e)}")
         
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
-        # Execute startup setup (fire-and-forget for reliability)
-        startup_code = f'''
+        # Only inject Python-specific helpers when the kernel is actually Python
+        kernel_name = getattr(km, 'kernel_name', '') or ''
+        is_python_kernel = 'python' in kernel_name.lower() if kernel_name else True
+
+        if is_python_kernel:
+            # Execute startup setup (fire-and-forget for reliability)
+            startup_code = f'''
 %load_ext autoreload
 %autoreload 2
 
@@ -575,19 +595,22 @@ try:
 except ImportError:
     pass  # bokeh not installed, skip
 '''
-        try:
-            kc.execute(startup_code, silent=True)
-            # Give it a moment to take effect
-            await asyncio.sleep(0.5)
-            logger.info("Autoreload and visualization config sent to kernel")
-            
-            # Add cwd to path
-            path_code = "import sys, os\nif os.getcwd() not in sys.path: sys.path.append(os.getcwd())"
-            kc.execute(path_code, silent=True)
-            logger.info("Path setup sent to kernel")
-            
-        except Exception as e:
-            logger.warning(f"Failed to inject startup code: {e}")
+        if is_python_kernel:
+            try:
+                kc.execute(startup_code, silent=True)
+                # Give it a moment to take effect
+                await asyncio.sleep(0.5)
+                logger.info("Autoreload and visualization config sent to kernel")
+                
+                # Add cwd to path
+                path_code = "import sys, os\nif os.getcwd() not in sys.path: sys.path.append(os.getcwd())"
+                kc.execute(path_code, silent=True)
+                logger.info("Path setup sent to kernel")
+                
+            except Exception as e:
+                logger.warning(f"Failed to inject startup code: {e}")
+        else:
+            logger.info(f"Non-Python kernel detected ({kernel_name}). Skipping Python startup injection.")
             
         # Create session dictionary structure
         execution_queue = asyncio.Queue()
@@ -777,6 +800,31 @@ except ImportError:
                         "prompt": content.get('prompt', ''),
                         "password": content.get('password', False)
                     })
+
+                    # Input watchdog to avoid deadlocks when client disconnects
+                    session_data['waiting_for_input'] = True
+                    try:
+                        timeout = session_data.get('input_request_timeout', self.input_request_timeout)
+                        elapsed = 0.0
+                        interval = 0.1
+                        timed_out = True
+                        while elapsed < timeout:
+                            await asyncio.sleep(interval)
+                            elapsed += interval
+                            if not session_data.get('waiting_for_input'):
+                                timed_out = False
+                                break
+
+                        if timed_out:
+                            logger.warning(f"Input request timed out for {nb_path} after {timeout}s. Attempting to recover.")
+                            try:
+                                kc.input('')
+                                logger.info("Sent empty string to kernel to clear input request")
+                            except Exception as e:
+                                logger.warning(f"Failed to send empty input: {e}. Sending interrupt as fallback.")
+                                await self.interrupt_kernel(nb_path)
+                    finally:
+                        session_data['waiting_for_input'] = False
                     
         except asyncio.CancelledError:
             logger.info(f"Stdin listener cancelled for {nb_path}")
@@ -789,9 +837,17 @@ except ImportError:
         if not session:
             raise ValueError("No active session")
             
-        kc = session['kc']
-        kc.input(text)
-        logger.info(f"Sent input to {notebook_path}")
+        kc = session.get('kc')
+        if kc is None:
+            session['waiting_for_input'] = False
+            logger.info(f"No kernel client for {notebook_path}; cleared waiting_for_input flag")
+            return
+
+        try:
+            kc.input(text)
+            logger.info(f"Sent input to {notebook_path}")
+        finally:
+            session['waiting_for_input'] = False
 
     async def _queue_processor(self, nb_path: str, session_data: Dict):
         """
@@ -965,13 +1021,25 @@ except ImportError:
                     logger.warning(f"Failed to prepare metadata: {e}")
             
             # 4. Write to Notebook File WITH metadata injection
-            notebook.save_cell_execution(
-                nb_path, 
-                exec_data['cell_index'], 
-                exec_data['outputs'], 
-                exec_data.get('execution_count'),
-                metadata_update=metadata_update if metadata_update else None
-            )
+            # If there are active WebSocket clients, avoid writing to disk to
+            # prevent file watcher conflicts in editors (e.g. VS Code).
+            active_clients = 0
+            if hasattr(self, 'connection_manager') and self.connection_manager:
+                try:
+                    active_clients = len(self.connection_manager.active_connections)
+                except Exception:
+                    active_clients = 0
+
+            if active_clients > 0:
+                logger.info(f"Skipping disk write for {nb_path} (clients connected={active_clients}). Updates were broadcasted to clients.")
+            else:
+                notebook.save_cell_execution(
+                    nb_path, 
+                    exec_data['cell_index'], 
+                    exec_data['outputs'], 
+                    exec_data.get('execution_count'),
+                    metadata_update=metadata_update if metadata_update else None
+                )
         except Exception as e:
             exec_data['status'] = 'failed_save'
             exec_data['error'] = str(e)
@@ -1098,10 +1166,14 @@ print(_get_var_info())
         # Path for the kernel (cross-platform safe)
         path_str = str(ckpt_path).replace("\\", "\\\\")
         
+        secret_hex = SESSION_SECRET.hex()
+
         code = f"""
 import dill
 import os
 import pickle
+import hmac
+import hashlib
 
 try:
     os.makedirs(os.path.dirname(r'{path_str}'), exist_ok=True)
@@ -1121,11 +1193,15 @@ try:
         except:
             excluded_vars.append(k)
 
-    # Save only the safe state
-    with open(r'{path_str}', 'wb') as f:
-        dill.dump(safe_state, f)
+    # Serialize and sign
+    data = dill.dumps(safe_state)
+    signature = hmac.new(bytes.fromhex('{secret_hex}'), data, hashlib.sha256).hexdigest()
 
-    msg = f"Checkpoint saved. Preserved {{len(safe_state)}} variables."
+    with open(r'{path_str}', 'wb') as f:
+        f.write(signature.encode('utf-8'))
+        f.write(data)
+
+    msg = f"Checkpoint saved and signed. Preserved {{len(safe_state)}} variables."
     if excluded_vars:
         msg += f" Skipped {{len(excluded_vars)}} complex objects: {{', '.join(excluded_vars)}}"
     print(msg)
@@ -1136,31 +1212,44 @@ except Exception as e:
     print(f"Checkpoint error: {{e}}")
 """
         # Use -1 index for internal commands
-        await self.execute_cell_async(notebook_path, -1, code)
-        return f"State saved to {ckpt_path}"
+        exec_id = await self.execute_cell_async(notebook_path, -1, code)
+        return exec_id
 
     async def load_checkpoint(self, notebook_path: str, checkpoint_name: str):
         """Restore the kernel heap from disk."""
         ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
         path_str = str(ckpt_path).replace("\\", "\\\\")
         
+        secret_hex = SESSION_SECRET.hex()
+
         code = f"""
 try:
     import dill
+    import hmac
+    import hashlib
+    import os
+
     if not os.path.exists(r'{path_str}'):
         print(f"Checkpoint not found: {path_str}")
     else:
         with open(r'{path_str}', 'rb') as f:
-            # We used plain dump, so we load a dict
-            state_dict = dill.load(f)
-            # Update globals with the loaded state
+            # Signature is stored as a 64-char hex string at the start
+            sig_len = 64
+            file_sig = f.read(sig_len).decode('utf-8')
+            data = f.read()
+
+            expected_sig = hmac.new(bytes.fromhex('{secret_hex}'), data, hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(file_sig, expected_sig):
+                raise Exception('Checkpoint signature mismatch. Refusing to load.')
+
+            state_dict = dill.loads(data)
             globals().update(state_dict)
         print(f"State restored ({{len(state_dict)}} variables)")
 except Exception as e:
     print(f"Restore error: {{e}}")
 """
-        await self.execute_cell_async(notebook_path, -1, code)
-        return "State restored."
+        exec_id = await self.execute_cell_async(notebook_path, -1, code)
+        return exec_id
 
     async def get_variable_info(self, nb_path: str, var_name: str):
         """
