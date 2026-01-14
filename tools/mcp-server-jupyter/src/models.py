@@ -11,6 +11,7 @@ class StartKernelArgs(SecureBaseModel):
     venv_path: Optional[str] = None
     docker_image: Optional[str] = None
     timeout: int = Field(default=300, ge=10, le=3600) # Constrain timeout
+    agent_id: Optional[str] = None  # Optional agent identifier to isolate CWD
 
     @field_validator('notebook_path')
     @classmethod

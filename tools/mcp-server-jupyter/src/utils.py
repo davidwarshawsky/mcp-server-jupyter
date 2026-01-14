@@ -9,8 +9,11 @@ from pathlib import Path
 from typing import List, Any, Optional
 
 # Global thread pool for CPU-bound tasks (JSON serialization, Pydantic validation)
-# Keep max_workers small to avoid excessive context switching
-io_pool = ThreadPoolExecutor(max_workers=4)
+# Size is configurable via environment variable `MCP_IO_POOL_SIZE` to match expected concurrency.
+# Default: 10 (suitable for ~5 agents with ~2 concurrent heavy ops each)
+import os
+_io_pool_workers = int(os.getenv('MCP_IO_POOL_SIZE', '10'))
+io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 
 
 async def offload_json_dumps(data: Any) -> str:

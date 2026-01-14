@@ -7,6 +7,7 @@ import logging
 import nbformat
 import datetime
 import subprocess
+import re
 try:
     import dill
 except ImportError:
@@ -363,7 +364,7 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None):
+    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None, agent_id: Optional[str] = None):
         """
         Start a Jupyter kernel for a notebook.
         
@@ -383,6 +384,15 @@ class SessionManager:
 
         # Determine the Notebook's directory to set as CWD
         notebook_dir = str(Path(nb_path).parent.resolve())
+
+        # If an agent_id is provided, create a per-agent subdirectory to isolate relative file access
+        if agent_id:
+            # Sanitize agent_id for use in filesystem
+            safe_agent = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(agent_id))
+            agent_dir = Path(notebook_dir) / f"agent_{safe_agent}"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            notebook_dir = str(agent_dir.resolve())
+            logger.info(f"Agent CWD isolation enabled for agent '{agent_id}': {notebook_dir}")
 
         if abs_path in self.sessions: 
             return f"Kernel already running for {abs_path}"
@@ -432,6 +442,10 @@ class SessionManager:
                  # Insert UID mapping after network arg for readability
                  cmd.insert(4, str(os.getuid()))
                  cmd.insert(4, '-u')
+
+             # Resource limit for Docker: cap memory to 4GB to avoid noisy neighbor OOMs
+             cmd.insert(2, '--memory')
+             cmd.insert(3, '4g')
              
              km.kernel_cmd = cmd
              logger.info(f"Configured Docker kernel: {cmd}")
@@ -449,20 +463,26 @@ class SessionManager:
             py_exe = sys.executable
             env_name = "system"
             kernel_env = os.environ.copy()  # Default: inherit current environment
-            
+
+            # Resource limits: on POSIX, prefer to use `prlimit` if available to bound address space
+            try:
+                import shutil
+                prlimit_prefix = ['prlimit', '--as=4294967296'] if (os.name != 'nt' and shutil.which('prlimit')) else []
+            except Exception:
+                prlimit_prefix = []
+
             if venv_path:
                 venv_path_obj = Path(venv_path).resolve()
                 is_conda = (venv_path_obj / "conda-meta").exists()
-                
+
                 py_exe = self.get_python_path(venv_path)
                 env_name = venv_path_obj.name
-                
+
                 # Validation
                 if not is_conda and not str(py_exe).lower().startswith(str(venv_path_obj).lower()):
-                     return f"Error: Could not find python executable in {venv_path}"
+                    return f"Error: Could not find python executable in {venv_path}"
 
                 if is_conda:
-                    # [FIX] Avoid using 'conda run' since it can swallow signals.
                     # Prefer resolving env vars and running the env's python directly.
                     try:
                         resolved_env = _get_activated_env_vars(venv_path, py_exe)
@@ -471,43 +491,53 @@ class SessionManager:
 
                     if resolved_env and 'CONDA_PREFIX' in resolved_env:
                         kernel_env = resolved_env
-                        km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                        cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                        km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
                         logger.info(f"Configured Conda kernel by invoking env python: {km.kernel_cmd}")
                     else:
                         logger.warning("Could not resolve conda env activation. Falling back to 'conda run' (interrupts may be unreliable).")
-                        km.kernel_cmd = [
+                        cmd = [
                             'conda', 'run', 
                             '-p', str(venv_path_obj), 
                             '--no-capture-output', 
                             'python', '-m', 'ipykernel_launcher', 
                             '-f', '{connection_file}'
                         ]
-                    
-                else: 
-                    # Standard Venv
-                    # Get fully activated environment variables (standard venv approach)
-                    kernel_env = _get_activated_env_vars(venv_path, py_exe)
-                    
-                    if not kernel_env:
-                         kernel_env = os.environ.copy()
-                         bin_dir = str(Path(py_exe).parent)
-                         kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+                        km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
+                else:
+                    # Standard Venv: get activated env or fall back
+                    kernel_env = _get_activated_env_vars(venv_path, py_exe) or os.environ.copy()
+                    bin_dir = str(Path(py_exe).parent)
+                    kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+                    cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                    km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
+            else:
+                # No venv: default system Python kernel command
+                cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
 
-                    # Force Jupyter to use our Venv Python
-                    km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
-        
-        # 2. Start Kernel with Correct CWD and Environment
-        await km.start_kernel(cwd=notebook_dir, env=kernel_env)
-        
-        kc = km.client()
-        kc.start_channels()
+        # 2. Start Kernel with Correct CWD and Environment (wrapped in try/except to ensure clean shutdown)
         try:
-            await kc.wait_for_ready(timeout=60)
+            await km.start_kernel(cwd=notebook_dir, env=kernel_env)
+            kc = km.client()
+            kc.start_channels()
+            try:
+                await kc.wait_for_ready(timeout=120)
+            except Exception as e:
+                if hasattr(km, 'has_kernel') and km.has_kernel:
+                    try:
+                        await km.shutdown_kernel()
+                    except Exception:
+                        pass
+                raise RuntimeError(f"Kernel failed to start: {str(e)}")
         except Exception as e:
-            if km.has_kernel:
-                await km.shutdown_kernel()
+            if hasattr(km, 'has_kernel') and km.has_kernel:
+                try:
+                    await km.shutdown_kernel()
+                except Exception:
+                    pass
             raise RuntimeError(f"Kernel failed to start: {str(e)}")
-        
+
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
         # Only inject Python-specific helpers when the kernel is actually Python
         kernel_name = getattr(km, 'kernel_name', '') or ''

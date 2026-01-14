@@ -209,7 +209,7 @@ def save_proposal(proposal_id: str, data: dict):
 
 @mcp.tool()
 @validated_tool(StartKernelArgs)
-async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
+async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300, agent_id: Optional[str] = None):
     """
     Boot a background process.
     Windows Logic: Looks for venv_path/Scripts/python.exe.
@@ -235,7 +235,8 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
         notebook_path, 
         venv_path if venv_path else None,
         docker_image if docker_image else None,
-        timeout
+        timeout,
+        agent_id=agent_id
     )
 
 @mcp.tool()
