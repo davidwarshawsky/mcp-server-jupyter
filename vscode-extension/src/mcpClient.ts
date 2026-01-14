@@ -189,6 +189,10 @@ export class McpClient {
                 
                 this.ws.on('open', () => {
                     this.outputChannel.appendLine('WebSocket connected');
+                    // Emit an internal reconnection notification so higher-level
+                    // controllers can reconcile any active executions that may
+                    // have completed while we were disconnected.
+                    this._onNotification.fire({ method: 'internal/reconnected', params: {} });
                     resolve();
                 });
 
@@ -331,6 +335,42 @@ export class McpClient {
       notebook_path: notebookPath,
       task_id: taskId,
     });
+    return result;
+  }
+
+  /**
+   * Reconcile executions after reconnect: ask the server for the status of
+   * any task IDs that the client believes are running, and synthesize
+   * notebook/status notifications for any that have completed while we were
+   * disconnected.
+   */
+  public async reconcileExecutions(activeTaskIds: string[], notebookPath: string) {
+    for (const taskId of activeTaskIds) {
+      try {
+        const status = await this.getExecutionStatus(notebookPath, taskId);
+        if (!status) continue;
+        if (status.status === 'completed' || status.status === 'error' || status.status === 'cancelled') {
+          this._onNotification.fire({ method: 'notebook/status', params: { exec_id: taskId, status: status.status } });
+        }
+      } catch (e) {
+        console.error(`Failed to reconcile task ${taskId}`, e);
+      }
+    }
+  }
+
+  /**
+   * Fetch asset content from server as base64. Public wrapper for tools.
+   */
+  public async getAssetContent(assetPath: string): Promise<{data: string}> {
+    const result = await this.callTool('get_asset_content', { asset_path: assetPath });
+    // Tool returns wrapper or raw; normalize to object
+    if (typeof result === 'string') {
+      try {
+        return JSON.parse(result);
+      } catch {
+        return { data: result } as any;
+      }
+    }
     return result;
   }
 

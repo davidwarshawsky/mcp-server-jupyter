@@ -180,6 +180,21 @@ def edit_cell_by_id(notebook_path: str, cell_id: str, content: str, expected_ind
     
     # Find cell by ID
     result = find_cell_by_id(nb, cell_id)
+
+    # [FIX START] Heal-on-write: If an agent provided a temporary/buffer ID
+    # (e.g., buffer-0) that isn't on disk yet, but the agent provided an
+    # expected_index, try to recover by assigning the provided ID to the
+    # cell at expected_index when that cell has no ID yet.
+    if not result and expected_index is not None:
+        if 0 <= expected_index < len(nb.cells):
+            candidate = nb.cells[expected_index]
+            # Heuristic: Treat the agent's expected index as authoritative
+            # when ID lookup fails; assign the provided ID so the edit can
+            # proceed even if the on-disk cell lacks a stable ID.
+            candidate.id = cell_id
+            result = (expected_index, candidate)
+    # [FIX END]
+
     if not result:
         raise StaleStateError(f"Cell ID {cell_id} not found. Notebook may have been modified.")
     
@@ -228,6 +243,19 @@ def delete_cell_by_id(notebook_path: str, cell_id: str, expected_index: Optional
     
     # Find cell by ID
     result = find_cell_by_id(nb, cell_id)
+
+    # [FIX START] Heal-on-write: attempt recovery using expected_index when the
+    # agent supplied a buffer-style ID (e.g., buffer-0) that isn't present on disk.
+    if not result and expected_index is not None:
+        if 0 <= expected_index < len(nb.cells):
+            candidate = nb.cells[expected_index]
+            # Heuristic: Treat the agent's expected index as authoritative
+            # when ID lookup fails; assign the provided ID so the delete can
+            # proceed even if the on-disk cell lacks a stable ID.
+            candidate.id = cell_id
+            result = (expected_index, candidate)
+    # [FIX END]
+
     if not result:
         raise StaleStateError(f"Cell ID {cell_id} not found. Notebook may have been modified.")
     

@@ -83,6 +83,53 @@ class TestCellIDOperations:
         # Try to edit with wrong expected_index
         with pytest.raises(StaleStateError):
             edit_cell_by_id(str(nb_path), cell_id, "x = 100", expected_index=999)
+
+    def test_edit_cell_heals_missing_id_using_expected_index(self, tmp_path):
+        """If the on-disk cell is missing an ID, edit heals by assigning provided ID."""
+        nb_path = tmp_path / "test.ipynb"
+        create_notebook(str(nb_path), initial_cells=[
+            {"type": "code", "content": "x = 1"},
+            {"type": "code", "content": "y = 2"}
+        ])
+
+        # Remove ID from the first cell on disk to emulate an unsaved buffer cell
+        from pathlib import Path
+        import nbformat
+        nb = nbformat.read(str(nb_path), as_version=4)
+        nb.cells[0].pop('id', None)
+        with open(str(nb_path), 'w', encoding='utf-8') as f:
+            nbformat.write(nb, f)
+
+        # Agent provided a temporary buffer ID
+        buffer_id = 'buffer-0'
+        edit_cell_by_id(str(nb_path), buffer_id, "x = 42", expected_index=0)
+
+        outline2 = get_notebook_outline(str(nb_path))
+        assert outline2[0]['id'] == buffer_id
+        assert outline2[0]['source_preview'] == "x = 42"
+
+    def test_delete_cell_heals_missing_id_using_expected_index(self, tmp_path):
+        """If the on-disk cell is missing an ID, delete heals and removes the cell."""
+        nb_path = tmp_path / "test.ipynb"
+        create_notebook(str(nb_path), initial_cells=[
+            {"type": "code", "content": "x = 1"},
+            {"type": "code", "content": "y = 2"},
+            {"type": "code", "content": "z = 3"}
+        ])
+
+        # Remove ID from cell at index 1
+        import nbformat
+        nb = nbformat.read(str(nb_path), as_version=4)
+        nb.cells[1].pop('id', None)
+        with open(str(nb_path), 'w', encoding='utf-8') as f:
+            nbformat.write(nb, f)
+
+        buffer_id = 'buffer-1'
+        delete_cell_by_id(str(nb_path), buffer_id, expected_index=1)
+
+        outline2 = get_notebook_outline(str(nb_path))
+        # 3 - 1 = 2 cells remain
+        assert len(outline2) == 2
     
     def test_delete_cell_by_id_removes_cell(self, tmp_path):
         """Deleting by ID works correctly"""

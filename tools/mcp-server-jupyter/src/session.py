@@ -409,13 +409,18 @@ class SessionManager:
                  '--rm',                     # Cleanup container on exit
                  '-i',                       # Interactive (keeps stdin open)
                  '--network', 'none',        # [SECURITY] Disable networking
-                 '-u', str(os.getuid()),     # Run as current user (avoid root file issues)
                  '-v', f'{mount_source}:{mount_target}',
                  '-v', '{connection_file}:/kernel.json',
                  '-w', container_cwd,
                  docker_image,
                  'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
              ]
+
+             # [FIX] Only set UID mapping on POSIX systems (os.getuid() is not on Windows)
+             if os.name != 'nt':
+                 # Insert UID mapping after network arg for readability
+                 cmd.insert(4, str(os.getuid()))
+                 cmd.insert(4, '-u')
              
              km.kernel_cmd = cmd
              logger.info(f"Configured Docker kernel: {cmd}")

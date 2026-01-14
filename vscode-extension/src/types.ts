@@ -26,7 +26,7 @@ export interface McpResponse {
 }
 
 export interface ExecutionStatus {
-  status: 'queued' | 'running' | 'completed' | 'error';
+  status: 'queued' | 'running' | 'completed' | 'error' | 'cancelled';
   outputs?: NotebookOutput[];
   execution_count?: number;
   error?: {

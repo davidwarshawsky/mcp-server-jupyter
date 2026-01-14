@@ -975,22 +975,31 @@ import sys
 def get_size_str(obj):
     '''Get human-readable size string'''
     try:
-        # Try to get actual memory usage
+        # Whitelist safe primitive/container types for deep inspection
+        safe_types = (str, bytes, bytearray, list, tuple, set, dict, int, float, bool, complex)
+        type_str = str(type(obj))
+
+        # Avoid calling potentially dangerous custom __sizeof__ implementations
+        if not isinstance(obj, safe_types) and 'pandas' not in type_str and 'numpy' not in type_str:
+            return "?"
+
+        # Try to get actual memory usage for safe/known types
         size = sys.getsizeof(obj)
-        
-        # For containers, estimate recursively (limit depth to avoid infinite recursion)
-        if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes)):
+
+        # For containers, estimate recursively (limit depth to avoid heavy work)
+        if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes, bytearray)):
             try:
-                if hasattr(obj, 'memory_usage'):  # pandas DataFrame/Series
-                    size = obj.memory_usage(deep=True).sum()
+                if hasattr(obj, 'memory_usage') and 'pandas' in type_str:  # pandas DataFrame/Series
+                    size = int(obj.memory_usage(deep=True).sum())
                 elif isinstance(obj, (list, tuple, set)):
-                    size += sum(sys.getsizeof(item) for item in obj[:100])  # Sample first 100
+                    size += sum(sys.getsizeof(item) for item in list(obj)[:100])  # Sample first 100
                 elif isinstance(obj, dict):
                     items = list(obj.items())[:100]
                     size += sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in items)
-            except:
-                pass
-        
+            except Exception:
+                # If any inspection errors, return unknown size
+                return "?"
+
         # Format size
         if size < 1024:
             return f"{size} B"
@@ -1000,7 +1009,7 @@ def get_size_str(obj):
             return f"{size / (1024 * 1024):.1f} MB"
         else:
             return f"{size / (1024 * 1024 * 1024):.1f} GB"
-    except:
+    except Exception:
         return "?"
 
 manifest = []

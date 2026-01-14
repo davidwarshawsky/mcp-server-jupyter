@@ -21,10 +21,11 @@ class ToolResult:
 def get_cell_hash(cell_source: str) -> str:
     """
     Calculate SHA-256 hash of cell content.
-    Normalizes line endings to prevent Windows/Unix mismatch.
+    [FIX] Normalize by stripping all whitespace so formatting-only changes
+    (e.g., Black/Ruff) do not trigger perceived content drift.
     """
-    # Normalize line endings to prevent Windows/Unix mismatch
-    normalized = cell_source.replace('\r\n', '\n').strip()
+    import re
+    normalized = re.sub(r'\s+', '', cell_source)
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
 def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:

@@ -76,7 +76,7 @@ export class McpNotebookController {
         }
 
         if (output) {
-          const cellOutput = this.convertOutput(output);
+          const cellOutput = await this.convertOutput(output);
           await execution.appendOutput([cellOutput]);
         }
       }
@@ -108,6 +108,25 @@ export class McpNotebookController {
       
       // Submit back to kernel
       await this.mcpClient.submitInput(notebook_path, value || '');
+    } else if (event.method === 'internal/reconnected') {
+      // WebSocket reconnected: reconcile any executions that the client
+      // believes are running. This helps recover cases where the server
+      // broadcast a 'completed' event while the client was disconnected.
+      const tasksByNotebook = new Map<string, string[]>();
+      for (const [key, taskId] of this.activeTaskIds.entries()) {
+        const nbPath = key.split(':')[0];
+        const arr = tasksByNotebook.get(nbPath) || [];
+        arr.push(taskId);
+        tasksByNotebook.set(nbPath, arr);
+      }
+
+      for (const [nbPath, ids] of tasksByNotebook.entries()) {
+        try {
+          await this.mcpClient.reconcileExecutions(ids, nbPath);
+        } catch (e) {
+          console.error('Failed to reconcile executions on reconnect:', e);
+        }
+      }
     }
   }
 
@@ -187,6 +206,19 @@ export class McpNotebookController {
       } catch (error) {
           // Handle timeout or other errors
           const msg = error instanceof Error ? error.message : String(error);
+
+          // [FIX START] Kill the zombie process on client-side timeout: send
+          // a cancel request to the server to make sure the kernel does not
+          // keep executing the timed-out task in the background.
+          try {
+            console.warn(`Execution timed out locally. Sending cancel signal for ${taskId}`);
+            // Fire-and-forget: we don't want this to block UI cleanup
+            this.mcpClient.cancelExecution(notebook.uri.fsPath, taskId).catch(e => console.error("Failed to cancel zombie task:", e));
+          } catch (e) {
+            console.error('Failed to invoke cancelExecution:', e);
+          }
+          // [FIX END]
+
           await execution.replaceOutput([
               new vscode.NotebookCellOutput([
                   vscode.NotebookCellOutputItem.error({ name: 'TimeoutError', message: msg })
@@ -379,7 +411,7 @@ export class McpNotebookController {
   /**
    * Convert MCP output to VSCode NotebookCellOutput
    */
-  private convertOutput(output: NotebookOutput): vscode.NotebookCellOutput {
+  private async convertOutput(output: NotebookOutput): Promise<vscode.NotebookCellOutput> {
     switch (output.output_type) {
       case 'stream':
         return new vscode.NotebookCellOutput([
@@ -388,7 +420,7 @@ export class McpNotebookController {
 
       case 'execute_result':
       case 'display_data':
-        return this.convertDisplayData(output);
+        return await this.convertDisplayData(output);
 
       case 'error':
         return new vscode.NotebookCellOutput([
@@ -409,7 +441,7 @@ export class McpNotebookController {
   /**
    * Convert display data to VSCode output
    */
-  private convertDisplayData(output: NotebookOutput): vscode.NotebookCellOutput {
+  private async convertDisplayData(output: NotebookOutput): Promise<vscode.NotebookCellOutput> {
     const items: vscode.NotebookCellOutputItem[] = [];
 
     if (output.data) {
@@ -445,31 +477,50 @@ export class McpNotebookController {
             if (dataStrNormalized.startsWith('assets/') || dataStrNormalized.startsWith('./assets/')) {
               try {
                 // Resolve assets relative to the active workspace, or fallback to configured serverPath
-                let assetPath = dataStr;
+                let bufferPromise: Promise<Buffer> | null = null;
 
                 if (!path.isAbsolute(dataStr)) {
                     const workspaceFolders = vscode.workspace.workspaceFolders;
                     if (workspaceFolders && workspaceFolders.length > 0) {
                         // Use the first workspace folder as a best-effort base
                         const notebookDir = workspaceFolders[0].uri.fsPath;
-                        assetPath = path.join(notebookDir, dataStrNormalized);
-                    } else {
-                        // Fallback: Use server path (legacy behavior)
-                        const config = vscode.workspace.getConfiguration('mcp-jupyter');
-                        const serverPath = config.get<string>('serverPath') || '';
-                        assetPath = path.join(serverPath, dataStrNormalized);
+                        const assetPath = path.join(notebookDir, dataStrNormalized);
+                        bufferPromise = fs.promises.readFile(assetPath).then(b => Buffer.from(b));
                     }
                 }
 
-                if (fs.existsSync(assetPath)) {
-                  buffer = fs.readFileSync(assetPath);
+                // If we're in connect (remote) mode, fetch the asset via the server tool
+                const config = vscode.workspace.getConfiguration('mcp-jupyter');
+                const serverMode = config.get<string>('serverMode');
+
+                if (serverMode === 'connect') {
+                    try {
+                        const assetData = await this.mcpClient.getAssetContent(dataStrNormalized);
+                        const b64 = typeof assetData === 'string' ? JSON.parse(assetData).data : assetData.data;
+                        buffer = Buffer.from(b64, 'base64');
+                    } catch (e) {
+                        items.push(vscode.NotebookCellOutputItem.text(`Remote asset load failed: ${e}`, 'text/plain'));
+                        continue;
+                    }
                 } else {
-                  // File doesn't exist, show error
-                  items.push(vscode.NotebookCellOutputItem.text(
-                    `⚠️ Asset file not found: ${dataStr}`,
-                    'text/plain'
-                  ));
-                  continue;
+                    // Local mode: either use workspace-resolved path or fallback to configured serverPath
+                    if (!bufferPromise) {
+                        const serverPath = config.get<string>('serverPath') || '';
+                        const assetPath = path.join(serverPath, dataStrNormalized);
+                        if (fs.existsSync(assetPath)) {
+                            buffer = fs.readFileSync(assetPath);
+                        } else {
+                            items.push(vscode.NotebookCellOutputItem.text(`⚠️ Asset file not found: ${dataStr}`, 'text/plain'));
+                            continue;
+                        }
+                    } else {
+                        try {
+                            buffer = await bufferPromise;
+                        } catch (e) {
+                            items.push(vscode.NotebookCellOutputItem.text(`⚠️ Failed to load asset: ${dataStr} - ${e}`, 'text/plain'));
+                            continue;
+                        }
+                    }
                 }
               } catch (fileError) {
                 // Failed to read file, show error
