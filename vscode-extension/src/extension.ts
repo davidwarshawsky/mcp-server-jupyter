@@ -4,11 +4,13 @@ import { McpClient } from './mcpClient';
 import { McpNotebookController } from './notebookController';
 import { VariableDashboardProvider } from './variableDashboard';
 import { checkPythonDependencies, promptInstallDependencies } from './dependencies';
+import { SetupManager } from './setupManager';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
 let variableDashboard: VariableDashboardProvider;
 let syncStatusBar: vscode.StatusBarItem;
+let setupManager: SetupManager;
 const notebooksNeedingSync = new Set<string>();
 
 export interface ExtensionApi {
@@ -23,6 +25,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
   try {
     // Initialize MCP client
     mcpClient = new McpClient();
+
+    // Setup manager for managed environment (First-Run flow)
+    setupManager = new SetupManager(context);
+
+    // Open the walkthrough on first activation (idempotent)
+    const isInstalled = context.globalState.get('mcp.hasCompletedSetup', false);
+    if (!isInstalled) {
+      // Defer opening the walkthrough to ensure VS Code UI is ready
+      setTimeout(() => {
+        vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');
+      }, 500);
+    }
     
     // Get auto-restart setting
     const config = vscode.workspace.getConfiguration('mcp-jupyter');
@@ -123,6 +137,60 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(notebookWatcher);
 
     // Register commands
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.openWalkthrough', async () => {
+        await vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');
+      })
+    );
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.selectRuntime', async () => {
+        const pick = await vscode.window.showQuickPick(['Managed Environment', 'System Python'], { placeHolder: 'Select where the MCP server should run' });
+        if (!pick) return;
+
+        if (pick === 'Managed Environment') {
+          try {
+            const venvPath = await setupManager.createManagedEnvironment();
+            vscode.window.showInformationMessage(`Managed environment created at ${venvPath}`);
+          } catch (e: any) {
+            vscode.window.showErrorMessage(`Failed to create managed environment: ${e?.message ?? String(e)}`);
+          }
+        } else {
+          await vscode.workspace.getConfiguration('mcp-jupyter').update('pythonPath', '', vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage('Using system Python for MCP server');
+        }
+      })
+    );
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.installServer', async () => {
+        try {
+          const venvPath = await setupManager.createManagedEnvironment();
+          await setupManager.installDependencies(venvPath);
+          vscode.window.showInformationMessage('MCP server installed in managed environment');
+        } catch (e: any) {
+          vscode.window.showErrorMessage(`Install failed: ${e?.message ?? String(e)}`);
+        }
+      })
+    );
+
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.testConnection', async () => {
+        try {
+          await vscode.window.withProgress({ title: 'Testing MCP server connection...', location: vscode.ProgressLocation.Notification }, async () => {
+            // Restart server to ensure config changes take effect
+            if (mcpClient.getStatus() !== 'stopped') {
+              try { await mcpClient.stop(); } catch {}
+            }
+            await mcpClient.start();
+          });
+          vscode.window.showInformationMessage('MCP server connection successful');
+        } catch (e: any) {
+          vscode.window.showErrorMessage(`Connection test failed: ${e?.message ?? String(e)}`);
+        }
+      })
+    );
+
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.selectEnvironment', async () => {
         await selectEnvironment();

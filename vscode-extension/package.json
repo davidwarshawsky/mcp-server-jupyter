@@ -17,6 +17,7 @@
     "Data Science"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onNotebook:jupyter-notebook"
   ],
   "main": "./out/src/extension.js",
@@ -62,7 +63,54 @@
         }
       }
     },
+    "walkthroughs": [
+      {
+        "id": "mcp-jupyter-setup",
+        "title": "Setup MCP Agent Kernel",
+        "description": "Get your AI Research Assistant running in 3 steps.",
+        "steps": [
+          {
+            "id": "select-runtime",
+            "title": "1. Select Runtime",
+            "description": "Choose where the MCP Server should run. We recommend the **Managed Environment** for stability.",
+            "media": { "image": "media/setup-step-1.svg", "altText": "Runtime Selection" },
+            "completionEvents": ["onCommand:mcp-jupyter.selectRuntime"]
+          },
+          {
+            "id": "install-server",
+            "title": "2. Install Server",
+            "description": "Install the necessary Python dependencies into the selected environment.",
+            "media": { "image": "media/setup-step-2.svg", "altText": "Install Process" },
+            "completionEvents": ["onCommand:mcp-jupyter.installServer"]
+          },
+          {
+            "id": "verify-connection",
+            "title": "3. Verify Connection",
+            "description": "Test the connection to ensure the Agent is ready to collaborate.",
+            "media": { "image": "media/setup-step-3.svg", "altText": "Connection Test" },
+            "completionEvents": ["onCommand:mcp-jupyter.testConnection"]
+          }
+        ]
+      }
+    ],
     "commands": [
+      {
+        "command": "mcp-jupyter.openWalkthrough",
+        "title": "MCP Jupyter: Open Setup Wizard",
+        "category": "MCP Jupyter"
+      },
+      {
+        "command": "mcp-jupyter.selectRuntime",
+        "title": "MCP Jupyter: Select Runtime"
+      },
+      {
+        "command": "mcp-jupyter.installServer",
+        "title": "MCP Jupyter: Install Server"
+      },
+      {
+        "command": "mcp-jupyter.testConnection",
+        "title": "MCP Jupyter: Test Server Connection"
+      },
       {
         "command": "mcp-jupyter.selectEnvironment",
         "title": "MCP Jupyter: Select Python Environment"
