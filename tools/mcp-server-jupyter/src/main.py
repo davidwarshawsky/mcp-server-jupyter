@@ -1927,7 +1927,18 @@ def main():
                 ]
             )
             
+            # If port was 0, pre-bind to get an available port and avoid small race windows
+            if args.port == 0:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((args.host, 0))
+                assigned_port = s.getsockname()[1]
+                s.close()
+                args.port = assigned_port
+
             # Print port to stderr so parent process can parse it if needed
+            print(f"[MCP_PORT]: {args.port}", file=sys.stderr)
             print(f"MCP Server listening on ws://{args.host}:{args.port}/ws", file=sys.stderr)
             
             host = args.host if args.host != "0.0.0.0" else "localhost"

@@ -164,9 +164,18 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, 
     
     # Get all asset files (both images and text offload files)
     all_assets = [f.name for f in assets_dir.iterdir() if f.is_file() and not f.name.startswith('.')]
-    
-    # Find orphaned assets
-    orphaned = [f for f in all_assets if f not in referenced]
+
+    # FIXED: Only manage files created by the system (avoid deleting user-created files)
+    # Matches: asset_12chars.png, text_32chars.txt
+    managed_pattern = re.compile(r'^(?:text_|asset_)[a-f0-9]{12,32}\.[a-z]+$')
+
+    # Only consider system-managed files as candidates for deletion
+    managed_assets = [name for name in all_assets if managed_pattern.match(name)]
+
+    # Find orphaned managed assets (system-created files not referenced in the notebook)
+    orphaned = [f for f in managed_assets if f not in referenced]
+
+    # Kept should include any referenced assets (user or system)
     kept = [f for f in all_assets if f in referenced]
     
     total_size_freed = 0

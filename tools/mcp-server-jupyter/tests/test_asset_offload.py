@@ -353,6 +353,7 @@ if __name__ == "__main__":
         test_integration_full_workflow()
         test_regex_captures_diverse_assets()
         test_read_asset_enforces_limits()
+        test_prune_ignores_user_files()
         
         print("\n" + "=" * 70)
         print("✓ ALL TESTS PASSED")
@@ -435,3 +436,34 @@ def test_read_asset_enforces_limits():
         assert "Truncated" in content, "Missing truncation warning message"
         
         print(f"✓ Content truncated from 50000 to {len(content)} chars with warning")
+
+
+def test_prune_ignores_user_files():
+    """Ensure GC does not delete user-created files in assets/."""
+    print("\n=== Test: Prune ignores user-created files ===")
+    from src.asset_manager import prune_unused_assets
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        nb_path = Path(tmpdir) / "test.ipynb"
+        assets_dir = Path(tmpdir) / "assets"
+        assets_dir.mkdir()
+
+        # Create an empty notebook
+        nb = nbformat.v4.new_notebook()
+        with open(nb_path, 'w') as f:
+            nbformat.write(nb, f)
+
+        # 1. Create a SYSTEM file (orphan) -> Should be deleted
+        (assets_dir / "text_12345678901234567890123456789012.txt").write_text("system")
+
+        # 2. Create a USER file (orphan) -> Should be KEPT
+        (assets_dir / "my_important_model.pkl").write_bytes(b"data")
+
+        # Run GC
+        result = prune_unused_assets(str(nb_path), dry_run=False)
+
+        # Verify
+        assert not (assets_dir / "text_12345678901234567890123456789012.txt").exists(), "System file was not deleted"
+        assert (assets_dir / "my_important_model.pkl").exists(), "User file was incorrectly deleted"
+
+        print("\n✓ GC correctly ignored user-created file 'my_important_model.pkl'")

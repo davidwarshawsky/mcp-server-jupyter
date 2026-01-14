@@ -11,6 +11,7 @@ These tests use REAL kernels (not mocks) to validate production behavior.
 """
 
 import pytest
+import pytest_asyncio
 import asyncio
 import json
 import nbformat
@@ -19,7 +20,7 @@ from src.session import SessionManager
 from src import notebook
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def real_session_manager():
     """Fixture that provides a real SessionManager and cleans up after tests."""
     manager = SessionManager()

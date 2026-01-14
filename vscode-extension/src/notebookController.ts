@@ -438,9 +438,11 @@ export class McpNotebookController {
           } else if (mimeType === 'image/png' || mimeType === 'image/jpeg' || mimeType === 'image/svg+xml') {
             let buffer: Buffer;
             const dataStr = this.normalizeText(data);
+            // NORMALIZE SLASHES: Handle Windows paths coming from Python or user input
+            const dataStrNormalized = dataStr.replace(/\\/g, '/');
             
             // Check if data is a file path (e.g., "assets/plot_123.png")
-            if (dataStr.startsWith('assets/') || dataStr.startsWith('./assets/')) {
+            if (dataStrNormalized.startsWith('assets/') || dataStrNormalized.startsWith('./assets/')) {
               try {
                 // FIXED: Resolve assets relative to the NOTEBOOK, not the server
                 let assetPath = dataStr;
@@ -449,12 +451,12 @@ export class McpNotebookController {
                     if (execution) {
                         // Best case: Resolve relative to notebook file
                         const notebookDir = path.dirname(execution.cell.notebook.uri.fsPath);
-                        assetPath = path.join(notebookDir, dataStr);
+                        assetPath = path.join(notebookDir, dataStrNormalized);
                     } else {
                         // Fallback: Use server path (legacy behavior)
                         const config = vscode.workspace.getConfiguration('mcp-jupyter');
                         const serverPath = config.get<string>('serverPath') || '';
-                        assetPath = path.join(serverPath, dataStr);
+                        assetPath = path.join(serverPath, dataStrNormalized);
                     }
                 }
                 

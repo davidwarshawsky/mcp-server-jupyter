@@ -60,13 +60,13 @@ export class McpClient {
         // Mode: Spawn new server (Default)
         const pythonPath = await this.findPythonExecutable();
         const serverPath = this.findServerPath();
-        const port = await this.getFreePort();
-        wsUrl = `ws://127.0.0.1:${port}/ws`;
+        // Let the Python server pick an available port (pass 0) and report it back on stderr
+        wsUrl = undefined as any;
 
         this.outputChannel.appendLine(`Starting MCP server (WebSocket mode)...`);
         this.outputChannel.appendLine(`Python: ${pythonPath}`);
         this.outputChannel.appendLine(`Server: ${serverPath ? serverPath : '(Installed Package)'}`);
-        this.outputChannel.appendLine(`Port: ${port}`);
+        this.outputChannel.appendLine(`Port: (auto)`);
         this.outputChannel.appendLine(`Mode: spawn`);
         
         // Validation
@@ -87,15 +87,35 @@ export class McpClient {
              spawnOptions.cwd = serverPath;
         }
 
-        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', port.toString()], spawnOptions);
+        // Spawn server with port 0 so OS assigns a free port, then read actual port from stderr [MCP_PORT]: 45231
+        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', '0'], spawnOptions);
+
+        // Create a promise that resolves when the server writes the bound port to stderr
+        const portPromise: Promise<number> = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Timed out waiting for MCP server to report port')), 5000);
+
+            const onData = (data: any) => {
+                const txt = data.toString();
+                this.outputChannel.append(`[stderr] ${txt}`);
+                const m = txt.match(/\[MCP_PORT\]:\s*(\d+)/);
+                if (m) {
+                    clearTimeout(timeout);
+                    const p = parseInt(m[1], 10);
+                    this.process?.stderr?.removeListener('data', onData);
+                    resolve(p);
+                }
+            };
+
+            this.process.stderr?.on('data', onData);
+            this.process.on('error', (err) => {
+                clearTimeout(timeout);
+                reject(err);
+            });
+        });
 
         this.process.stdout?.on('data', (data) => {
           // Log stdout but don't parse it as JSON-RPC if using WebSocket
           this.outputChannel.append(`[stdout] ${data.toString()}`);
-        });
-
-        this.process.stderr?.on('data', (data) => {
-          this.outputChannel.append(`[stderr] ${data.toString()}`);
         });
 
         this.process.on('exit', (code, signal) => {
@@ -107,6 +127,10 @@ export class McpClient {
           this.outputChannel.appendLine(`MCP server error: ${error.message}`);
           this.rejectAllPending(new Error(`Server process error: ${error.message}`));
         });
+
+        // Wait for server to report its bound port, then connect
+        const assignedPort = await portPromise;
+        wsUrl = `ws://127.0.0.1:${assignedPort}/ws`;
 
         // Connect WebSocket with retry (wait for spawn)
         await this.connectWebSocket(wsUrl);

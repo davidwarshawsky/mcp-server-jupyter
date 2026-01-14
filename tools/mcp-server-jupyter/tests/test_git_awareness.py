@@ -263,7 +263,7 @@ class TestAssetManagement:
         cell = nbformat.v4.new_code_cell("print('hello')")
         cell.outputs = [nbformat.v4.new_output(
             'display_data',
-            data={'text/html': 'assets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png'}
+            data={'text/html': 'assets/asset_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png'}
         )]
         nb.cells.append(cell)
         
@@ -271,17 +271,17 @@ class TestAssetManagement:
             nbformat.write(nb, f)
         
         # Create assets
-        (assets_dir / "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png").write_bytes(b"kept")
-        (assets_dir / "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png").write_bytes(b"orphan")
+        (assets_dir / "asset_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png").write_bytes(b"kept")
+        (assets_dir / "asset_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png").write_bytes(b"orphan")
         
         # Prune
         result = prune_unused_assets(str(nb_path))
         
         assert len(result['deleted']) == 1
         assert len(result['kept']) == 1
-        assert "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png" in result['deleted']
-        assert not (assets_dir / "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png").exists()
-        assert (assets_dir / "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png").exists()
+        assert "asset_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png" in result['deleted']
+        assert not (assets_dir / "asset_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.png").exists()
+        assert (assets_dir / "asset_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.png").exists()
     
     def test_get_assets_summary_returns_stats(self, tmp_path):
         """get_assets_summary returns counts"""

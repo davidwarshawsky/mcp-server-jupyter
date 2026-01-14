@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 import asyncio
 import nbformat
 import os
@@ -6,7 +7,7 @@ import shutil
 from pathlib import Path
 from src.session import SessionManager
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def session_manager_fixture():
     manager = SessionManager()
     yield manager
