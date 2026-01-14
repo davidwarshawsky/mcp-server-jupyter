@@ -55,6 +55,9 @@ async def test_start_kernel_docker_config():
              
              # Image
              assert docker_image in cmd
+
+             # Ensure we added --init so signals propagate correctly
+             assert "--init" in cmd, "Docker command missing --init (Signal propagation will fail)"
              
              # Metadata check (Regression fix)
              session = manager.sessions[str(Path(nb_path))]

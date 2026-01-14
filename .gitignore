@@ -5,3 +5,4 @@
 
 # Auto-generated: Prevent notebook assets from polluting Git history
 assets/
+.coverage.*
