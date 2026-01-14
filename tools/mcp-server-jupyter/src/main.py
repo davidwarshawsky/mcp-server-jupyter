@@ -2022,7 +2022,23 @@ def main():
                     logger.info("WebSocket disconnected")
                     connection_manager.disconnect(websocket)
                 except Exception as e:
-                    logger.error(f"Connection error: {e}", exc_info=True)
+                    # Disconnects during/after response writes can surface as anyio.ClosedResourceError
+                    # (sometimes wrapped in an ExceptionGroup on Python 3.11+). Treat these as normal.
+                    def _is_closed_resource_error(err: BaseException) -> bool:
+                        try:
+                            if err.__class__.__name__ == 'ClosedResourceError':
+                                return True
+                            sub = getattr(err, 'exceptions', None)
+                            if sub and isinstance(sub, (list, tuple)):
+                                return any(_is_closed_resource_error(x) for x in sub)
+                        except Exception:
+                            return False
+                        return False
+
+                    if _is_closed_resource_error(e):
+                        logger.info("WebSocket closed during response send")
+                    else:
+                        logger.error(f"Connection error: {e}", exc_info=True)
                     connection_manager.disconnect(websocket)
 
             from starlette.routing import Route

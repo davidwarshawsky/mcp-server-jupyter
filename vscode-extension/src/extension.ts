@@ -52,24 +52,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     const outputChannel = mcpClient.getOutputChannel();
 
     const depsInstalled = await checkPythonDependencies(pythonPath, serverPath, outputChannel);
+    let skipStart = false;
     if (!depsInstalled) {
-      const installed = await promptInstallDependencies(pythonPath, serverPath, outputChannel);
-      if (!installed) {
-        throw new Error('Python dependencies are required. Please install them manually or restart the extension.');
+      // Non-blocking: notify the user and open the Setup Wizard, but do NOT await any UI input
+      vscode.window.showWarningMessage('Python dependencies for the MCP server are missing. Open the Setup Wizard to install them.', 'Open Setup Wizard');
+      setTimeout(() => {
+        vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');
+      }, 500);
+
+      // If the user explicitly configured a pythonPath, attempt to start with it (useful for tests)
+      const configuredPath = vscode.workspace.getConfiguration('mcp-jupyter').get<string>('pythonPath');
+      mcpClient.getOutputChannel().appendLine(`Debug: configured pythonPath is ${configuredPath}`);
+      console.log(`Debug: configured pythonPath is ${configuredPath}`);
+      if (configuredPath) {
+        try {
+          mcpClient.getOutputChannel().appendLine('Debug: attempting to start server with configured pythonPath (direct call)');
+          await mcpClient.start();
+          mcpClient.getOutputChannel().appendLine('Debug: start succeeded');
+          vscode.window.showInformationMessage('MCP server started with configured Python');
+        } catch (startErr: any) {
+          mcpClient.getOutputChannel().appendLine(`Debug: failed to start server: ${startErr?.message ?? String(startErr)}`);
+          vscode.window.showWarningMessage(`Failed to start MCP server with configured Python: ${startErr?.message ?? String(startErr)}. Open the Setup Wizard for troubleshooting.`);
+        }
       }
+
+      // If we couldn't attempt a start, skip the normal start block, otherwise allow it to proceed
+      skipStart = !configuredPath;
     }
 
-    // Start MCP server
-    await vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: 'Starting MCP Jupyter server...',
-        cancellable: false,
-      },
-      async () => {
-        await mcpClient.start();
-      }
-    );
+    // Start MCP server unless setup/install was deferred
+    if (!skipStart) {
+      mcpClient.getOutputChannel().appendLine('Activation: about to call mcpClient.start()');
+      await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: 'Starting MCP Jupyter server...',
+          cancellable: false,
+        },
+        async () => {
+          try {
+            await mcpClient.start();
+          } catch (e) {
+            // Show a helpful message rather than throwing and failing activation
+            mcpClient.getOutputChannel().appendLine(`Activation: mcpClient.start() failed: ${(e as any)?.message ?? String(e)}`);
+            vscode.window.showErrorMessage(`Failed to start MCP server: ${(e as any)?.message ?? String(e)}. Use the Setup Wizard to install or configure the server.`);
+          }
+        }
+      );
+    } else {
+      mcpClient.getOutputChannel().appendLine('Activation: Skipping server start due to missing or deferred dependency installation');
+      console.log('Skipping server start due to missing or deferred dependency installation');
+    }
 
     // Initialize notebook controller
     notebookController = new McpNotebookController(mcpClient);
@@ -168,6 +201,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
           const venvPath = await setupManager.createManagedEnvironment();
           await setupManager.installDependencies(venvPath);
           vscode.window.showInformationMessage('MCP server installed in managed environment');
+
+          // Try to start the server immediately so the user gets feedback
+          try {
+            await vscode.window.withProgress({ title: 'Starting MCP server...', location: vscode.ProgressLocation.Notification }, async () => {
+              await mcpClient.start();
+            });
+            vscode.window.showInformationMessage('MCP server started successfully');
+          } catch (startErr: any) {
+            vscode.window.showWarningMessage(`Installed but failed to start server: ${startErr?.message ?? String(startErr)}. Open the Setup Wizard for troubleshooting.`);
+          }
         } catch (e: any) {
           vscode.window.showErrorMessage(`Install failed: ${e?.message ?? String(e)}`);
         }

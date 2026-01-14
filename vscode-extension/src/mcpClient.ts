@@ -26,6 +26,8 @@ export class McpClient {
 
   public getStatus(): 'running' | 'stopped' | 'starting' {
     if (this.isStarting) return 'starting';
+    // In 'connect' mode, there's no process but there is a WebSocket
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) return 'running';
     if (this.process && !this.process.killed) return 'running';
     return 'stopped';
   }
@@ -54,7 +56,9 @@ export class McpClient {
         this.outputChannel.appendLine(`Connecting to existing MCP server at ${wsUrl}...`);
         
         // Connect directly without spawning
-        await this.connectWebSocket(wsUrl, 5, 1000); // Fewer retries for connect mode
+        // Use the same retry strategy as spawn mode to be resilient to timing races in tests
+        this.outputChannel.appendLine('Connect mode: using default retry/backoff for WebSocket connection');
+        await this.connectWebSocket(wsUrl);
         
       } else {
         // Mode: Spawn new server (Default)
@@ -274,12 +278,16 @@ export class McpClient {
    * Execute a cell asynchronously and return task ID
    */
   async runCellAsync(notebookPath: string, index: number, codeContent: string, taskId?: string): Promise<string> {
-    const result = await this.callTool('run_cell_async', {
+    const params: Record<string, any> = {
       notebook_path: notebookPath,
       index,
       code_override: codeContent,
-      task_id_override: taskId
-    });
+    };
+    // Only include task_id_override if explicitly provided
+    if (taskId) {
+      params.task_id_override = taskId;
+    }
+    const result = await this.callTool('run_cell_async', params);
     // Handle both new JSON return and legacy string return
     if (typeof result === 'string') {
         try {
@@ -324,7 +332,28 @@ export class McpClient {
       task_id: taskId,
       since_output_index: fromIndex,
     });
-    return result;
+
+    // Server may return either:
+    // - new_outputs: [] (ideal)
+    // - new_outputs: "" (queued)
+    // - new_outputs: { llm_summary: string, raw_outputs: [...] } (sanitize_outputs wrapper)
+    let newOutputs: any = result?.new_outputs;
+    if (typeof newOutputs === 'string') {
+      // queued path returns an empty string
+      newOutputs = [];
+    } else if (newOutputs && typeof newOutputs === 'object' && !Array.isArray(newOutputs)) {
+      if (Array.isArray((newOutputs as any).raw_outputs)) {
+        newOutputs = (newOutputs as any).raw_outputs;
+      } else {
+        // Unknown wrapper shape; best-effort fallback
+        newOutputs = [];
+      }
+    }
+
+    return {
+      ...result,
+      new_outputs: Array.isArray(newOutputs) ? newOutputs : [],
+    };
   }
 
   /**
@@ -799,22 +828,23 @@ export class McpClient {
    * Find Python executable (exposed for dependency checking)
    */
   async findPythonExecutable(): Promise<string> {
-    // 0. Check for local .venv in usage workspace (Priority for Hardening)
+    // 0. Check extension config first (explicit override)
+    const config = vscode.workspace.getConfiguration('mcp-jupyter');
+    const configuredPath = config.get<string>('pythonPath');
+    if (configuredPath) {
+      this.outputChannel.appendLine(`Using configured pythonPath: ${configuredPath}`);
+      return configuredPath;
+    }
+
+    // 1. Check for local .venv in usage workspace (convenient for dev/test)
     const serverPath = this.findServerPath();
-    const venvPython = process.platform === 'win32' 
+    const venvPython = process.platform === 'win32'
         ? path.join(serverPath, '.venv', 'Scripts', 'python.exe')
         : path.join(serverPath, '.venv', 'bin', 'python');
     
     if (require('fs').existsSync(venvPython)) {
         this.outputChannel.appendLine(`Using local .venv Python: ${venvPython}`);
         return venvPython;
-    }
-
-    // 1. Check extension config
-    const config = vscode.workspace.getConfiguration('mcp-jupyter');
-    const configuredPath = config.get<string>('pythonPath');
-    if (configuredPath) {
-      return configuredPath;
     }
 
     // 2. Check Python extension

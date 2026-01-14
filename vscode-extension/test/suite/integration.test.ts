@@ -2,7 +2,8 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as cp from 'child_process';
+import * as crypto from 'crypto';
+import { spawnTestServer, cleanupTestServer } from './testHelper';
 
 /**
  * Integration Test: VSCode + MCP Server + Jupyter Kernel
@@ -15,6 +16,7 @@ suite('Integration Test Suite', function() {
 
     const tempDir = path.join(process.cwd(), 'temp_test_workspace');
     const notebookPath = path.join(tempDir, 'integration_test.ipynb');
+    let serverProc: any = null;
 
     suiteSetup(async () => {
         // 1. Create temp workspace
@@ -22,32 +24,10 @@ suite('Integration Test Suite', function() {
             fs.mkdirSync(tempDir);
         }
 
-        // Configure Server Path explicitly to fix "MCP server not found"
-        // We know we are in /home/david/personal/mcp-server-jupyter/vscode-extension/
-        // Server is in /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter
-        const serverPath = path.resolve(__dirname, '../../../../tools/mcp-server-jupyter');
-        const config = vscode.workspace.getConfiguration('mcp-jupyter');
-        await config.update('serverPath', serverPath, vscode.ConfigurationTarget.Global);
-
-        // Configure Python Path to use the project's .venv if available
-        // This is crucial because the system python likely lacks 'fastmcp'
-        const rootDir = path.resolve(__dirname, '../../../../');
-        const venvPython = process.platform === 'win32'
-            ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
-            : path.join(rootDir, '.venv', 'bin', 'python');
-
-        if (fs.existsSync(venvPython)) {
-            console.log(`[Integration Test] Using .venv Python: ${venvPython}`);
-            await config.update('pythonPath', venvPython, vscode.ConfigurationTarget.Global);
-        } else {
-            console.log('[Integration Test] .venv not found, falling back to python3');
-            await config.update('pythonPath', 'python3', vscode.ConfigurationTarget.Global);
-        }
-
-        // 2. Ensure extension is active
-        const extension = vscode.extensions.getExtension('warshawsky-research.mcp-agent-kernel');
-        assert.ok(extension, 'Extension not found');
-        await extension.activate();
+        // 2. Spawn the test server and configure extension
+        const { proc, port } = await spawnTestServer();
+        serverProc = proc;
+        console.log(`[Integration Test] Server running on port ${port}`);
 
         // 3. Create a dummy notebook
         const initialNotebookContent = {
@@ -77,6 +57,7 @@ suite('Integration Test Suite', function() {
 
     suiteTeardown(() => {
         // Cleanup
+        cleanupTestServer(serverProc);
         if (fs.existsSync(notebookPath)) {
             try { fs.unlinkSync(notebookPath); } catch {}
         }
@@ -107,62 +88,45 @@ suite('Integration Test Suite', function() {
         const configuredPath = config.get('pythonPath');
         assert.ok(configuredPath, 'Python Path should be configured');
 
-        // 3. Select Kernel and Run Cell (End-to-End)
-        // We need to wait a bit for the controller to be registered
-        await new Promise(resolve => setTimeout(resolve, 2000));
-
-        // Get the extension API
+        // 3. Execute via MCP client directly (reliable in headless harness)
+        // GUI-driven execution via VS Code's notebook controller selection can be flaky in CI.
         const extension = vscode.extensions.getExtension('warshawsky-research.mcp-agent-kernel');
         assert.ok(extension, 'Extension not found');
-        const extensionApi = await extension.activate() as any; // Cast to any or ExtensionApi
+        const extensionApi = await extension.activate() as any;
         const client = extensionApi.mcpClient;
-        assert.ok(client, "MCP Client should be accessible via Extension API");
-        assert.ok(client.getStatus() !== 'stopped', "MCP Server should be running");
+        assert.ok(client, 'MCP Client should be accessible via Extension API');
+        assert.strictEqual(client.getStatus(), 'running', 'MCP Server should be running');
 
-        // Try to run the cell
-        // Since we are the only provider for 'jupyter-notebook' with this extension active in test,
-        // (or we hope so), we try to execute.
-        
-        // Select all cells
-        const cell = doc.cellAt(0);
-        
-        // Execute
-        // Note: 'notebook.cell.execute' requires a focused cell or argument.
-        // We can use WorkspaceEdit to replace metadata if we need to force kernel selection,
-        // but for now let's try the generic execute command.
-        
-        // Focus the editor
-        const editor = await vscode.window.showNotebookDocument(doc);
-        await vscode.commands.executeCommand('notebook.focusTop');
-        
-        console.log("Triggering cell execution...");
-        await vscode.commands.executeCommand('notebook.cell.execute');
-        
-        // Wait for output (poll)
-        let outputFound = false;
-        for (let i = 0; i < 20; i++) {
-            if (cell.outputs.length > 0) {
-                outputFound = true;
+        // Ensure a kernel is started for this notebook
+        await client.startKernel(notebookPath);
+
+        // Run the code and stream outputs until completion
+        const taskId = crypto.randomUUID();
+        await client.runCellAsync(notebookPath, 0, "print('HELLO FROM INTEGRATION TEST')", taskId);
+
+        let stdout = '';
+        let nextIndex = 0;
+        const started = Date.now();
+        const maxMs = 30000;
+        while (Date.now() - started < maxMs) {
+            const stream = await client.getExecutionStream(notebookPath, taskId, nextIndex);
+            nextIndex = stream.next_index ?? nextIndex;
+
+            if (Array.isArray(stream.new_outputs)) {
+                for (const o of stream.new_outputs) {
+                    if (o?.output_type === 'stream' && (o as any).name === 'stdout') {
+                        stdout += (o as any).text ?? '';
+                    }
+                }
+            }
+
+            if (stream.status === 'completed') {
                 break;
             }
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise(resolve => setTimeout(resolve, 250));
         }
-        
-        // If execution failed (e.g. no kernel selected), we might fail here.
-        // But this attempts the E2E flow.
-        
-        if (outputFound) {
-             const output = cell.outputs[0];
-             const textOutput = output.items.find(i => i.mime === 'application/vnd.code.notebook.stdout');
-             if (textOutput) {
-                 const text = new TextDecoder().decode(textOutput.data);
-                 assert.ok(text.includes('HELLO FROM INTEGRATION TEST'), 'Cell output should match');
-             }
-        } else {
-            console.warn("Cell execution timed out or did not produce output. This might be due to Kernel Selection UI requirement.");
-            // We fallback to checking client status as 'partial' success
-            assert.ok(client.getStatus() === 'running', "Server should be responsive");
-        }
+
+        assert.ok(stdout.includes('HELLO FROM INTEGRATION TEST'), `Expected stdout to include greeting, got: ${stdout}`);
         
         assert.strictEqual(doc.notebookType, 'jupyter-notebook');
     });

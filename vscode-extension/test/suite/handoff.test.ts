@@ -2,41 +2,24 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
+import { spawnTestServer, cleanupTestServer } from './testHelper';
 
 suite('Handoff Protocol Test Suite', function() {
     this.timeout(60000); // 60s timeout
 
     const tempDir = path.join(process.cwd(), 'temp_test_handoff');
     const notebookPath = path.join(tempDir, 'handoff_test.ipynb');
+    let serverProc: any = null;
 
     suiteSetup(async () => {
         if (!fs.existsSync(tempDir)) {
             fs.mkdirSync(tempDir);
         }
 
-        // Configure Server Path
-        const serverPath = path.resolve(__dirname, '../../../../tools/mcp-server-jupyter');
-        const config = vscode.workspace.getConfiguration('mcp-jupyter');
-        await config.update('serverPath', serverPath, vscode.ConfigurationTarget.Global);
-
-        // Configure Python Path
-        const rootDir = path.resolve(__dirname, '../../../../');
-        const venvPython = process.platform === 'win32'
-            ? path.join(rootDir, '.venv', 'Scripts', 'python.exe')
-            : path.join(rootDir, '.venv', 'bin', 'python');
-
-        if (fs.existsSync(venvPython)) {
-            console.log(`[Handoff Test] Using .venv Python: ${venvPython}`);
-            await config.update('pythonPath', venvPython, vscode.ConfigurationTarget.Global);
-        } else {
-            console.log('[Handoff Test] .venv not found, falling back to python3');
-            await config.update('pythonPath', 'python3', vscode.ConfigurationTarget.Global);
-        }
-
-        // Activate Extension
-        const extension = vscode.extensions.getExtension('warshawsky-research.mcp-agent-kernel');
-        assert.ok(extension, 'Extension not found');
-        await extension.activate();
+        // Spawn the test server and configure extension
+        const { proc, port } = await spawnTestServer();
+        serverProc = proc;
+        console.log(`[Handoff Test] Server running on port ${port}`);
 
         // Create Notebook
         const initialNotebookContent = {
@@ -65,6 +48,7 @@ suite('Handoff Protocol Test Suite', function() {
     });
 
     suiteTeardown(() => {
+        cleanupTestServer(serverProc);
         if (fs.existsSync(notebookPath)) try { fs.unlinkSync(notebookPath); } catch {}
         if (fs.existsSync(tempDir)) try { fs.rmdirSync(tempDir); } catch {}
     });

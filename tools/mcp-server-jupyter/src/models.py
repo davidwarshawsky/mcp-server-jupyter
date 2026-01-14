@@ -28,3 +28,4 @@ class RunCellArgs(SecureBaseModel):
     notebook_path: str
     index: int = Field(..., ge=0)
     code_override: Optional[str] = Field(None, max_length=100_000) # Prevent memory DoS
+    task_id_override: Optional[str] = Field(None, max_length=100)  # Client-generated execution ID

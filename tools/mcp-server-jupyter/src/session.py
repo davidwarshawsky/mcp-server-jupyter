@@ -1052,18 +1052,26 @@ except ImportError:
             # 2. Get Cell content for content hashing
             abs_path = str(Path(nb_path).resolve())
             execution_hash = None
+
+            # Some internal/server-side helper executions (e.g. variable manifest refresh)
+            # use cell_index = -1 to indicate "not associated with a notebook cell".
+            # In that case, skip notebook hashing/metadata injection and never attempt disk writes.
+            cell_index = exec_data.get('cell_index', None)
+            if cell_index is None or cell_index < 0:
+                cell_index = None
             
             try:
-                # Load notebook to get Cell info
-                with open(nb_path, 'r', encoding='utf-8') as f:
-                    nb = nbformat.read(f, as_version=4)
-                
-                # Verify index is valid
-                if 0 <= exec_data['cell_index'] < len(nb.cells):
-                    cell = nb.cells[exec_data['cell_index']]
-                    execution_hash = utils.get_cell_hash(cell.source)
-                else:
-                    logger.warning(f"Cell index {exec_data['cell_index']} out of range")
+                if cell_index is not None:
+                    # Load notebook to get Cell info
+                    with open(nb_path, 'r', encoding='utf-8') as f:
+                        nb = nbformat.read(f, as_version=4)
+
+                    # Verify index is valid
+                    if 0 <= cell_index < len(nb.cells):
+                        cell = nb.cells[cell_index]
+                        execution_hash = utils.get_cell_hash(cell.source)
+                    else:
+                        logger.warning(f"Cell index {cell_index} out of range")
                     
             except Exception as e:
                 logger.warning(f"Could not compute hash: {e}")
@@ -1096,13 +1104,15 @@ except ImportError:
             if active_clients > 0:
                 logger.info(f"Skipping disk write for {nb_path} (clients connected={active_clients}). Updates were broadcasted to clients.")
             else:
-                notebook.save_cell_execution(
-                    nb_path, 
-                    exec_data['cell_index'], 
-                    exec_data['outputs'], 
-                    exec_data.get('execution_count'),
-                    metadata_update=metadata_update if metadata_update else None
-                )
+                # Only persist outputs back into the notebook when this execution maps to a real cell.
+                if cell_index is not None:
+                    notebook.save_cell_execution(
+                        nb_path,
+                        cell_index,
+                        exec_data['outputs'],
+                        exec_data.get('execution_count'),
+                        metadata_update=metadata_update if metadata_update else None
+                    )
         except Exception as e:
             exec_data['status'] = 'failed_save'
             exec_data['error'] = str(e)

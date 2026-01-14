@@ -61,6 +61,12 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       return;
     }
 
+    // If the MCP client isn't connected yet, skip polling.
+    // This avoids noisy errors like "MCP server not connected via WebSocket" during startup/reconnect.
+    if (this.mcpClient.getStatus() !== 'running') {
+      return;
+    }
+
     try {
       this.isPolling = true;
       const result = await this.mcpClient.getVariableManifest(this.currentNotebook);
@@ -70,8 +76,12 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
         this._onDidChangeTreeData.fire();
       }
     } catch (error) {
-      // Silent fail - kernel might not be ready yet
-      console.log('Failed to get variable manifest:', error);
+      // Silent fail - kernel/server might not be ready yet (or connection is transiently down)
+      // Avoid logging stack traces every poll tick.
+      const msg = error instanceof Error ? error.message : String(error);
+      if (!/not connected via WebSocket/i.test(msg)) {
+        console.debug('Variable manifest fetch failed:', msg);
+      }
     } finally {
       this.isPolling = false;
     }
