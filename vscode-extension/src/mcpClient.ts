@@ -19,9 +19,23 @@ export class McpClient {
   private isShuttingDown = false;
   private _onNotification = new vscode.EventEmitter<{ method: string, params: any }>();
   public readonly onNotification = this._onNotification.event;
+  private _onConnectionStateChange = new vscode.EventEmitter<'connected' | 'disconnected' | 'connecting'>();
+  public readonly onConnectionStateChange = this._onConnectionStateChange.event;
+  private connectionState: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
 
   constructor() {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
+  }
+
+  public getConnectionState(): 'connected' | 'disconnected' | 'connecting' {
+    return this.connectionState;
+  }
+
+  private setConnectionState(state: 'connected' | 'disconnected' | 'connecting'): void {
+    if (this.connectionState !== state) {
+      this.connectionState = state;
+      this._onConnectionStateChange.fire(state);
+    }
   }
 
   public getStatus(): 'running' | 'stopped' | 'starting' {
@@ -42,6 +56,7 @@ export class McpClient {
 
     this.isStarting = true;
     this.isShuttingDown = false;
+    this.setConnectionState('connecting');
 
     try {
       const config = vscode.workspace.getConfiguration('mcp-jupyter');
@@ -163,6 +178,25 @@ export class McpClient {
       // Wait for server to initialize
       await this.waitForReady();
       this.outputChannel.appendLine('MCP server ready');
+      this.setConnectionState('connected');
+    } catch (error) {
+      this.setConnectionState('disconnected');
+      // Auto-reveal output channel on error
+      this.outputChannel.show();
+      // Show actionable error message
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      vscode.window.showErrorMessage(
+        `Failed to start MCP server: ${errorMsg}`,
+        'Show Logs',
+        'Open Setup Wizard'
+      ).then(choice => {
+        if (choice === 'Show Logs') {
+          this.outputChannel.show();
+        } else if (choice === 'Open Setup Wizard') {
+          vscode.commands.executeCommand('mcp-jupyter.openWalkthrough');
+        }
+      });
+      throw error;
     } finally {
       this.isStarting = false;
     }
@@ -193,6 +227,7 @@ export class McpClient {
                 
                 this.ws.on('open', () => {
                     this.outputChannel.appendLine('WebSocket connected');
+                    this.setConnectionState('connected');
                     // Emit an internal reconnection notification so higher-level
                     // controllers can reconcile any active executions that may
                     // have completed while we were disconnected.
@@ -221,6 +256,21 @@ export class McpClient {
                 this.ws.on('close', (code, reason) => {
                      this.outputChannel.appendLine(`WebSocket closed: ${code} ${reason}`);
                      this.ws = undefined;
+                     this.setConnectionState('disconnected');
+                     // Show notification for unexpected disconnects
+                     if (!this.isShuttingDown) {
+                       vscode.window.showWarningMessage(
+                         'MCP server disconnected',
+                         'Show Logs',
+                         'Restart Server'
+                       ).then(choice => {
+                         if (choice === 'Show Logs') {
+                           this.outputChannel.show();
+                         } else if (choice === 'Restart Server') {
+                           vscode.commands.executeCommand('mcp-jupyter.restartServer');
+                         }
+                       });
+                     }
                 });
             });
             return; // Connected successfully

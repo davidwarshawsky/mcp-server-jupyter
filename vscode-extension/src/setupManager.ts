@@ -24,8 +24,15 @@ export class SetupManager {
       }
     } catch (err) {
       console.warn('globalStorageUri not writable, falling back to workspace storage', err);
+      vscode.window.showWarningMessage('Unable to use global storage. Using workspace storage for managed environment.');
       if (!this.context.storageUri) {
-        throw new Error('Unable to access extension storage to create managed environment.');
+        const msg = 'Unable to access extension storage to create managed environment.';
+        vscode.window.showErrorMessage(msg, 'Show Help').then(choice => {
+          if (choice === 'Show Help') {
+            vscode.env.openExternal(vscode.Uri.parse('https://code.visualstudio.com/docs/editor/settings-sync'));
+          }
+        });
+        throw new Error(msg);
       }
       venvPath = path.join(this.context.storageUri.fsPath, 'mcp-venv');
       if (!fs.existsSync(this.context.storageUri.fsPath)) {
@@ -36,16 +43,34 @@ export class SetupManager {
     // Idempotency: if venv exists, validate
     const pythonExe = this.pythonExeForVenv(venvPath);
     if (fs.existsSync(pythonExe)) {
-      const choice = await vscode.window.showQuickPick(['Use existing', 'Recreate', 'Upgrade'], { placeHolder: 'A managed environment already exists' });
+      const choice = await vscode.window.showQuickPick(['Use existing', 'Recreate', 'Upgrade'], { 
+        placeHolder: 'A managed environment already exists',
+        ignoreFocusOut: true 
+      });
       if (!choice) {
         throw new Error('Operation cancelled by user');
       }
 
       if (choice === 'Recreate') {
         // Remove and recreate
-        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Recreating managed environment...' }, async (progress) => {
-          fs.rmSync(venvPath, { recursive: true, force: true });
-          await this.runShellCommand(await this.findBasePython(), ['-m', 'venv', venvPath]);
+        await vscode.window.withProgress({ 
+          location: vscode.ProgressLocation.Notification, 
+          title: 'Recreating managed environment...', 
+          cancellable: false 
+        }, async (progress) => {
+          try {
+            fs.rmSync(venvPath, { recursive: true, force: true });
+            progress.report({ message: 'Creating new virtual environment...' });
+            await this.runShellCommand(await this.findBasePython(), ['-m', 'venv', venvPath]);
+          } catch (e) {
+            const msg = `Failed to recreate environment: ${e instanceof Error ? e.message : String(e)}`;
+            vscode.window.showErrorMessage(msg, 'Show Logs').then(choice => {
+              if (choice === 'Show Logs') {
+                vscode.commands.executeCommand('mcp-jupyter.showServerLogs');
+              }
+            });
+            throw new Error(msg);
+          }
         });
       } else if (choice === 'Upgrade') {
         // No structural change; we'll just return the path and let install handle upgrades
@@ -55,9 +80,24 @@ export class SetupManager {
       }
     } else {
       // Create venv
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Creating Isolated Environment...', cancellable: false }, async (progress) => {
-        const basePython = await this.findBasePython();
-        await this.runShellCommand(basePython, ['-m', 'venv', venvPath]);
+      await vscode.window.withProgress({ 
+        location: vscode.ProgressLocation.Notification, 
+        title: 'Creating Isolated Environment...', 
+        cancellable: false 
+      }, async (progress) => {
+        try {
+          const basePython = await this.findBasePython();
+          progress.report({ message: 'Setting up virtual environment...' });
+          await this.runShellCommand(basePython, ['-m', 'venv', venvPath]);
+        } catch (e) {
+          const msg = `Failed to create environment: ${e instanceof Error ? e.message : String(e)}`;
+          vscode.window.showErrorMessage(msg, 'Show Logs').then(choice => {
+            if (choice === 'Show Logs') {
+              vscode.commands.executeCommand('mcp-jupyter.showServerLogs');
+            }
+          });
+          throw new Error(msg);
+        }
       });
     }
 
@@ -71,14 +111,39 @@ export class SetupManager {
     const pythonExe = this.pythonExeForVenv(venvPath);
     const serverSource = path.join(this.context.extensionPath, 'python_server');
 
-    const terminal = vscode.window.createTerminal('MCP Installer');
-    terminal.show();
+    // Show progress notification
+    await vscode.window.withProgress({
+      location: vscode.ProgressLocation.Notification,
+      title: 'Installing MCP Server Dependencies',
+      cancellable: false
+    }, async (progress) => {
+      const terminal = vscode.window.createTerminal('MCP Installer');
+      terminal.show();
 
-    terminal.sendText(`"${pythonExe}" -m pip install --upgrade pip`);
-    terminal.sendText(`"${pythonExe}" -m pip install "${serverSource}"`);
+      progress.report({ message: 'Upgrading pip...' });
+      terminal.sendText(`"${pythonExe}" -m pip install --upgrade pip`);
+      
+      // Wait a bit for pip upgrade
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      progress.report({ message: 'Installing MCP server...' });
+      terminal.sendText(`"${pythonExe}" -m pip install "${serverSource}"`);
+      
+      // Wait for installation to complete
+      await new Promise(resolve => setTimeout(resolve, 5000));
+    });
 
     // Mark setup as complete in global state so walkthrough doesn't run again
     await this.context.globalState.update('mcp.hasCompletedSetup', true);
+    
+    vscode.window.showInformationMessage(
+      'MCP server dependencies installed successfully',
+      'Test Connection'
+    ).then(choice => {
+      if (choice === 'Test Connection') {
+        vscode.commands.executeCommand('mcp-jupyter.testConnection');
+      }
+    });
   }
 
   private runShellCommand(command: string, args: string[]): Promise<void> {
@@ -113,11 +178,18 @@ export class SetupManager {
       }
     }
 
-    const install = await vscode.window.showInformationMessage('No system Python found. Install the Python extension or download Python from python.org?', 'Open Python Extension', 'Open python.org');
+    const install = await vscode.window.showErrorMessage(
+      'No system Python found. Install the Python extension or download Python from python.org?', 
+      'Open Python Extension', 
+      'Open python.org',
+      'Show Help'
+    );
     if (install === 'Open Python Extension') {
       vscode.commands.executeCommand('extension.open', 'ms-python.python');
     } else if (install === 'Open python.org') {
       vscode.env.openExternal(vscode.Uri.parse('https://www.python.org/downloads/'));
+    } else if (install === 'Show Help') {
+      vscode.env.openExternal(vscode.Uri.parse('https://code.visualstudio.com/docs/python/python-tutorial'));
     }
     throw new Error('No base Python available');
   }

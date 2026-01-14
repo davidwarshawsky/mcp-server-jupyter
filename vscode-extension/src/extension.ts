@@ -5,12 +5,15 @@ import { McpNotebookController } from './notebookController';
 import { VariableDashboardProvider } from './variableDashboard';
 import { checkPythonDependencies, promptInstallDependencies } from './dependencies';
 import { SetupManager } from './setupManager';
+import { SyncCodeLensProvider } from './syncCodeLensProvider';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
 let variableDashboard: VariableDashboardProvider;
 let syncStatusBar: vscode.StatusBarItem;
+let connectionStatusBar: vscode.StatusBarItem;
 let setupManager: SetupManager;
+let syncCodeLensProvider: SyncCodeLensProvider;
 const notebooksNeedingSync = new Set<string>();
 
 export interface ExtensionApi {
@@ -26,6 +29,31 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     // Initialize MCP client
     mcpClient = new McpClient();
 
+    // Create connection health status bar
+    connectionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
+    connectionStatusBar.command = 'mcp-jupyter.showServerLogs';
+    connectionStatusBar.tooltip = 'MCP Server Connection Status (click to view logs)';
+    context.subscriptions.push(connectionStatusBar);
+    
+    // Subscribe to connection state changes
+    mcpClient.onConnectionStateChange((state) => {
+      switch (state) {
+        case 'connected':
+          connectionStatusBar.text = '$(circle-filled) MCP';
+          connectionStatusBar.backgroundColor = undefined;
+          break;
+        case 'connecting':
+          connectionStatusBar.text = '$(sync~spin) MCP';
+          connectionStatusBar.backgroundColor = undefined;
+          break;
+        case 'disconnected':
+          connectionStatusBar.text = '$(circle-outline) MCP';
+          connectionStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+          break;
+      }
+      connectionStatusBar.show();
+    });
+    
     // Setup manager for managed environment (First-Run flow)
     setupManager = new SetupManager(context);
 
@@ -119,6 +147,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     // Pass variable dashboard to controller for lifecycle management
     notebookController.setVariableDashboard(variableDashboard);
 
+    // Create sync CodeLens provider
+    syncCodeLensProvider = new SyncCodeLensProvider(mcpClient);
+    context.subscriptions.push(
+      vscode.languages.registerCodeLensProvider(
+        { pattern: '**/*.ipynb' },
+        syncCodeLensProvider
+      )
+    );
+
     // Create sync status bar item
     syncStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 99);
     syncStatusBar.command = 'mcp-jupyter.syncNotebook';
@@ -157,10 +194,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         if (syncNeeded) {
           notebooksNeedingSync.add(uri.fsPath);
           updateSyncStatusBar();
+          syncCodeLensProvider.setSyncNeeded(uri.fsPath, true);
         } else {
           // Remove from sync list if no longer needed
           notebooksNeedingSync.delete(uri.fsPath);
           updateSyncStatusBar();
+          syncCodeLensProvider.setSyncNeeded(uri.fsPath, false);
         }
       } catch (error) {
         console.error('Failed to check sync status:', error);
@@ -288,6 +327,10 @@ export async function deactivate(): Promise<void> {
     syncStatusBar.dispose();
   }
 
+  if (connectionStatusBar) {
+    connectionStatusBar.dispose();
+  }
+
   if (mcpClient) {
     await mcpClient.stop();
     mcpClient.dispose();
@@ -339,6 +382,7 @@ async function syncNotebook(): Promise<void> {
 
     notebooksNeedingSync.delete(notebookPath);
     updateSyncStatusBar();
+    syncCodeLensProvider.setSyncNeeded(notebookPath, false);
     vscode.window.showInformationMessage('Notebook synced successfully');
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
