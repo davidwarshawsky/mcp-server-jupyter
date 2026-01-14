@@ -1,11 +1,10 @@
-from pydantic import BaseModel, Field, field_validator, FilePath, constr
+from pydantic import BaseModel, Field, field_validator, FilePath, constr, ConfigDict
 from pathlib import Path
 from typing import Optional
 
 class SecureBaseModel(BaseModel):
-    class Config:
-        # Forbid extra fields to prevent payload bloating attacks
-        extra = "forbid"
+    # Use ConfigDict to satisfy Pydantic v2 recommendations
+    model_config = ConfigDict(extra="forbid")
 
 class StartKernelArgs(SecureBaseModel):
     notebook_path: str = Field(..., description="Absolute path to the notebook")

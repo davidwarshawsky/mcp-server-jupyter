@@ -149,28 +149,63 @@ def get_server_status():
 # Persistence for proposals
 PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
 
+from collections import deque
+
+PROPOSAL_HISTORY = deque(maxlen=1000)  # Keep only the most recent 1000 proposals
+
+
 def load_proposals():
     """Load proposals from disk to survive server restarts."""
     if PROPOSAL_STORE_FILE.exists():
         try:
             with open(PROPOSAL_STORE_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Load history keys in insertion order if present
+                for k in data.get('_history', []):
+                    PROPOSAL_HISTORY.append(k)
+                return data.get('store', {})
         except Exception as e:
             logger.error(f"Failed to load proposals: {e}")
     return {}
 
+
 def save_proposals():
-    """Save proposals to disk."""
+    """Save proposals to disk along with history to survive restarts."""
     try:
         PROPOSAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(PROPOSAL_STORE_FILE, 'w') as f:
-            json.dump(PROPOSAL_STORE, f, indent=2)
+            json.dump({'store': PROPOSAL_STORE, '_history': list(PROPOSAL_HISTORY)}, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save proposals: {e}")
+
 
 # Store for agent proposals to support feedback loop
 # Key: proposal_id, Value: dict with status, result, timestamp
 PROPOSAL_STORE = load_proposals()
+
+
+def save_proposal(proposal_id: str, data: dict):
+    """Insert a proposal and evict oldest if over cap."""
+    if proposal_id in PROPOSAL_STORE:
+        PROPOSAL_STORE[proposal_id].update(data)
+        # Move to most recent in history: remove and append
+        try:
+            PROPOSAL_HISTORY.remove(proposal_id)
+        except ValueError:
+            pass
+        PROPOSAL_HISTORY.append(proposal_id)
+    else:
+        if len(PROPOSAL_HISTORY) >= PROPOSAL_HISTORY.maxlen:
+            # Evict oldest
+            oldest = PROPOSAL_HISTORY.popleft()
+            PROPOSAL_STORE.pop(oldest, None)
+        PROPOSAL_STORE[proposal_id] = data
+        PROPOSAL_HISTORY.append(proposal_id)
+    # Persist to disk in best-effort manner
+    try:
+        save_proposals()
+    except Exception:
+        pass
 
 @mcp.tool()
 @validated_tool(StartKernelArgs)
@@ -378,6 +413,12 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "new_content": new_content,
         "timestamp": str(datetime.datetime.now())
     }
+
+    # Persist the proposal with bounded history
+    try:
+        save_proposal(proposal_id, proposal)
+    except Exception:
+        logger.warning("Failed to persist proposal")
     
     # We return a specific structure that the Client (mcpClient.ts) listens for.
     # By convention, if the tool result contains this structure, the client
@@ -400,16 +441,29 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
     """
     logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
     
-    # Store result for agent to retrieve
+    # Store result for agent to retrieve (bounded)
     timestamp = str(datetime.datetime.now())
     if proposal_id:
-        PROPOSAL_STORE[proposal_id] = {
-            "status": status,
-            "message": message,
-            "notebook_path": notebook_path,
-            "timestamp": timestamp
-        }
-        save_proposals()
+        try:
+            existing = PROPOSAL_STORE.get(proposal_id, {})
+            existing.update({
+                "status": status,
+                "message": message,
+                "updated_at": timestamp
+            })
+            save_proposal(proposal_id, existing)
+        except Exception:
+            PROPOSAL_STORE[proposal_id] = {
+                "status": status,
+                "message": message,
+                "updated_at": timestamp
+            }
+        # Persist latest state
+        try:
+            save_proposal(proposal_id, PROPOSAL_STORE[proposal_id])
+        except Exception:
+            # Best-effort persistence
+            save_proposals()
     
     return json.dumps({
         "status": "ack",
@@ -658,37 +712,11 @@ def get_execution_status(notebook_path: str, task_id: str):
     return json.dumps(status, indent=2)
 
 @mcp.tool()
-def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
+async def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
     """
     [PHASE 3.1] Get real-time streaming outputs from a running execution.
-    
-    This tool allows agents to monitor long-running cells (model training, large computations)
-    by polling for new outputs without waiting for completion.
-    
-    Args:
-        notebook_path: Path to the notebook file
-        task_id: Execution ID returned by execute_cell_async
-        since_output_index: Return only outputs after this index (for incremental polling)
-    
-    Returns:
-        JSON with:
-        - status: Current execution status (queued/running/completed/error)
-        - new_outputs: Sanitized text of new outputs since last poll
-        - next_index: Index to use for next poll (total output count)
-        - last_activity: Timestamp of most recent output
-    
-    Agent Usage:
-        exec_id = execute_cell_async(path, 0, "train_model(epochs=100)")
-        output_idx = 0
-        while True:
-            stream = get_execution_stream(path, exec_id, output_idx)
-            data = json.loads(stream)
-            if data['new_outputs']:
-                print(data['new_outputs'])  # "Epoch 12/100... loss: 0.342"
-                output_idx = data['next_index']
-            if data['status'] in ['completed', 'error']:
-                break
-            time.sleep(5)  # Poll every 5 seconds
+
+    Async-aware: uses non-blocking sanitize_outputs to avoid event-loop stutters on large payloads.
     """
     session = session_manager.get_session(notebook_path)
     if not session:
@@ -721,7 +749,7 @@ def get_execution_stream(notebook_path: str, task_id: str, since_output_index: i
     
     # Sanitize outputs (converts binary images to assets, strips ANSI, etc.)
     assets_dir = str(Path(notebook_path).parent / "assets")
-    sanitized_json = utils.sanitize_outputs(new_outputs, assets_dir)
+    sanitized_json = await utils._sanitize_outputs_async(new_outputs, assets_dir)
     
     # Unpack to avoid double-JSON encoding
     try:

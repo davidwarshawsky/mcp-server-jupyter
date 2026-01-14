@@ -365,8 +365,9 @@ def validated_tool(model_class):
             logger.info("tool_call_start", tool=tool_name, request_id=req_id)
 
             try:
-                # 2. Validate
-                validated_data = model_class(**kwargs)
+                # 2. Validate (offload to thread pool to avoid blocking the event loop)
+                from src.utils import offload_validation
+                validated_data = await offload_validation(model_class, **kwargs)
 
                 # 3. Execute
                 result = await func(**validated_data.model_dump()) if asyncio.iscoroutinefunction(func) else func(**validated_data.model_dump())

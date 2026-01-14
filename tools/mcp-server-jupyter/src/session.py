@@ -692,8 +692,11 @@ except ImportError:
                     if content['execution_state'] == 'idle':
                         if exec_data['status'] not in ['error', 'cancelled']:
                             exec_data['status'] = 'completed'
-                        # Finalize: Save to disk
-                        self._finalize_execution(nb_path, exec_data)
+                        # Finalize: Save to disk (async-safe)
+                        try:
+                            await self._finalize_execution_async(nb_path, exec_data)
+                        except Exception as e:
+                            logger.warning(f"Finalize execution failed: {e}")
                         
                         # Track successful execution
                         session_data = self.sessions.get(nb_path)
@@ -984,13 +987,23 @@ except ImportError:
         except Exception as e:
             logger.error(f"Queue processor error for {nb_path}: {e}")
 
-    def _finalize_execution(self, nb_path: str, exec_data: Dict):
-        """Saves results to the actual .ipynb file and processes images with provenance tracking"""
+    async def _finalize_execution_async(self, nb_path: str, exec_data: Dict):
+        """Async implementation of finalizing an execution. Use `_finalize_execution` wrapper for sync callers."""
         try:
-            # 1. Save Assets and get text summary
+            # 1. Save Assets and get text summary (async-safe)
             assets_dir = str(Path(nb_path).parent / "assets")
-            text_summary = utils.sanitize_outputs(exec_data['outputs'], assets_dir)
+            try:
+                text_summary = await utils._sanitize_outputs_async(exec_data['outputs'], assets_dir)
+            except Exception as e:
+                logger.warning(f"sanitize_outputs failed: {e}")
+                text_summary = '{"llm_summary": "", "raw_outputs": []}'
+
             exec_data['text_summary'] = text_summary
+            # Debug: log finalizer summary lengths for observability during tests
+            try:
+                logger.info(f"Finalize exec {exec_data.get('id')} text_summary len: {len(text_summary)}")
+            except Exception:
+                pass
             
             # 2. Get Cell content for content hashing
             abs_path = str(Path(nb_path).resolve())
@@ -1229,12 +1242,12 @@ except Exception as e:
         secret_hex = SESSION_SECRET.hex()
 
         code = f"""
-try:
-    import dill
-    import hmac
-    import hashlib
-    import os
+import dill
+import hmac
+import hashlib
+import os
 
+try:
     if not os.path.exists(r'{path_str}'):
         print(f"Checkpoint not found: {path_str}")
     else:
@@ -1579,3 +1592,26 @@ print(_inspect_var())
     def get_session(self, nb_path: str):
         abs_path = str(Path(nb_path).resolve())
         return self.sessions.get(abs_path)
+
+
+# --- Compatibility wrapper for finalizing executions synchronously ---
+# Attach at module-level to avoid interfering with async control flow inside the class
+def _finalize_execution(self, nb_path: str, exec_data: Dict):
+    """Synchronous wrapper for finalizing an execution. Executes in-thread to completion.
+
+    If an event loop is present on this thread, the async finalizer is executed in a
+    background thread using asyncio.run to prevent interfering with the running loop.
+    Otherwise, it is executed inline with asyncio.run.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(asyncio.run, self._finalize_execution_async(nb_path, exec_data))
+            return fut.result()
+    except RuntimeError:
+        # No running loop — run synchronously
+        return asyncio.run(self._finalize_execution_async(nb_path, exec_data))
+
+# Attach wrapper to class
+SessionManager._finalize_execution = _finalize_execution
