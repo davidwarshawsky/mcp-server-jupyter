@@ -31,18 +31,58 @@ IDLE_TIMEOUT = 600       # Shutdown after 10 minutes of no connections
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.idle_timeout: int = 0
         self.last_activity = time.time()
-        self._heartbeat_task: Optional[asyncio.Task] = None
-        self._start_heartbeat()
-    
-    def _start_heartbeat(self):
-        """Initialize heartbeat task if event loop is available."""
+        self._monitoring = False
+
+    def set_idle_timeout(self, timeout: int):
+        """Enable heartbeat monitoring with specific timeout (seconds)."""
+        self.idle_timeout = int(timeout) if timeout else 0
+        if self.idle_timeout > 0 and not self._monitoring:
+            self._monitoring = True
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(self._monitor_lifecycle())
+            except RuntimeError:
+                # If there is no running loop (e.g., starting from synchronous main),
+                # start a dedicated background thread with its own asyncio loop.
+                import threading
+                def _run_in_thread():
+                    try:
+                        asyncio.run(self._monitor_lifecycle())
+                    except Exception as e:
+                        logger.error(f"Heartbeat thread error: {e}")
+                t = threading.Thread(target=_run_in_thread, daemon=True)
+                t.start()
+
+    async def _monitor_lifecycle(self):
+        """Background task to kill server if idle for too long."""
+        logger.info(f"[Heartbeat] Monitor started. Timeout: {self.idle_timeout}s")
+        while True:
+            await asyncio.sleep(10)  # Check more frequently for faster shutdowns in tests
+
+            # If we have connections, we are active. Reset timer.
+            if len(self.active_connections) > 0:
+                self.last_activity = time.time()
+                continue
+
+            # If no connections, check how long we've been lonely
+            idle_duration = time.time() - self.last_activity
+            if idle_duration > self.idle_timeout:
+                logger.warning(f"[Heartbeat] Server idle for {idle_duration:.1f}s. Shutting down.")
+                await self._force_shutdown()
+
+    async def _force_shutdown(self):
+        """Cleanup and kill process."""
         try:
-            loop = asyncio.get_running_loop()
-            self._heartbeat_task = asyncio.create_task(self._monitor_heartbeat())
-        except RuntimeError:
-            # No running event loop (unit tests or synchronous context)
-            pass
+            logger.info("[Heartbeat] Performing graceful shutdown of sessions...")
+            await session_manager.shutdown_all()
+        except Exception as e:
+            logger.error(f"Cleanup error during heartbeat shutdown: {e}")
+        finally:
+            logger.info("[Heartbeat] Exiting process.")
+            # Force exit is necessary because uvicorn captures signals
+            os._exit(0)
 
     async def connect(self, websocket: WebSocket):
         # NOTE: We do NOT call accept() here because mcp.server.websocket handles the ASGI handshake.
@@ -54,19 +94,9 @@ class ConnectionManager:
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            # Reset clock on disconnect to give a grace period
             self.last_activity = time.time()
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
-
-    async def _monitor_heartbeat(self):
-        """Shutdown server if no clients connected for IDLE_TIMEOUT seconds"""
-        while True:
-            await asyncio.sleep(HEARTBEAT_INTERVAL)
-            if not self.active_connections:
-                idle_duration = time.time() - self.last_activity
-                if idle_duration > IDLE_TIMEOUT:
-                    logger.warning(f"No active clients for {idle_duration:.0f}s. Shutting down to prevent zombie process.")
-                    os._exit(0)  # Force exit
-
     async def broadcast(self, message: dict):
         # Immediate send for status changes or errors
         if message.get('method') != 'notebook/output':
@@ -1860,7 +1890,9 @@ def main():
                        help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
     parser.add_argument("--port", type=int, default=3000, 
                        help="Port number")
-    
+    parser.add_argument("--idle-timeout", type=int, default=0,
+                       help="Auto-shutdown server after N seconds of no connections (0 to disable)")
+
     # Client args
     parser.add_argument("--uri", default=None,
                        help="[Client Mode] WebSocket URI to connect to (e.g. ws://127.0.0.1:3000/ws)")
@@ -1883,6 +1915,10 @@ def main():
 
     # --- SERVER MODE (Existing Logic) ---
     try:
+        # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
+        if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:
+            connection_manager.set_idle_timeout(args.idle_timeout)
+
         # Restore any persisted sessions from previous server runs
         # Wrap in timeout to prevent hanging on stale session files
         try:

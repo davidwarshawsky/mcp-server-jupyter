@@ -104,6 +104,7 @@ The extension now supports **Hub and Spoke** mode for collaboration.
 | `mcp-jupyter.remotePort` | 3000 | WebSocket port for `connect` mode |
 | `mcp-jupyter.serverPath` | (auto) | Path to MCP server directory (Managed mode only) |
 | `mcp-jupyter.pythonPath` | (auto) | Python executable (Managed mode only) |
+| `mcp-jupyter.idleTimeout` | 600 | Idle-timeout in seconds to auto-shutdown spawned server (set to 0 to disable) |
 
 #### Example: Connecting to a Shared Hub (Recommended for Agents)
 ```json

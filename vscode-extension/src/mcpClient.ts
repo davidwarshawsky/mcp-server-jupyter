@@ -88,7 +88,9 @@ export class McpClient {
         }
 
         // Spawn server with port 0 so OS assigns a free port, then read actual port from stderr [MCP_PORT]: 45231
-        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', '0'], spawnOptions);
+        // NEW: Idle timeout (seconds) default to 600 (10 minutes) to avoid zombie processes if VS Code crashes
+        const idleTimeout = (config.get<number>('idleTimeout') || 600).toString();
+        this.process = spawn(pythonPath, ['-m', 'src.main', '--transport', 'websocket', '--port', '0', '--idle-timeout', idleTimeout], spawnOptions);
 
         // Create a promise that resolves when the server writes the bound port to stderr
         const portPromise: Promise<number> = new Promise((resolve, reject) => {
@@ -101,13 +103,15 @@ export class McpClient {
                 if (m) {
                     clearTimeout(timeout);
                     const p = parseInt(m[1], 10);
-                    this.process?.stderr?.removeListener('data', onData);
+                    const proc = this.process!;
+                    proc.stderr?.removeListener('data', onData);
                     resolve(p);
                 }
             };
 
-            this.process.stderr?.on('data', onData);
-            this.process.on('error', (err) => {
+            const proc = this.process!;
+            proc.stderr?.on('data', onData);
+            proc.on('error', (err) => {
                 clearTimeout(timeout);
                 reject(err);
             });

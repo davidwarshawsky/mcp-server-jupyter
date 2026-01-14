@@ -54,6 +54,11 @@
           "type": "number",
           "default": 3000,
           "description": "Port to connect to when serverMode is 'connect'."
+        },
+        "mcp-jupyter.idleTimeout": {
+          "type": "number",
+          "default": 600,
+          "description": "Idle-timeout (seconds) for spawned server before auto-shutdown. Set to 0 to disable."
         }
       }
     },

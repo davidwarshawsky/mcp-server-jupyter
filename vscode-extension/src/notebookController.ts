@@ -444,13 +444,14 @@ export class McpNotebookController {
             // Check if data is a file path (e.g., "assets/plot_123.png")
             if (dataStrNormalized.startsWith('assets/') || dataStrNormalized.startsWith('./assets/')) {
               try {
-                // FIXED: Resolve assets relative to the NOTEBOOK, not the server
+                // Resolve assets relative to the active workspace, or fallback to configured serverPath
                 let assetPath = dataStr;
-                
+
                 if (!path.isAbsolute(dataStr)) {
-                    if (execution) {
-                        // Best case: Resolve relative to notebook file
-                        const notebookDir = path.dirname(execution.cell.notebook.uri.fsPath);
+                    const workspaceFolders = vscode.workspace.workspaceFolders;
+                    if (workspaceFolders && workspaceFolders.length > 0) {
+                        // Use the first workspace folder as a best-effort base
+                        const notebookDir = workspaceFolders[0].uri.fsPath;
                         assetPath = path.join(notebookDir, dataStrNormalized);
                     } else {
                         // Fallback: Use server path (legacy behavior)
@@ -459,7 +460,7 @@ export class McpNotebookController {
                         assetPath = path.join(serverPath, dataStrNormalized);
                     }
                 }
-                
+
                 if (fs.existsSync(assetPath)) {
                   buffer = fs.readFileSync(assetPath);
                 } else {
