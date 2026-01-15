@@ -2194,6 +2194,102 @@ print("RETURNCODE:", result.returncode)
         error_msg="Installation timeout (60s)"
     ).to_json()
 
+# --- SUPERPOWER TOOLS: SQL Queries, Auto-EDA, Time Travel ---
+
+@mcp.tool()
+async def query_dataframes(notebook_path: str, sql_query: str):
+    """
+    [SUPERPOWER] Run SQL directly on active DataFrames using DuckDB.
+    
+    Execute SQL queries against pandas/polars DataFrames in memory.
+    No data copying required - DuckDB reads directly from Python objects.
+    
+    Args:
+        notebook_path: Path to notebook with running kernel
+        sql_query: SQL query (e.g., "SELECT * FROM df WHERE amount > 100")
+    
+    Returns:
+        JSON with query results as markdown table
+        
+    Example:
+        query_dataframes("analysis.ipynb", "SELECT region, SUM(revenue) FROM df_sales GROUP BY region")
+        # Returns: Markdown table with aggregated results
+        
+    Wow Factor:
+        Users can explore data with SQL instead of pandas syntax.
+        "Show me top 5 users by revenue" becomes a simple SQL query.
+    """
+    from src.data_tools import query_dataframes as _query_df
+    return await _query_df(session_manager, notebook_path, sql_query)
+
+@mcp.tool()
+async def save_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
+    """
+    [TIME TRAVEL] Save current kernel state for rollback.
+    
+    Creates a snapshot of all variables in the kernel's namespace.
+    Use before running risky code that might crash the kernel.
+    
+    Args:
+        notebook_path: Path to notebook
+        checkpoint_name: Name for this checkpoint (default: "auto")
+    
+    Returns:
+        JSON with checkpoint info (size, variable count, timestamp)
+        
+    Example:
+        save_checkpoint("analysis.ipynb", "before_model_training")
+        # Later: load_checkpoint("analysis.ipynb", "before_model_training")
+        
+    Wow Factor:
+        Agent can say "I tried X, it crashed. I restored your state from 2 min ago."
+    """
+    # Reuse existing checkpoint logic from SessionManager
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    result = await session_manager.save_checkpoint(notebook_path, checkpoint_name)
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def load_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
+    """
+    [TIME TRAVEL] Restore kernel state from checkpoint.
+    
+    Rolls back all variables to a previous saved state.
+    Use when code execution fails and you need to recover.
+    
+    Args:
+        notebook_path: Path to notebook
+        checkpoint_name: Name of checkpoint to restore (default: "auto")
+    
+    Returns:
+        JSON with restoration status
+        
+    Example:
+        load_checkpoint("analysis.ipynb", "before_model_training")
+        # Kernel state restored to checkpoint time
+        
+    Safety:
+        Uses HMAC signing to prevent checkpoint tampering.
+    """
+    # Reuse existing checkpoint logic from SessionManager
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    result = await session_manager.load_checkpoint(notebook_path, checkpoint_name)
+    return json.dumps(result, indent=2)
+
 # --- PROMPTS: Consumer-Ready Personas for Claude Desktop ---
 
 def _read_prompt(filename: str) -> str:
@@ -2247,6 +2343,33 @@ def autonomous_researcher() -> list[types.PromptMessage]:
     - Documents findings automatically
     """
     content = _read_prompt("autonomous_researcher.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
+
+@mcp.prompt()
+def auto_analyst() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Auto-Analyst.
+    Use this for automatic Exploratory Data Analysis (EDA).
+    
+    Activates with: /prompt auto-analyst
+    
+    Persona traits:
+    - Autonomous EDA generation (no permission needed)
+    - Generates missing values maps, distributions, correlations
+    - Saves all plots to assets/
+    - Creates comprehensive summary reports
+    - Uses SQL for fast data exploration
+    
+    Wow Factor:
+        User drops a CSV and says "analyze this."
+        Agent generates full EDA report with 5 plots in 60 seconds.
+    """
+    content = _read_prompt("auto_analyst.md")
     return [
         types.PromptMessage(
             role="user", 

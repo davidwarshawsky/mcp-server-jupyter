@@ -18,12 +18,22 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 
 ## ✨ Key Features
 
+### � Superpower Features (What Makes Users "Go Nuts")
+
+- **SQL on DataFrames**: Run DuckDB SQL queries on pandas/polars DataFrames in memory—no syntax gymnastics, just `SELECT * FROM df_sales WHERE revenue > 1000`
+- **Auto-EDA in 60 Seconds**: Say "analyze this dataset" → agent generates missing value maps, distributions, correlation matrices, and summary report with zero setup
+- **Time Travel Debugging**: Agent says "I tried X, it crashed. I restored your state from 2 min ago." Automatic rollback on kernel failures
+- **Agent-Ready Tools**: `inspect_variable` (JSON metadata for DataFrames), `search_notebook` (grep for code), `install_package` (smart pip), output truncation (handles 100MB logs)
+- **Consumer-Ready Prompts**: Type `/prompt jupyter-expert` or `/prompt auto-analyst` for instant persona activation (Claude Desktop)
+
+👉 **See [SUPERPOWERS.md](SUPERPOWERS.md) for detailed examples**
+
 ### 🔒 Production-Ready
-- **Security**: Safe variable inspection (no `eval()`), sandboxed execution via Docker
-- **Robustness**: Automatic kernel recovery, execution provenance tracking, clear_output handling, **execution timeouts**
+- **Security**: Safe variable inspection (no `eval()`), sandboxed execution via Docker, HMAC-signed checkpoints
+- **Robustness**: Automatic kernel recovery (Reaper), execution provenance tracking, clear_output handling, **execution timeouts**
 - **Context-Aware**: Smart HTML table preview (reduces API calls by 50%)
 - **Asset Management**: Automatic extraction of plots/PDFs to disk (98% context reduction)
-- **Asset-Based Output Storage**: Large text outputs (>2KB or >50 lines) offloaded to `assets/text_*.txt` files, preventing VS Code crashes and context overflow ⭐ **NEW**
+- **Asset-Based Output Storage**: Large text outputs (>2KB or >50 lines) offloaded to `assets/text_*.txt` files, preventing VS Code crashes and context overflow
 - **Progress Bar Support**: Handles `clear_output` messages correctly (prevents file size explosion)
 
 ### 🚀 Performance
@@ -33,7 +43,7 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 - **Environment Detection**: Robust `conda activate` / `venv` simulation for complex ML environments
 
 ### 🛠️ Comprehensive API
-- **29 MCP Tools** covering every notebook operation
+- **32 MCP Tools** covering every notebook operation (29 core + 3 superpowers)
 - **Handoff Protocol**: Sync kernel state after human edits (for VS Code extensions)
 - **Agent Observability**: Real-time streaming feedback for long-running cells
 - **Resource Monitoring**: CPU/RAM tracking for auto-restart logic
@@ -236,6 +246,143 @@ while True:
     time.sleep(5)  # Poll every 5 seconds
 ```
 
+---
+
+## 🔮 Superpower Examples (Viral Features)
+
+### 🚀 SQL on DataFrames (DuckDB)
+```python
+# Load your data
+df_sales = pd.read_csv('sales.csv')
+df_customers = pd.read_csv('customers.csv')
+
+# Query with SQL instead of pandas gymnastics
+query_dataframes("analysis.ipynb", """
+    SELECT 
+        c.region,
+        COUNT(DISTINCT s.order_id) as num_orders,
+        SUM(s.revenue) as total_revenue
+    FROM df_sales s
+    JOIN df_customers c ON s.customer_id = c.id
+    WHERE s.date >= '2024-01-01'
+    GROUP BY c.region
+    ORDER BY total_revenue DESC
+""")
+
+# Returns markdown table:
+# | region    | num_orders | total_revenue |
+# |-----------|------------|---------------|
+# | Northeast | 1,245      | $1,234,567    |
+# | West      | 983        | $987,654      |
+```
+
+**Why users love it**: No more `df[df['col'] > 5].groupby(...).agg(...)` syntax. Just natural SQL.
+
+### 📊 Auto-EDA in 60 Seconds
+```python
+# User types in Claude Desktop:
+# "/prompt auto-analyst"
+# "Analyze this dataset"
+
+# Agent autonomously:
+# 1. Discovers data.csv
+# 2. Loads with pandas
+# 3. Generates missing values heatmap → assets/missing_values.png
+# 4. Generates distribution plots → assets/distributions.png
+# 5. Generates correlation matrix → assets/correlation_matrix.png
+# 6. Uses SQL to explore top patterns
+# 7. Creates summary Markdown report
+
+# Agent: "Analysis complete. Key findings:
+# - 5% missing values in 'zipcode' column (recommend imputation)
+# - Revenue is right-skewed (consider log transform)
+# - Strong correlation between experience and salary (r=0.85)
+# All visualizations saved to assets/"
+```
+
+**Why users love it**: Saves 30 minutes of boilerplate every project. Zero setup required.
+
+### ⏰ Time Travel Debugging
+```python
+# Agent workflow:
+save_checkpoint("analysis.ipynb", "before_model_training")
+
+# Try risky code...
+train_model(df, epochs=100)  # 💥 Kernel crashes (OOM)
+
+# Agent detects crash and auto-recovers:
+load_checkpoint("analysis.ipynb", "before_model_training")
+
+# Agent: "Training failed due to memory error. 
+#        I've restored your data from 2 minutes ago.
+#        Trying with smaller batch size instead..."
+```
+
+**Why users love it**: "Unbreakable" feeling. Agent can experiment freely, rollback on failure.
+
+### 🔍 Smart Variable Inspection
+```python
+# Instead of:
+print(df)  # Crashes with 1M rows
+
+# Agent uses:
+inspect_variable("analysis.ipynb", "df")
+# Returns:
+# DataFrame: 1,000,000 rows × 25 columns
+# Memory: 190.7 MB
+# Columns: id (int64), name (object), revenue (float64)...
+# Preview:
+#    id    name      revenue
+# 0  1     Alice     1234.56
+# 1  2     Bob       987.65
+# ...
+```
+
+**Why users love it**: No more kernel freezes from massive print statements.
+
+👉 **Full details in [SUPERPOWERS.md](SUPERPOWERS.md)**
+
+---
+
+## 🚀 Quick Start Guide
+
+### 1. Start a Kernel
+```python
+# Via MCP tool
+start_kernel("analysis.ipynb")
+# Returns: "Kernel started (PID: 12345). CWD set to: /path/to/notebook"
+```
+
+### 2. Execute Code
+```python
+# Synchronous (blocks until complete)
+execute_cell("analysis.ipynb", cell_index=0)
+
+# Asynchronous (non-blocking)
+exec_id = execute_cell_async("analysis.ipynb", cell_index=0, code="import pandas as pd")
+status = get_execution_status("analysis.ipynb", exec_id)
+# Returns: {"status": "completed", "output": "...", "cell_index": 0}
+```
+
+### 3. Monitor Long-Running Cells
+```python
+# Stream outputs from long-running execution
+exec_id = execute_cell_async("analysis.ipynb", cell_index=0, code="train_model(epochs=100)")
+output_idx = 0
+
+while True:
+    stream = json.loads(get_execution_stream("analysis.ipynb", exec_id, output_idx))
+    
+    if stream['new_outputs']:
+        print(stream['new_outputs'])  # "Epoch 12/100... loss: 0.342"
+        output_idx = stream['next_index']
+    
+    if stream['status'] in ['completed', 'error']:
+        break
+    
+    time.sleep(5)  # Poll every 5 seconds
+```
+
 ### 4. Check Kernel Resources
 ```python
 # Monitor kernel CPU/RAM for auto-restart logic
@@ -270,6 +417,17 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 ---
 
 ## 📚 Tool Categories
+
+### 🔮 Superpower Tools (3 tools) ⭐ VIRAL FEATURES
+- `query_dataframes()` - SQL queries on pandas/polars DataFrames via DuckDB (in-memory, zero-copy)
+- `save_checkpoint()` - Snapshot kernel state for rollback (HMAC-signed, tamper-proof)
+- `load_checkpoint()` - Restore kernel state after crashes (time travel debugging)
+
+### 🛠️ Agent-Ready Tools (4 tools) ⭐ NEW
+- `inspect_variable()` - JSON metadata for DataFrames/arrays (no crashes from massive print)
+- `search_notebook()` - Grep-like search across cells (reduces context window overflow)
+- `install_package()` - Smart pip install with `sys.executable` (no !pip confusion)
+- Output Truncation - Automatic head/tail for 100MB logs (built into all tools)
 
 ### Core Operations (8 tools)
 - `start_kernel()` - Start Jupyter kernel
