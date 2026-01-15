@@ -14,6 +14,7 @@ from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
 import websockets
+import mcp.types as types
 
 # Pydantic models and decorator for strict validation
 from src.models import StartKernelArgs, RunCellArgs
@@ -2192,6 +2193,66 @@ print("RETURNCODE:", result.returncode)
         data={},
         error_msg="Installation timeout (60s)"
     ).to_json()
+
+# --- PROMPTS: Consumer-Ready Personas for Claude Desktop ---
+
+def _read_prompt(filename: str) -> str:
+    """Helper to read prompt files from the package."""
+    try:
+        # Locate the prompts directory relative to this file (src/main.py)
+        current_dir = Path(__file__).parent
+        prompt_path = current_dir / "prompts" / filename
+        
+        if not prompt_path.exists():
+            return f"Error: Prompt file '{filename}' not found at {prompt_path}"
+            
+        return prompt_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error reading prompt: {str(e)}"
+
+@mcp.prompt()
+def jupyter_expert() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Jupyter Expert persona.
+    Use this to turn Claude into a safe, state-aware Data Science co-pilot.
+    
+    Activates with: /prompt jupyter-expert
+    
+    Persona traits:
+    - Always checks sync status before execution
+    - Uses inspect_variable for large DataFrames
+    - Searches notebooks before reading full content
+    - Follows Hub and Spoke architecture
+    """
+    content = _read_prompt("jupyter_expert.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
+
+@mcp.prompt()
+def autonomous_researcher() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Autonomous Researcher.
+    Use this for long-running, self-correcting tasks.
+    
+    Activates with: /prompt autonomous-researcher
+    
+    Persona traits:
+    - Follows OODA loop (Observe, Orient, Decide, Act)
+    - Self-healing error recovery
+    - Autonomous decision-making
+    - Documents findings automatically
+    """
+    content = _read_prompt("autonomous_researcher.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
 
 # --- NEW: Client Bridge Logic ---
 async def run_bridge(uri: str):

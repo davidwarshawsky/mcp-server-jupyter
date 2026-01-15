@@ -5,6 +5,8 @@ description = "A MCP server for executing Jupyter Notebooks"
 authors = ["Antigravity <antigravity@example.com>"]
 readme = "README.md"
 packages = [{include = "src"}]
+# [CRITICAL] Ensure non-python files in src are included
+include = ["src/prompts/*.md"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
