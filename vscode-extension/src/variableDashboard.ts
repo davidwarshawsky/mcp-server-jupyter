@@ -55,6 +55,15 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
 
   /**
    * Refresh variable list from kernel
+   * 
+   * [PERFORMANCE FIX] Skips polling if kernel is executing user code.
+   * 
+   * Problem: Dashboard polls get_variable_manifest every 2 seconds.
+   * These requests enter the execution queue behind user code.
+   * Scenario: User runs model.fit() (10 minutes) → Dashboard hangs for 10 minutes.
+   * 
+   * Fix: Check if server is busy before polling. If busy, skip this cycle.
+   * This prevents the dashboard from flooding the queue with inspection requests.
    */
   async refresh(): Promise<void> {
     if (!this.currentNotebook || this.isPolling || this.suspended) {
@@ -64,6 +73,20 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     // If the MCP client isn't connected yet, skip polling.
     // This avoids noisy errors like "MCP server not connected via WebSocket" during startup/reconnect.
     if (this.mcpClient.getStatus() !== 'running') {
+      return;
+    }
+    
+    // [PERFORMANCE FIX] Check if kernel is busy executing user code
+    // If busy, skip this poll cycle to avoid flooding the execution queue
+    // This prevents the dashboard from hanging during long-running operations like model.fit()
+    try {
+      const busyStatus = await this.mcpClient.isKernelBusy(this.currentNotebook);
+      if (busyStatus && busyStatus.is_busy) {
+        // Kernel is busy, skip this poll cycle
+        return;
+      }
+    } catch (error) {
+      // If we can't check status, skip polling to be safe
       return;
     }
 

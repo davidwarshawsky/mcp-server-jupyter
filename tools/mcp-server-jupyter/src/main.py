@@ -724,6 +724,42 @@ def get_execution_status(notebook_path: str, task_id: str):
     return json.dumps(status, indent=2)
 
 @mcp.tool()
+def is_kernel_busy(notebook_path: str):
+    """
+    [PERFORMANCE] Check if kernel is currently executing or has queued work.
+    
+    Used by UI components (like variable dashboard) to skip polling when kernel is busy.
+    Prevents flooding the execution queue with inspection requests during long-running operations.
+    
+    Args:
+        notebook_path: Path to the notebook
+        
+    Returns:
+        JSON with 'is_busy' (boolean) and optional 'reason' string
+        
+    Example:
+        {"is_busy": true, "reason": "Executing cell 5"}
+        {"is_busy": false}
+    """
+    is_busy = session_manager.is_kernel_busy(notebook_path)
+    
+    result = {"is_busy": is_busy}
+    
+    if is_busy:
+        # Optionally provide more context about why it's busy
+        session = session_manager.get_session(notebook_path)
+        if session:
+            if session['queued_executions']:
+                result["reason"] = f"{len(session['queued_executions'])} executions queued"
+            else:
+                # Check active executions
+                active_count = sum(1 for data in session['executions'].values() if data['status'] in ['busy', 'queued'])
+                if active_count > 0:
+                    result["reason"] = f"{active_count} executions running"
+    
+    return json.dumps(result)
+
+@mcp.tool()
 async def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
     """
     [PHASE 3.1] Get real-time streaming outputs from a running execution.

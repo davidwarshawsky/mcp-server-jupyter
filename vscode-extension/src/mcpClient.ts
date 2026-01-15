@@ -369,6 +369,18 @@ export class McpClient {
   }
 
   /**
+   * Check if kernel is currently busy executing or has queued work
+   * 
+   * [PERFORMANCE FIX] Used by variable dashboard to skip polling when busy.
+   * Prevents flooding the execution queue with inspection requests during long operations.
+   */
+  async isKernelBusy(notebookPath: string): Promise<{ is_busy: boolean; reason?: string }> {
+    return this.callTool('is_kernel_busy', {
+      notebook_path: notebookPath,
+    });
+  }
+
+  /**
    * Get execution stream (incremental outputs)
    */
   async getExecutionStream(notebookPath: string, taskId: string, fromIndex: number = 0): Promise<{

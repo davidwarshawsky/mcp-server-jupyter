@@ -207,6 +207,7 @@ class SessionManager:
                 "notebook_path": nb_path,
                 "connection_file": connection_file,
                 "pid": pid if isinstance(pid, int) else None,
+                "server_pid": os.getpid(),  # [REAPER FIX] Track which server owns this kernel
                 "env_info": env_info,
                 "created_at": datetime.datetime.now().isoformat()
             }
@@ -1187,6 +1188,33 @@ except ImportError:
             "output": target_data['text_summary'],
             "intermediate_outputs_count": len(target_data['outputs'])
         }
+    
+    def is_kernel_busy(self, nb_path: str) -> bool:
+        """
+        [PERFORMANCE] Check if kernel is currently executing or has queued work.
+        
+        Used by variable dashboard to skip polling when kernel is busy.
+        Prevents flooding the execution queue with inspection requests.
+        
+        Returns:
+            True if kernel is executing or has queued work, False otherwise
+        """
+        abs_path = str(Path(nb_path).resolve())
+        if abs_path not in self.sessions:
+            return False
+        
+        session = self.sessions[abs_path]
+        
+        # Check if there are queued executions waiting to be processed
+        if session['queued_executions']:
+            return True
+        
+        # Check if there are active executions currently running
+        for msg_id, data in session['executions'].items():
+            if data['status'] in ['busy', 'queued']:
+                return True
+        
+        return False
 
     async def get_kernel_info(self, nb_path: str):
         """
@@ -1649,7 +1677,17 @@ print(_inspect_var())
 
     async def reconcile_zombies(self):
         """
-        [CRUCIBLE] Startup Task: Kill orphan kernels from previous runs.
+        [CRUCIBLE] Startup Task: Kill orphan kernels from dead server processes.
+        
+        [REAPER FIX] Only kills kernels whose owning server is dead.
+        This prevents fratricide: Server B won't kill Kernel A if Server A is still alive.
+        
+        Scenario that was broken:
+        1. User opens VS Code Window A → Server A starts, Kernel A (PID 1000)
+        2. User opens VS Code Window B → Server B starts
+        3. Server B runs reconcile_zombies, sees Kernel A (PID 1000)
+        4. OLD BUG: Server B kills Kernel A (fratricide)
+        5. NEW FIX: Server B checks if Server A is alive first
         """
         try:
             import psutil
@@ -1659,30 +1697,43 @@ print(_inspect_var())
             return
 
         logger.info("reaper_start: Scanning for zombie kernels...")
+        current_server_pid = os.getpid()
 
         for session_file in list(self.persistence_dir.glob("session_*.json")):
             try:
                 with open(session_file, 'r') as f:
                     data = json.load(f)
 
-                pid = data.get('pid')
-
-                if pid and psutil.pid_exists(pid):
+                kernel_pid = data.get('pid')
+                server_pid = data.get('server_pid')  # [REAPER FIX] Check server ownership
+                
+                # Skip if this session belongs to us (we'll manage it ourselves)
+                if server_pid == current_server_pid:
+                    continue
+                
+                # Check if the owning server is still alive
+                if server_pid and psutil.pid_exists(server_pid):
+                    # Server is alive → this is NOT a zombie, it's a living kernel from another window
+                    logger.debug(f"reaper_skip: Kernel PID {kernel_pid} belongs to living server PID {server_pid}")
+                    continue
+                
+                # Server is dead → this kernel is an orphan, kill it
+                if kernel_pid and psutil.pid_exists(kernel_pid):
                     try:
-                        proc = psutil.Process(pid)
+                        proc = psutil.Process(kernel_pid)
                         cmdline = " ".join(proc.cmdline())
                         # Heuristic checks: ipykernel / jupyter / python
                         if any(x in cmdline for x in ('ipykernel', 'ipython', 'jupyter', 'python')):
-                            logger.warning(f"reaper_kill pid={pid} notebook={data.get('notebook_path')}")
+                            logger.warning(f"reaper_kill: Kernel PID {kernel_pid} (dead server PID {server_pid}) notebook={data.get('notebook_path')}")
                             proc.terminate()
                             try:
                                 proc.wait(timeout=2)
                             except psutil.TimeoutExpired:
                                 proc.kill()
                     except Exception as e:
-                        logger.warning(f"reaper_proc_check_failed pid={pid} error={str(e)}")
+                        logger.warning(f"reaper_proc_check_failed pid={kernel_pid} error={str(e)}")
 
-                # Remove persisted session file unconditionally (best-effort cleanup)
+                # Remove persisted session file (best-effort cleanup)
                 try:
                     session_file.unlink()
                 except Exception:

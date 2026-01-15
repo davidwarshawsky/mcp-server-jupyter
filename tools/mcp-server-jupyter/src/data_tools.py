@@ -40,8 +40,14 @@ async def query_dataframes(session_manager: SessionManager, notebook_path: str, 
             error_msg="No running kernel. Call start_kernel first."
         ).to_json()
     
+    # [SECURITY FIX] Sanitize triple-quotes to prevent Python code injection
+    # An attacker could inject: SELECT * FROM df""" + __import__('os').system('rm -rf /') + """
+    # This would break out of the triple-quoted string and execute arbitrary Python code.
+    # Fix: Replace all occurrences of triple-quotes with empty string before injection.
+    safe_sql_query = sql_query.replace('"""', '')
+    
     # Use triple-quoted string to handle newlines, quotes, and special chars safely
-    # No manual escaping needed - Python handles it automatically
+    # Now that we've sanitized triple-quotes, this is safe from breakout attacks
     code = f'''
 import sys
 
@@ -65,8 +71,8 @@ except ImportError:
 # [STEP 2] Execute SQL query
 try:
     # DuckDB can query pandas DataFrames in the current scope
-    # Use triple-quoted string to safely pass the SQL query
-    query_str = """{sql_query}"""
+    # SECURITY: Triple-quotes have been sanitized before injection
+    query_str = """{safe_sql_query}"""
     result_df = duckdb.query(query_str).df()
     
     # Convert to markdown for clean display
