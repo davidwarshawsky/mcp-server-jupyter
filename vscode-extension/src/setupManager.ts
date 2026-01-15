@@ -110,11 +110,14 @@ export class SetupManager {
   async installDependencies(venvPath: string): Promise<void> {
     const pythonExe = this.pythonExeForVenv(venvPath);
     const serverSource = path.join(this.context.extensionPath, 'python_server');
+    const wheelsDir = path.join(this.context.extensionPath, 'python_server', 'wheels');
+    
+    const hasLocalWheels = fs.existsSync(wheelsDir) && fs.readdirSync(wheelsDir).length > 0;
 
     // Show progress notification
     await vscode.window.withProgress({
       location: vscode.ProgressLocation.Notification,
-      title: 'Installing MCP Server Dependencies',
+      title: hasLocalWheels ? 'Installing MCP Server Dependencies (Offline Mode)' : 'Installing MCP Server Dependencies',
       cancellable: false
     }, async (progress) => {
       const terminal = vscode.window.createTerminal('MCP Installer');
@@ -126,8 +129,18 @@ export class SetupManager {
       // Wait a bit for pip upgrade
       await new Promise(resolve => setTimeout(resolve, 2000));
       
-      progress.report({ message: 'Installing MCP server...' });
-      terminal.sendText(`"${pythonExe}" -m pip install "${serverSource}"`);
+      progress.report({ message: hasLocalWheels ? 'Installing from bundled wheels...' : 'Downloading from PyPI...' });
+      
+      if (hasLocalWheels) {
+        // Fat VSIX Mode: Install from bundled wheels (offline)
+        // --no-index: Don't check PyPI
+        // --find-links: Look in the wheels directory for packages
+        terminal.sendText(`"${pythonExe}" -m pip install --no-index --find-links="${wheelsDir}" "${serverSource}"`);
+        progress.report({ message: 'Using bundled dependencies (offline install)' });
+      } else {
+        // Standard Online Mode: Download from PyPI
+        terminal.sendText(`"${pythonExe}" -m pip install "${serverSource}"`);
+      }
       
       // Wait for installation to complete
       await new Promise(resolve => setTimeout(resolve, 5000));
@@ -136,8 +149,9 @@ export class SetupManager {
     // Mark setup as complete in global state so walkthrough doesn't run again
     await this.context.globalState.update('mcp.hasCompletedSetup', true);
     
+    const installMode = hasLocalWheels ? ' (offline install)' : '';
     vscode.window.showInformationMessage(
-      'MCP server dependencies installed successfully',
+      `MCP server dependencies installed successfully${installMode}`,
       'Test Connection'
     ).then(choice => {
       if (choice === 'Test Connection') {

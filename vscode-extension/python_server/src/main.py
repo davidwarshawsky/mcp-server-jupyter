@@ -1,6 +1,7 @@
 from mcp.server.fastmcp import FastMCP
 import asyncio
 import time
+import os
 from pathlib import Path
 from typing import List, Optional, Any
 import nbformat
@@ -14,30 +15,90 @@ from src import notebook, utils, environment, validation
 from src.utils import ToolResult
 import websockets
 
-# Configure logging to stderr to avoid corrupting JSON-RPC stdout
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    stream=sys.stderr
-)
-logger = logging.getLogger(__name__)
+# Pydantic models and decorator for strict validation
+from src.models import StartKernelArgs, RunCellArgs
+from src.validation import validated_tool
+
+# Initialize structured logging via structlog (observability)
+from src.observability import configure_logging, get_logger
+import traceback
+
+logger = configure_logging()
+
+# [HEARTBEAT] Auto-shutdown configuration
+HEARTBEAT_INTERVAL = 60  # Check every minute
+IDLE_TIMEOUT = 600       # Shutdown after 10 minutes of no connections
 
 # [BROADCASTER] Connection Manager for Multi-User Notification
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
+        self.idle_timeout: int = 0
+        self.last_activity = time.time()
+        self._monitoring = False
+
+    def set_idle_timeout(self, timeout: int):
+        """Enable heartbeat monitoring with specific timeout (seconds)."""
+        self.idle_timeout = int(timeout) if timeout else 0
+        if self.idle_timeout > 0 and not self._monitoring:
+            self._monitoring = True
+            try:
+                loop = asyncio.get_running_loop()
+                asyncio.create_task(self._monitor_lifecycle())
+            except RuntimeError:
+                # If there is no running loop (e.g., starting from synchronous main),
+                # start a dedicated background thread with its own asyncio loop.
+                import threading
+                def _run_in_thread():
+                    try:
+                        asyncio.run(self._monitor_lifecycle())
+                    except Exception as e:
+                        logger.error(f"Heartbeat thread error: {e}")
+                t = threading.Thread(target=_run_in_thread, daemon=True)
+                t.start()
+
+    async def _monitor_lifecycle(self):
+        """Background task to kill server if idle for too long."""
+        logger.info(f"[Heartbeat] Monitor started. Timeout: {self.idle_timeout}s")
+        while True:
+            await asyncio.sleep(10)  # Check more frequently for faster shutdowns in tests
+
+            # If we have connections, we are active. Reset timer.
+            if len(self.active_connections) > 0:
+                self.last_activity = time.time()
+                continue
+
+            # If no connections, check how long we've been lonely
+            idle_duration = time.time() - self.last_activity
+            if idle_duration > self.idle_timeout:
+                logger.warning(f"[Heartbeat] Server idle for {idle_duration:.1f}s. Shutting down.")
+                await self._force_shutdown()
+
+    async def _force_shutdown(self):
+        """Cleanup and kill process."""
+        try:
+            logger.info("[Heartbeat] Performing graceful shutdown of sessions...")
+            await session_manager.shutdown_all()
+        except Exception as e:
+            logger.error(f"Cleanup error during heartbeat shutdown: {e}")
+        finally:
+            logger.info("[Heartbeat] Exiting process.")
+            # Force exit is necessary because uvicorn captures signals
+            os._exit(0)
 
     async def connect(self, websocket: WebSocket):
         # NOTE: We do NOT call accept() here because mcp.server.websocket handles the ASGI handshake.
         # We just register the connection.
         self.active_connections.append(websocket)
+        self.last_activity = time.time()
         logger.info(f"Client connected. Total: {len(self.active_connections)}")
 
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
+            # Reset clock on disconnect to give a grace period
+            self.last_activity = time.time()
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
-
     async def broadcast(self, message: dict):
         # Immediate send for status changes or errors
         if message.get('method') != 'notebook/output':
@@ -64,12 +125,27 @@ class ConnectionManager:
                 logger.error(f"Broadcast error: {e}")
                 self.disconnect(connection)
 
+def fatal_exception_handler(loop, context):
+    """Asyncio exception handler that ensures JSON logs before death."""
+    msg = context.get("exception", context.get("message", ""))
+    logger.critical("fatal_async_error", error=str(msg), context=context)
+
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
 session_manager.set_mcp_server(mcp)
 # Inject connection manager
 connection_manager = ConnectionManager()
 session_manager.connection_manager = connection_manager
+
+# Health endpoint used by external orchestrators (module-level so tests can import it)
+from starlette.responses import JSONResponse
+async def health_check(request=None):
+    active_sessions = len(session_manager.sessions)
+    return JSONResponse({
+        "status": "healthy",
+        "active_kernels": active_sessions,
+        "version": "0.1.0"
+    })
 
 @mcp.tool()
 def get_server_status():
@@ -83,31 +159,67 @@ def get_server_status():
 # Persistence for proposals
 PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
 
+from collections import deque
+
+PROPOSAL_HISTORY = deque(maxlen=1000)  # Keep only the most recent 1000 proposals
+
+
 def load_proposals():
     """Load proposals from disk to survive server restarts."""
     if PROPOSAL_STORE_FILE.exists():
         try:
             with open(PROPOSAL_STORE_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Load history keys in insertion order if present
+                for k in data.get('_history', []):
+                    PROPOSAL_HISTORY.append(k)
+                return data.get('store', {})
         except Exception as e:
             logger.error(f"Failed to load proposals: {e}")
     return {}
 
+
 def save_proposals():
-    """Save proposals to disk."""
+    """Save proposals to disk along with history to survive restarts."""
     try:
         PROPOSAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(PROPOSAL_STORE_FILE, 'w') as f:
-            json.dump(PROPOSAL_STORE, f, indent=2)
+            json.dump({'store': PROPOSAL_STORE, '_history': list(PROPOSAL_HISTORY)}, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save proposals: {e}")
+
 
 # Store for agent proposals to support feedback loop
 # Key: proposal_id, Value: dict with status, result, timestamp
 PROPOSAL_STORE = load_proposals()
 
+
+def save_proposal(proposal_id: str, data: dict):
+    """Insert a proposal and evict oldest if over cap."""
+    if proposal_id in PROPOSAL_STORE:
+        PROPOSAL_STORE[proposal_id].update(data)
+        # Move to most recent in history: remove and append
+        try:
+            PROPOSAL_HISTORY.remove(proposal_id)
+        except ValueError:
+            pass
+        PROPOSAL_HISTORY.append(proposal_id)
+    else:
+        if len(PROPOSAL_HISTORY) >= PROPOSAL_HISTORY.maxlen:
+            # Evict oldest
+            oldest = PROPOSAL_HISTORY.popleft()
+            PROPOSAL_STORE.pop(oldest, None)
+        PROPOSAL_STORE[proposal_id] = data
+        PROPOSAL_HISTORY.append(proposal_id)
+    # Persist to disk in best-effort manner
+    try:
+        save_proposals()
+    except Exception:
+        pass
+
 @mcp.tool()
-async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300):
+@validated_tool(StartKernelArgs)
+async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300, agent_id: Optional[str] = None):
     """
     Boot a background process.
     Windows Logic: Looks for venv_path/Scripts/python.exe.
@@ -133,7 +245,8 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
         notebook_path, 
         venv_path if venv_path else None,
         docker_image if docker_image else None,
-        timeout
+        timeout,
+        agent_id=agent_id
     )
 
 @mcp.tool()
@@ -311,6 +424,12 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "new_content": new_content,
         "timestamp": str(datetime.datetime.now())
     }
+
+    # Persist the proposal with bounded history
+    try:
+        save_proposal(proposal_id, proposal)
+    except Exception:
+        logger.warning("Failed to persist proposal")
     
     # We return a specific structure that the Client (mcpClient.ts) listens for.
     # By convention, if the tool result contains this structure, the client
@@ -333,16 +452,29 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
     """
     logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
     
-    # Store result for agent to retrieve
+    # Store result for agent to retrieve (bounded)
     timestamp = str(datetime.datetime.now())
     if proposal_id:
-        PROPOSAL_STORE[proposal_id] = {
-            "status": status,
-            "message": message,
-            "notebook_path": notebook_path,
-            "timestamp": timestamp
-        }
-        save_proposals()
+        try:
+            existing = PROPOSAL_STORE.get(proposal_id, {})
+            existing.update({
+                "status": status,
+                "message": message,
+                "updated_at": timestamp
+            })
+            save_proposal(proposal_id, existing)
+        except Exception:
+            PROPOSAL_STORE[proposal_id] = {
+                "status": status,
+                "message": message,
+                "updated_at": timestamp
+            }
+        # Persist latest state
+        try:
+            save_proposal(proposal_id, PROPOSAL_STORE[proposal_id])
+        except Exception:
+            # Best-effort persistence
+            save_proposals()
     
     return json.dumps({
         "status": "ack",
@@ -541,6 +673,7 @@ def check_code_syntax(code: str):
 # --- NEW ASYNC TOOLS ---
 
 @mcp.tool()
+@validated_tool(RunCellArgs)
 async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
     """
     Submits a cell for execution in the background.
@@ -590,37 +723,11 @@ def get_execution_status(notebook_path: str, task_id: str):
     return json.dumps(status, indent=2)
 
 @mcp.tool()
-def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
+async def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
     """
     [PHASE 3.1] Get real-time streaming outputs from a running execution.
-    
-    This tool allows agents to monitor long-running cells (model training, large computations)
-    by polling for new outputs without waiting for completion.
-    
-    Args:
-        notebook_path: Path to the notebook file
-        task_id: Execution ID returned by execute_cell_async
-        since_output_index: Return only outputs after this index (for incremental polling)
-    
-    Returns:
-        JSON with:
-        - status: Current execution status (queued/running/completed/error)
-        - new_outputs: Sanitized text of new outputs since last poll
-        - next_index: Index to use for next poll (total output count)
-        - last_activity: Timestamp of most recent output
-    
-    Agent Usage:
-        exec_id = execute_cell_async(path, 0, "train_model(epochs=100)")
-        output_idx = 0
-        while True:
-            stream = get_execution_stream(path, exec_id, output_idx)
-            data = json.loads(stream)
-            if data['new_outputs']:
-                print(data['new_outputs'])  # "Epoch 12/100... loss: 0.342"
-                output_idx = data['next_index']
-            if data['status'] in ['completed', 'error']:
-                break
-            time.sleep(5)  # Poll every 5 seconds
+
+    Async-aware: uses non-blocking sanitize_outputs to avoid event-loop stutters on large payloads.
     """
     session = session_manager.get_session(notebook_path)
     if not session:
@@ -653,7 +760,7 @@ def get_execution_stream(notebook_path: str, task_id: str, since_output_index: i
     
     # Sanitize outputs (converts binary images to assets, strips ANSI, etc.)
     assets_dir = str(Path(notebook_path).parent / "assets")
-    sanitized_json = utils.sanitize_outputs(new_outputs, assets_dir)
+    sanitized_json = await utils._sanitize_outputs_async(new_outputs, assets_dir)
     
     # Unpack to avoid double-JSON encoding
     try:
@@ -916,22 +1023,31 @@ import sys
 def get_size_str(obj):
     '''Get human-readable size string'''
     try:
-        # Try to get actual memory usage
+        # Whitelist safe primitive/container types for deep inspection
+        safe_types = (str, bytes, bytearray, list, tuple, set, dict, int, float, bool, complex)
+        type_str = str(type(obj))
+
+        # Avoid calling potentially dangerous custom __sizeof__ implementations
+        if not isinstance(obj, safe_types) and 'pandas' not in type_str and 'numpy' not in type_str:
+            return "?"
+
+        # Try to get actual memory usage for safe/known types
         size = sys.getsizeof(obj)
-        
-        # For containers, estimate recursively (limit depth to avoid infinite recursion)
-        if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes)):
+
+        # For containers, estimate recursively (limit depth to avoid heavy work)
+        if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes, bytearray)):
             try:
-                if hasattr(obj, 'memory_usage'):  # pandas DataFrame/Series
-                    size = obj.memory_usage(deep=True).sum()
+                if hasattr(obj, 'memory_usage') and 'pandas' in type_str:  # pandas DataFrame/Series
+                    size = int(obj.memory_usage(deep=True).sum())
                 elif isinstance(obj, (list, tuple, set)):
-                    size += sum(sys.getsizeof(item) for item in obj[:100])  # Sample first 100
+                    size += sum(sys.getsizeof(item) for item in list(obj)[:100])  # Sample first 100
                 elif isinstance(obj, dict):
                     items = list(obj.items())[:100]
                     size += sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in items)
-            except:
-                pass
-        
+            except Exception:
+                # If any inspection errors, return unknown size
+                return "?"
+
         # Format size
         if size < 1024:
             return f"{size} B"
@@ -941,7 +1057,7 @@ def get_size_str(obj):
             return f"{size / (1024 * 1024):.1f} MB"
         else:
             return f"{size / (1024 * 1024 * 1024):.1f} GB"
-    except:
+    except Exception:
         return "?"
 
 manifest = []
@@ -1020,8 +1136,12 @@ def read_asset(
     from pathlib import Path
     import os
     
+    # FIXED: Enforce hard caps on return size
+    MAX_RETURN_CHARS = 20000  # 20KB safety limit
+    MAX_RETURN_LINES = 500    # 500 lines safety limit
+    
     # Limit max_lines to prevent context overflow
-    max_lines = min(max_lines, 5000)
+    max_lines = min(max_lines, MAX_RETURN_LINES)
     
     # Security: Prevent path traversal
     asset_path = str(Path(asset_path).resolve())
@@ -1082,8 +1202,14 @@ def read_asset(
                     if i >= end_line:
                         break
                 
+                content = "\n".join(selected_lines)
+                
+                # Truncate content if too large
+                if len(content) > MAX_RETURN_CHARS:
+                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                
                 return json.dumps({
-                    "content": "\n".join(selected_lines),
+                    "content": content,
                     "file_size_bytes": file_size,
                     "line_range": [start_line, min(end_line, i)],
                     "lines_returned": len(selected_lines)
@@ -1098,8 +1224,14 @@ def read_asset(
                         break
                     content_lines.append(line.rstrip())
                 
+                content = "\n".join(content_lines)
+                
+                # Truncate content if too large
+                if len(content) > MAX_RETURN_CHARS:
+                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                
                 return json.dumps({
-                    "content": "\n".join(content_lines),
+                    "content": content,
                     "file_size_bytes": file_size,
                     "lines_returned": len(content_lines),
                     "note": "Use 'lines' or 'search' parameters for targeted retrieval"
@@ -1815,7 +1947,9 @@ def main():
                        help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
     parser.add_argument("--port", type=int, default=3000, 
                        help="Port number")
-    
+    parser.add_argument("--idle-timeout", type=int, default=0,
+                       help="Auto-shutdown server after N seconds of no connections (0 to disable)")
+
     # Client args
     parser.add_argument("--uri", default=None,
                        help="[Client Mode] WebSocket URI to connect to (e.g. ws://127.0.0.1:3000/ws)")
@@ -1825,6 +1959,11 @@ def main():
     # Windows event loop policy fix
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    # Bind global exception handler and set a dedicated loop so fatal errors are caught
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.set_exception_handler(fatal_exception_handler)
 
     # --- CLIENT MODE ---
     if args.mode == "client":
@@ -1838,12 +1977,22 @@ def main():
 
     # --- SERVER MODE (Existing Logic) ---
     try:
+        # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
+        if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:
+            connection_manager.set_idle_timeout(args.idle_timeout)
+
         # Restore any persisted sessions from previous server runs
         # Wrap in timeout to prevent hanging on stale session files
         try:
             asyncio.run(asyncio.wait_for(session_manager.restore_persisted_sessions(), timeout=10.0))
         except asyncio.TimeoutError:
             logger.warning("Session restoration timed out, skipping")
+
+        # [CRUCIBLE] Reap previously orphaned kernels before accepting new work
+        try:
+            loop.run_until_complete(session_manager.reconcile_zombies())
+        except Exception as e:
+            logger.error("reaper_failed", error=str(e))
         
         if args.transport == "websocket":
             import uvicorn
@@ -1873,16 +2022,35 @@ def main():
                     logger.info("WebSocket disconnected")
                     connection_manager.disconnect(websocket)
                 except Exception as e:
-                    logger.error(f"Connection error: {e}", exc_info=True)
+                    # Disconnects during/after response writes can surface as anyio.ClosedResourceError
+                    # (sometimes wrapped in an ExceptionGroup on Python 3.11+). Treat these as normal.
+                    def _is_closed_resource_error(err: BaseException) -> bool:
+                        try:
+                            if err.__class__.__name__ == 'ClosedResourceError':
+                                return True
+                            sub = getattr(err, 'exceptions', None)
+                            if sub and isinstance(sub, (list, tuple)):
+                                return any(_is_closed_resource_error(x) for x in sub)
+                        except Exception:
+                            return False
+                        return False
+
+                    if _is_closed_resource_error(e):
+                        logger.info("WebSocket closed during response send")
+                    else:
+                        logger.error(f"Connection error: {e}", exc_info=True)
                     connection_manager.disconnect(websocket)
+
+            from starlette.routing import Route
 
             app = Starlette(
                 routes=[
+                    Route("/health", health_check),
                     WebSocketRoute("/ws", mcp_websocket_endpoint)
                 ]
             )
             
-            # [FIX] Bind socket and hand FD to Uvicorn to prevent TOCTOU races
+            # [FIX] Bind a socket and hand the FD to Uvicorn to avoid TOCTOU races
             import socket
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -1890,6 +2058,8 @@ def main():
             sock.listen(1)
             actual_port = sock.getsockname()[1]
 
+            # Print port to stderr so parent process can parse it if needed
+            print(f"[MCP_PORT]: {actual_port}", file=sys.stderr)
             print(f"MCP Server listening on ws://{args.host}:{actual_port}/ws", file=sys.stderr)
             
             host = args.host if args.host != "0.0.0.0" else "localhost"
@@ -1898,14 +2068,22 @@ def main():
             print(f"  MCP Jupyter: Connect to Existing Server")
             print(f"  Url: ws://{host}:{actual_port}/ws\n")
 
+            # Configure Uvicorn to use existing socket FD (prevents TOCTOU)
             config = uvicorn.Config(app=app, fd=sock.fileno(), log_level="error", loop="asyncio")
             server = uvicorn.Server(config)
 
             try:
                 server.run()
             finally:
+                # [CRUCIBLE] Graceful shutdown sequence
+                try:
+                    asyncio.run(session_manager.shutdown_all())
+                except Exception as e:
+                    logger.warning(f"shutdown_sequence_error: {e}")
                 try:
                     sock.close()
+                except Exception:
+                    pass
                 except Exception:
                     pass
              

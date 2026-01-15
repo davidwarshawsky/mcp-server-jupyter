@@ -7,6 +7,7 @@ import logging
 import nbformat
 import datetime
 import subprocess
+import re
 try:
     import dill
 except ImportError:
@@ -99,8 +100,6 @@ SESSION_SECRET = secrets.token_bytes(32)
 
 class SessionManager:
     def __init__(self, default_execution_timeout: int = 300, input_request_timeout: int = 60):
-        # Input request timeout (seconds)
-        self.input_request_timeout = input_request_timeout
         # Maps notebook_path (str) -> {
         #   'km': KernelManager, 
         #   'kc': Client, 
@@ -116,6 +115,9 @@ class SessionManager:
         self.sessions = {}
         # Global timeout for cell executions (in seconds)
         self.default_execution_timeout = default_execution_timeout
+
+        # Timeout for interactive input requests (seconds)
+        self.input_request_timeout = input_request_timeout
         
         # Reference to MCP server for notifications
         self.mcp_server = None
@@ -362,7 +364,7 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None):
+    async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None, agent_id: Optional[str] = None):
         """
         Start a Jupyter kernel for a notebook.
         
@@ -382,6 +384,15 @@ class SessionManager:
 
         # Determine the Notebook's directory to set as CWD
         notebook_dir = str(Path(nb_path).parent.resolve())
+
+        # If an agent_id is provided, create a per-agent subdirectory to isolate relative file access
+        if agent_id:
+            # Sanitize agent_id for use in filesystem
+            safe_agent = re.sub(r'[^a-zA-Z0-9_\-]', '_', str(agent_id))
+            agent_dir = Path(notebook_dir) / f"agent_{safe_agent}"
+            agent_dir.mkdir(parents=True, exist_ok=True)
+            notebook_dir = str(agent_dir.resolve())
+            logger.info(f"Agent CWD isolation enabled for agent '{agent_id}': {notebook_dir}")
 
         if abs_path in self.sessions: 
             return f"Kernel already running for {abs_path}"
@@ -431,6 +442,10 @@ class SessionManager:
                  # Insert UID mapping after network arg for readability
                  cmd.insert(4, str(os.getuid()))
                  cmd.insert(4, '-u')
+
+             # Resource limit for Docker: cap memory to 4GB to avoid noisy neighbor OOMs
+             cmd.insert(2, '--memory')
+             cmd.insert(3, '4g')
              
              km.kernel_cmd = cmd
              logger.info(f"Configured Docker kernel: {cmd}")
@@ -448,20 +463,26 @@ class SessionManager:
             py_exe = sys.executable
             env_name = "system"
             kernel_env = os.environ.copy()  # Default: inherit current environment
-            
+
+            # Resource limits: on POSIX, prefer to use `prlimit` if available to bound address space
+            try:
+                import shutil
+                prlimit_prefix = ['prlimit', '--as=4294967296'] if (os.name != 'nt' and shutil.which('prlimit')) else []
+            except Exception:
+                prlimit_prefix = []
+
             if venv_path:
                 venv_path_obj = Path(venv_path).resolve()
                 is_conda = (venv_path_obj / "conda-meta").exists()
-                
+
                 py_exe = self.get_python_path(venv_path)
                 env_name = venv_path_obj.name
-                
+
                 # Validation
                 if not is_conda and not str(py_exe).lower().startswith(str(venv_path_obj).lower()):
-                     return f"Error: Could not find python executable in {venv_path}"
+                    return f"Error: Could not find python executable in {venv_path}"
 
                 if is_conda:
-                    # [FIX] Avoid using 'conda run' since it can swallow signals.
                     # Prefer resolving env vars and running the env's python directly.
                     try:
                         resolved_env = _get_activated_env_vars(venv_path, py_exe)
@@ -470,43 +491,67 @@ class SessionManager:
 
                     if resolved_env and 'CONDA_PREFIX' in resolved_env:
                         kernel_env = resolved_env
-                        km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                        cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                        km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
                         logger.info(f"Configured Conda kernel by invoking env python: {km.kernel_cmd}")
                     else:
                         logger.warning("Could not resolve conda env activation. Falling back to 'conda run' (interrupts may be unreliable).")
-                        km.kernel_cmd = [
+                        cmd = [
                             'conda', 'run', 
                             '-p', str(venv_path_obj), 
                             '--no-capture-output', 
                             'python', '-m', 'ipykernel_launcher', 
                             '-f', '{connection_file}'
                         ]
-                    
-                else: 
-                    # Standard Venv
-                    # Get fully activated environment variables (standard venv approach)
-                    kernel_env = _get_activated_env_vars(venv_path, py_exe)
-                    
-                    if not kernel_env:
-                         kernel_env = os.environ.copy()
-                         bin_dir = str(Path(py_exe).parent)
-                         kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+                        km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
+                else:
+                    # Standard Venv: get activated env or fall back
+                    kernel_env = _get_activated_env_vars(venv_path, py_exe) or os.environ.copy()
+                    bin_dir = str(Path(py_exe).parent)
+                    kernel_env['PATH'] = f"{bin_dir}{os.pathsep}{kernel_env.get('PATH', '')}"
+                    cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                    km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
+            else:
+                # No venv: default system Python kernel command
+                cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+                km.kernel_cmd = (prlimit_prefix + cmd) if prlimit_prefix else cmd
 
-                    # Force Jupyter to use our Venv Python
-                    km.kernel_cmd = [py_exe, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
-        
-        # 2. Start Kernel with Correct CWD and Environment
-        await km.start_kernel(cwd=notebook_dir, env=kernel_env)
-        
-        kc = km.client()
-        kc.start_channels()
+        # [CRUCIBLE] Resource Limits: if not using Docker, ensure prlimit is prepended when available
         try:
-            await kc.wait_for_ready(timeout=60)
+            import shutil
+            if sys.platform != 'win32' and not docker_image and shutil.which('prlimit'):
+                # Avoid double-prepending
+                if not (isinstance(km.kernel_cmd, list) and km.kernel_cmd and km.kernel_cmd[0] == 'prlimit'):
+                    from src.config import settings
+                    limit_bytes = int(getattr(settings, 'MCP_MEMORY_LIMIT_BYTES', 8 * 1024**3))
+                    km.kernel_cmd = ['prlimit', f'--as={limit_bytes}'] + (km.kernel_cmd if isinstance(km.kernel_cmd, list) else [km.kernel_cmd])
+                    logger.info(f"resource_limits_applied limit={limit_bytes}")
+        except Exception:
+            # Non-fatal: log and continue
+            logger.warning("prlimit_check_failed")
+
+        # 2. Start Kernel with Correct CWD and Environment (wrapped in try/except to ensure clean shutdown)
+        try:
+            await km.start_kernel(cwd=notebook_dir, env=kernel_env)
+            kc = km.client()
+            kc.start_channels()
+            try:
+                await kc.wait_for_ready(timeout=120)
+            except Exception as e:
+                if hasattr(km, 'has_kernel') and km.has_kernel:
+                    try:
+                        await km.shutdown_kernel()
+                    except Exception:
+                        pass
+                raise RuntimeError(f"Kernel failed to start: {str(e)}")
         except Exception as e:
-            if km.has_kernel:
-                await km.shutdown_kernel()
+            if hasattr(km, 'has_kernel') and km.has_kernel:
+                try:
+                    await km.shutdown_kernel()
+                except Exception:
+                    pass
             raise RuntimeError(f"Kernel failed to start: {str(e)}")
-        
+
         # 3. Inject autoreload and visualization configuration immediately after kernel ready
         # Only inject Python-specific helpers when the kernel is actually Python
         kernel_name = getattr(km, 'kernel_name', '') or ''
@@ -691,8 +736,11 @@ except ImportError:
                     if content['execution_state'] == 'idle':
                         if exec_data['status'] not in ['error', 'cancelled']:
                             exec_data['status'] = 'completed'
-                        # Finalize: Save to disk
-                        self._finalize_execution(nb_path, exec_data)
+                        # Finalize: Save to disk (async-safe)
+                        try:
+                            await self._finalize_execution_async(nb_path, exec_data)
+                        except Exception as e:
+                            logger.warning(f"Finalize execution failed: {e}")
                         
                         # Track successful execution
                         session_data = self.sessions.get(nb_path)
@@ -801,7 +849,9 @@ except ImportError:
                         "password": content.get('password', False)
                     })
 
-                    # Input watchdog to avoid deadlocks when client disconnects
+                    # [FIX] Start an input watchdog so a disconnected client cannot
+                    # block the kernel indefinitely. We set a 'waiting_for_input'
+                    # flag in the session and wait for submit_input to clear it.
                     session_data['waiting_for_input'] = True
                     try:
                         timeout = session_data.get('input_request_timeout', self.input_request_timeout)
@@ -817,6 +867,7 @@ except ImportError:
 
                         if timed_out:
                             logger.warning(f"Input request timed out for {nb_path} after {timeout}s. Attempting to recover.")
+                            # Try sending an empty input to unblock the kernel
                             try:
                                 kc.input('')
                                 logger.info("Sent empty string to kernel to clear input request")
@@ -838,6 +889,7 @@ except ImportError:
             raise ValueError("No active session")
             
         kc = session.get('kc')
+        # If we don't have a kernel client (test mode or transient), just clear the flag
         if kc is None:
             session['waiting_for_input'] = False
             logger.info(f"No kernel client for {notebook_path}; cleared waiting_for_input flag")
@@ -847,6 +899,7 @@ except ImportError:
             kc.input(text)
             logger.info(f"Sent input to {notebook_path}")
         finally:
+            # Signal to any pending watchdog that input was provided
             session['waiting_for_input'] = False
 
     async def _queue_processor(self, nb_path: str, session_data: Dict):
@@ -978,29 +1031,47 @@ except ImportError:
         except Exception as e:
             logger.error(f"Queue processor error for {nb_path}: {e}")
 
-    def _finalize_execution(self, nb_path: str, exec_data: Dict):
-        """Saves results to the actual .ipynb file and processes images with provenance tracking"""
+    async def _finalize_execution_async(self, nb_path: str, exec_data: Dict):
+        """Async implementation of finalizing an execution. Use `_finalize_execution` wrapper for sync callers."""
         try:
-            # 1. Save Assets and get text summary
+            # 1. Save Assets and get text summary (async-safe)
             assets_dir = str(Path(nb_path).parent / "assets")
-            text_summary = utils.sanitize_outputs(exec_data['outputs'], assets_dir)
+            try:
+                text_summary = await utils._sanitize_outputs_async(exec_data['outputs'], assets_dir)
+            except Exception as e:
+                logger.warning(f"sanitize_outputs failed: {e}")
+                text_summary = '{"llm_summary": "", "raw_outputs": []}'
+
             exec_data['text_summary'] = text_summary
+            # Debug: log finalizer summary lengths for observability during tests
+            try:
+                logger.info(f"Finalize exec {exec_data.get('id')} text_summary len: {len(text_summary)}")
+            except Exception:
+                pass
             
             # 2. Get Cell content for content hashing
             abs_path = str(Path(nb_path).resolve())
             execution_hash = None
+
+            # Some internal/server-side helper executions (e.g. variable manifest refresh)
+            # use cell_index = -1 to indicate "not associated with a notebook cell".
+            # In that case, skip notebook hashing/metadata injection and never attempt disk writes.
+            cell_index = exec_data.get('cell_index', None)
+            if cell_index is None or cell_index < 0:
+                cell_index = None
             
             try:
-                # Load notebook to get Cell info
-                with open(nb_path, 'r', encoding='utf-8') as f:
-                    nb = nbformat.read(f, as_version=4)
-                
-                # Verify index is valid
-                if 0 <= exec_data['cell_index'] < len(nb.cells):
-                    cell = nb.cells[exec_data['cell_index']]
-                    execution_hash = utils.get_cell_hash(cell.source)
-                else:
-                    logger.warning(f"Cell index {exec_data['cell_index']} out of range")
+                if cell_index is not None:
+                    # Load notebook to get Cell info
+                    with open(nb_path, 'r', encoding='utf-8') as f:
+                        nb = nbformat.read(f, as_version=4)
+
+                    # Verify index is valid
+                    if 0 <= cell_index < len(nb.cells):
+                        cell = nb.cells[cell_index]
+                        execution_hash = utils.get_cell_hash(cell.source)
+                    else:
+                        logger.warning(f"Cell index {cell_index} out of range")
                     
             except Exception as e:
                 logger.warning(f"Could not compute hash: {e}")
@@ -1033,13 +1104,15 @@ except ImportError:
             if active_clients > 0:
                 logger.info(f"Skipping disk write for {nb_path} (clients connected={active_clients}). Updates were broadcasted to clients.")
             else:
-                notebook.save_cell_execution(
-                    nb_path, 
-                    exec_data['cell_index'], 
-                    exec_data['outputs'], 
-                    exec_data.get('execution_count'),
-                    metadata_update=metadata_update if metadata_update else None
-                )
+                # Only persist outputs back into the notebook when this execution maps to a real cell.
+                if cell_index is not None:
+                    notebook.save_cell_execution(
+                        nb_path,
+                        cell_index,
+                        exec_data['outputs'],
+                        exec_data.get('execution_count'),
+                        metadata_update=metadata_update if metadata_update else None
+                    )
         except Exception as e:
             exec_data['status'] = 'failed_save'
             exec_data['error'] = str(e)
@@ -1223,12 +1296,12 @@ except Exception as e:
         secret_hex = SESSION_SECRET.hex()
 
         code = f"""
-try:
-    import dill
-    import hmac
-    import hashlib
-    import os
+import dill
+import hmac
+import hashlib
+import os
 
+try:
     if not os.path.exists(r'{path_str}'):
         print(f"Checkpoint not found: {path_str}")
     else:
@@ -1438,6 +1511,16 @@ print(_inspect_var())
         
         output = f"Stdout: {stdout.decode()}\nStderr: {stderr.decode()}"
         if proc.returncode == 0:
+            # FIXED: Invalidate import caches so kernel sees new package immediately
+            invalidation_code = "import importlib; importlib.invalidate_caches(); print('Caches invalidated.')"
+            # Use -1 index for internal/maintenance commands if session supports queued executions
+            # Best-effort: try to inject the invalidation code; if the session isn't fully
+            # initialized (e.g., during unit tests), catch and log the error but still report success.
+            try:
+                await self.execute_cell_async(nb_path, -1, invalidation_code)
+            except Exception as e:
+                logger.info(f"Cache invalidation (best-effort) failed or skipped: {e}")
+
             return f"Successfully installed {package_name}.\n{output}"
         else:
             return f"Failed to install {package_name}.\n{output}"
@@ -1563,3 +1646,74 @@ print(_inspect_var())
     def get_session(self, nb_path: str):
         abs_path = str(Path(nb_path).resolve())
         return self.sessions.get(abs_path)
+
+    async def reconcile_zombies(self):
+        """
+        [CRUCIBLE] Startup Task: Kill orphan kernels from previous runs.
+        """
+        try:
+            import psutil
+            import json
+        except Exception:
+            logger.warning("reaper_skipped_no_psutil")
+            return
+
+        logger.info("reaper_start: Scanning for zombie kernels...")
+
+        for session_file in list(self.persistence_dir.glob("session_*.json")):
+            try:
+                with open(session_file, 'r') as f:
+                    data = json.load(f)
+
+                pid = data.get('pid')
+
+                if pid and psutil.pid_exists(pid):
+                    try:
+                        proc = psutil.Process(pid)
+                        cmdline = " ".join(proc.cmdline())
+                        # Heuristic checks: ipykernel / jupyter / python
+                        if any(x in cmdline for x in ('ipykernel', 'ipython', 'jupyter', 'python')):
+                            logger.warning(f"reaper_kill pid={pid} notebook={data.get('notebook_path')}")
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=2)
+                            except psutil.TimeoutExpired:
+                                proc.kill()
+                    except Exception as e:
+                        logger.warning(f"reaper_proc_check_failed pid={pid} error={str(e)}")
+
+                # Remove persisted session file unconditionally (best-effort cleanup)
+                try:
+                    session_file.unlink()
+                except Exception:
+                    pass
+
+            except Exception as e:
+                logger.error(f"reaper_error file={str(session_file)} error={str(e)}")
+                try:
+                    session_file.unlink()
+                except Exception:
+                    pass
+
+
+# --- Compatibility wrapper for finalizing executions synchronously ---
+# Attach at module-level to avoid interfering with async control flow inside the class
+def _finalize_execution(self, nb_path: str, exec_data: Dict):
+    """Synchronous wrapper for finalizing an execution. Executes in-thread to completion.
+
+    If an event loop is present on this thread, the async finalizer is executed in a
+    background thread using asyncio.run to prevent interfering with the running loop.
+    Otherwise, it is executed inline with asyncio.run.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(asyncio.run, self._finalize_execution_async(nb_path, exec_data))
+            return fut.result()
+    except RuntimeError:
+        # No running loop — run synchronously
+        return asyncio.run(self._finalize_execution_async(nb_path, exec_data))
+
+# Attach wrapper to class
+SessionManager._finalize_execution = _finalize_execution

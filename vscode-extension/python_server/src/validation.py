@@ -6,6 +6,7 @@ to ensure consistent error handling across the codebase.
 """
 
 import os
+import asyncio
 from pathlib import Path
 from typing import Optional, Tuple, Any
 
@@ -337,3 +338,50 @@ def safe_result_async(func):
     wrapper.__name__ = func.__name__
     wrapper.__doc__ = func.__doc__
     return wrapper
+
+
+# --- Pydantic-backed validated tool decorator ---
+from functools import wraps
+from pydantic import ValidationError as PydanticValidationError
+from src.observability import get_logger, generate_request_id
+
+logger = get_logger()
+
+
+def validated_tool(model_class):
+    """
+    Decorator that:
+    1. Generates a trace ID for the tool call.
+    2. Validates inputs against Pydantic model.
+    3. Logs start/finish/error with structured data.
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            req_id = generate_request_id()
+            tool_name = func.__name__
+
+            # 1. Log Entry
+            logger.info("tool_call_start", tool=tool_name, request_id=req_id)
+
+            try:
+                # 2. Validate (offload to thread pool to avoid blocking the event loop)
+                from src.utils import offload_validation
+                validated_data = await offload_validation(model_class, **kwargs)
+
+                # 3. Execute
+                result = await func(**validated_data.model_dump()) if asyncio.iscoroutinefunction(func) else func(**validated_data.model_dump())
+
+                # 4. Log Success
+                logger.info("tool_call_success", tool=tool_name, request_id=req_id)
+                return result
+
+            except PydanticValidationError as e:
+                logger.warning("tool_validation_failed", tool=tool_name, errors=e.errors(), request_id=req_id)
+                return f"Input Error: {str(e)}"  # Return friendly error to Agent
+            except Exception as e:
+                logger.error("tool_execution_failed", tool=tool_name, error=str(e), request_id=req_id)
+                raise e
+
+        return wrapper
+    return decorator

@@ -75,11 +75,24 @@ To enable collaboration between an AI Agent and a Human (typing in VS Code), bot
 Run this in a dedicated terminal (or `tmux`/`screen` session):
 
 ```bash
-# Start the server on port 3000
+# Start the server on port 3000 (no idle timeout)
 mcp-jupyter --transport websocket --port 3000
+
+# Start the server with a 10-minute idle timeout (recommended for shared sessions)
+mcp-jupyter --transport websocket --port 3000 --idle-timeout 600
 ```
 *   **Windows**: Use a dedicated Command Prompt or PowerShell window.
 *   **Linux/Mac**: Use `tmux new -s jupyter` or `screen -S jupyter` to keep it running in the background.
+
+**Verify idle shutdown** (quick test):
+
+```bash
+# Start server with 10-second timeout
+python -m src.main --transport websocket --port 3000 --idle-timeout 10
+# Do NOT connect any client. After ~10 seconds you should see a heartbeat log and the process will exit.
+```
+
+If you need the server to stay always-on, omit `--idle-timeout` or set it to `0` (disabled).
 
 #### 2. Connect Your Agent (Spoke 1)
 Configure your MCP client (like Claude Desktop or Copilot) with `mcp.json`. This tells the agent to connect to your running server instead of starting a new one.

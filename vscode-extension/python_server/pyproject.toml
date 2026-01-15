@@ -17,6 +17,8 @@ GitPython = "^3.1.0"
 uvicorn = {version = "^0.40.0", extras = ["standard"]}
 starlette = "^0.51.0"
 websockets = "^14.0"
+structlog = "^24.1.0"
+pydantic = "^2.0.0"
 
 [tool.poetry.scripts]
 mcp-jupyter = "src.main:main"
@@ -38,6 +40,15 @@ build-backend = "poetry.core.masonry.api"
 pythonpath = ["src"]
 asyncio_mode = "auto"
 timeout = 120
+# Silence known environment-specific warnings:
+# - PytestConfigWarning: Unknown config option: timeout
+#   (occurs when pytest-timeout plugin isn't installed in a local env)
+# - MissingIDFieldWarning: emitted by nbformat when tests intentionally create
+#   notebooks without 'id' fields (we test heal-on-write behavior)
+filterwarnings = [
+    "ignore::pytest.PytestConfigWarning",
+    "ignore::nbformat.validator.MissingIDFieldWarning"
+]
 markers = [
     "optional: marks tests as optional (heavy integration tests requiring matplotlib/pandas)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",

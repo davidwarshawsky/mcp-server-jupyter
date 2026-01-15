@@ -2,9 +2,30 @@ import base64
 import hashlib
 import re
 import json
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import List, Any, Optional
+
+# Global thread pool for CPU-bound tasks (JSON serialization, Pydantic validation)
+# Size is configurable via Settings (pydantic-settings). Update via environment variable MCP_IO_POOL_SIZE.
+from src.config import settings
+
+import os
+
+_io_pool_workers = int(os.getenv('MCP_IO_POOL_SIZE') or getattr(settings, 'MCP_IO_POOL_SIZE', 4))
+io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
+
+
+async def offload_json_dumps(data: Any) -> str:
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(io_pool, lambda: json.dumps(data))
+
+
+async def offload_validation(model_class, **kwargs):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(io_pool, lambda: model_class(**kwargs))
 
 @dataclass
 class ToolResult:
@@ -25,6 +46,7 @@ def get_cell_hash(cell_source: str) -> str:
     (e.g., Black/Ruff) do not trigger perceived content drift.
     """
     import re
+    # Remove all whitespace (spaces, tabs, newlines) to ignore formatting
     normalized = re.sub(r'\s+', '', cell_source)
     return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
 
@@ -71,25 +93,17 @@ def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
     except Exception:
         return None  # Parsing failed, fall back to default behavior
 
-def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
+async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
     """
-    Processes raw notebook outputs for LLM consumption AND Human visualization.
-    Implements "Asset-Based Output Storage" to prevent VS Code crashes and context overflow.
-    
-    Large text outputs (>2KB or >50 lines) are offloaded to assets/text_{hash}.txt,
-    with preview stubs sent to VS Code/Agent.
-    
-    Returns:
-        JSON String containing:
-        - llm_summary: Text/Markdown optimized for the Agent (truncated, images as paths)
-        - raw_outputs: List of dicts with original data/metadata for VS Code to render (Plotly, etc.)
+    Internal async implementation of sanitize_outputs. Use the public wrapper `sanitize_outputs`
+    which is backward-compatible with synchronous callers.
     """
     import json
     llm_summary = []
     raw_outputs = []
     
     Path(asset_dir).mkdir(parents=True, exist_ok=True)
-    
+
     # Auto-gitignore assets/ to prevent pollution (Git-awareness)
     from src.asset_manager import ensure_assets_gitignored
     try:
@@ -132,6 +146,7 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
 
             return text
         
+        lines = text.split('\n')
         preview_lines = max_lines // 2
         head = '\n'.join(lines[:preview_lines])
         tail = '\n'.join(lines[-preview_lines:])
@@ -356,10 +371,32 @@ def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
             llm_summary.append(error_msg)
 
     # Return structured data for both LLM (summary) and VS Code (rich output)
-    return json.dumps({
+    result = {
         "llm_summary": "\n".join(llm_summary),
         "raw_outputs": raw_outputs
-    })
+    }
+
+    # Offload JSON serialization to prevent blocking the event loop for large payloads
+    return await offload_json_dumps(result)
+
+
+def sanitize_outputs(outputs: List[Any], asset_dir: str) -> str:
+    """Sync compatibility wrapper for `_sanitize_outputs_async`.
+
+    If called from a normal synchronous context, executes the async implementation and
+    returns the JSON result. If called when an event loop is present, this wrapper runs
+    the async implementation in a background thread and returns the result to the caller
+    to preserve synchronous calling semantics.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+        # Running loop exists — run async implementation in separate thread
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(asyncio.run, _sanitize_outputs_async(outputs, asset_dir))
+            return fut.result()
+    except RuntimeError:
+        # No running loop — safe to run in-process
+        return asyncio.run(_sanitize_outputs_async(outputs, asset_dir))
 
 def get_project_root(start_path: Path) -> Path:
     """
