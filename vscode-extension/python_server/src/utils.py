@@ -17,6 +17,9 @@ import os
 _io_pool_workers = int(os.getenv('MCP_IO_POOL_SIZE') or getattr(settings, 'MCP_IO_POOL_SIZE', 4))
 io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 
+# Output truncation to prevent crashes from massive outputs
+MAX_OUTPUT_LENGTH = 3000
+
 
 async def offload_json_dumps(data: Any) -> str:
     loop = asyncio.get_running_loop()
@@ -26,6 +29,32 @@ async def offload_json_dumps(data: Any) -> str:
 async def offload_validation(model_class, **kwargs):
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(io_pool, lambda: model_class(**kwargs))
+
+def truncate_output(text: str, max_length: int = MAX_OUTPUT_LENGTH) -> str:
+    """
+    Truncate output to prevent crashes from massive outputs.
+    Shows head and tail with truncation notice in the middle.
+    
+    Args:
+        text: Output text to truncate
+        max_length: Maximum characters to return (default: MAX_OUTPUT_LENGTH)
+    
+    Returns:
+        Truncated text with notice, or original if under limit
+    """
+    if len(text) <= max_length:
+        return text
+    
+    chars_removed = len(text) - max_length
+    # Show first and last portions
+    head_size = max_length // 2
+    tail_size = max_length - head_size
+    
+    head = text[:head_size]
+    tail = text[-tail_size:]
+    
+    truncation_msg = f"\n\n... [Truncated {chars_removed:,} characters] ...\n\n"
+    return head + truncation_msg + tail
 
 @dataclass
 class ToolResult:
@@ -267,6 +296,9 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
+            # [OUTPUT TRUNCATION] Apply before offloading decision
+            text = truncate_output(text)
+            
             # Check if text should be offloaded
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(
                 text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
@@ -331,6 +363,9 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             
             # [SECRET REDACTION]
             text = _redact_text(text)
+            
+            # [OUTPUT TRUNCATION] Apply before offloading decision
+            text = truncate_output(text)
             
             # Check if text should be offloaded
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(

@@ -1,7 +1,9 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, ConfigDict
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env")
+    
     # Server
     MCP_HOST: str = "127.0.0.1"
     MCP_PORT: int = 3000
@@ -13,8 +15,5 @@ class Settings(BaseSettings):
 
     # Security
     SESSION_SECRET_KEY: str = Field(default="", description="If set, overrides ephemeral key for checkpoints")
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()

@@ -54,12 +54,13 @@ unzip -q "$VSIX_FILE" -d temp_verify
 echo ""
 echo "🔍 Verifying package structure..."
 
-# Check for main extension files
-if [ ! -f "temp_verify/extension/out/extension.js" ]; then
+# Check for main extension files (TypeScript preserves src/ directory structure)
+if [ ! -f "temp_verify/extension/out/src/extension.js" ]; then
     echo "❌ FAILURE: extension.js missing from VSIX!"
+    echo "   Expected: extension/out/src/extension.js"
     exit 1
 fi
-echo "✅ Extension code found"
+echo "✅ Extension code found (out/src/extension.js)"
 
 # Check for Python server
 if [ ! -d "temp_verify/extension/python_server" ]; then

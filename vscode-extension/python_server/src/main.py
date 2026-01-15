@@ -14,6 +14,7 @@ from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
 import websockets
+import mcp.types as types
 
 # Pydantic models and decorator for strict validation
 from src.models import StartKernelArgs, RunCellArgs
@@ -1883,6 +1884,498 @@ def get_assets_summary(notebook_path: str):
     from src.asset_manager import get_assets_summary as _get_summary
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def inspect_variable(notebook_path: str, variable_name: str):
+    """
+    [DATA SCIENCE] Inspect a variable in the kernel without printing it.
+    
+    Returns structured metadata about the variable (type, shape, columns, dtypes, preview).
+    Much more efficient than repr() for large DataFrames/arrays.
+    
+    Args:
+        notebook_path: Path to notebook
+        variable_name: Name of variable to inspect (e.g., "df", "model")
+    
+    Returns:
+        JSON with type, shape, memory usage, and preview
+        
+    Example:
+        inspect_variable("analysis.ipynb", "df")
+        # Returns: {"type": "DataFrame", "shape": [1000, 5], "columns": [...], "dtypes": {...}}
+    """
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    # Inspection code that returns JSON
+    inspection_code = f"""
+import json
+import sys
+
+def _inspect_var():
+    try:
+        var = {variable_name}
+        info = {{
+            "variable": "{variable_name}",
+            "type": type(var).__name__,
+            "module": type(var).__module__
+        }}
+        
+        # Pandas DataFrame
+        if hasattr(var, 'shape') and hasattr(var, 'columns'):
+            info['shape'] = list(var.shape)
+            info['columns'] = list(var.columns)
+            info['dtypes'] = {{str(k): str(v) for k, v in var.dtypes.items()}}
+            info['memory_mb'] = var.memory_usage(deep=True).sum() / 1024 / 1024
+            info['preview'] = var.head(5).to_dict('records')
+        # NumPy array
+        elif hasattr(var, 'shape') and hasattr(var, 'dtype'):
+            info['shape'] = list(var.shape)
+            info['dtype'] = str(var.dtype)
+            info['size'] = var.size
+            # Flatten preview for multi-dimensional arrays
+            flat = var.flatten()
+            info['preview'] = flat[:10].tolist() if len(flat) > 10 else flat.tolist()
+        # List/Tuple
+        elif isinstance(var, (list, tuple)):
+            info['length'] = len(var)
+            info['preview'] = var[:5] if len(var) > 5 else var
+        # Dict
+        elif isinstance(var, dict):
+            info['length'] = len(var)
+            info['keys_sample'] = list(var.keys())[:10]
+        # String
+        elif isinstance(var, str):
+            info['length'] = len(var)
+            info['preview'] = var[:200]
+        # Scalar
+        else:
+            info['value'] = str(var)
+        
+        return json.dumps(info, indent=2)
+    except Exception as e:
+        return json.dumps({{"error": str(e)}})
+
+print(_inspect_var())
+"""
+    
+    # Execute inspection code using SessionManager's queue (index -1 = internal tool)
+    exec_id = await session_manager.execute_cell_async(notebook_path, -1, inspection_code)
+    if not exec_id:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="Failed to submit inspection"
+        ).to_json()
+    
+    # Wait for completion and collect output
+    import time
+    timeout = 10
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        status = session_manager.get_execution_status(notebook_path, exec_id)
+        if status['status'] in ['completed', 'error']:
+            # Extract text output
+            outputs = status.get('outputs', [])
+            for out in outputs:
+                if out.get('output_type') == 'stream' and 'text' in out:
+                    result_text = out['text']
+                    try:
+                        # Parse JSON response
+                        result_data = json.loads(result_text)
+                        return ToolResult(
+                            success=True,
+                            data=result_data,
+                            error_msg=result_data.get('error')
+                        ).to_json()
+                    except json.JSONDecodeError:
+                        return ToolResult(
+                            success=False,
+                            data={},
+                            error_msg="Failed to parse inspection result"
+                        ).to_json()
+            
+            return ToolResult(
+                success=False,
+                data={},
+                error_msg="No output from inspection"
+            ).to_json()
+        
+        await asyncio.sleep(0.2)
+    
+    return ToolResult(
+        success=False,
+        data={},
+        error_msg="Inspection timeout"
+    ).to_json()
+
+@mcp.tool()
+def search_notebook(notebook_path: str, pattern: str, case_sensitive: bool = False):
+    """
+    [NAVIGATION] Search for pattern across all cells in notebook.
+    
+    Returns matching cells with context. Useful for large notebooks
+    to avoid loading full content into context window.
+    
+    Args:
+        notebook_path: Path to notebook
+        pattern: Text or regex pattern to search for
+        case_sensitive: Whether search should be case-sensitive (default: False)
+    
+    Returns:
+        JSON with matching cells, line numbers, and snippets
+        
+    Example:
+        search_notebook("analysis.ipynb", "import pandas")
+        # Returns: [{"cell_index": 2, "cell_type": "code", "snippet": "..."}]
+    """
+    try:
+        # Read notebook directly with nbformat
+        with open(notebook_path, 'r', encoding='utf-8') as f:
+            nb = nbformat.read(f, as_version=4)
+        
+        matches = []
+        
+        for idx, cell in enumerate(nb['cells']):
+            if cell['cell_type'] not in ['code', 'markdown']:
+                continue
+            
+            source = cell.get('source', '')
+            if isinstance(source, list):
+                source = ''.join(source)
+            
+            # Perform search
+            search_text = source if case_sensitive else source.lower()
+            search_pattern = pattern if case_sensitive else pattern.lower()
+            
+            if search_pattern in search_text:
+                # Find all occurrences with line numbers
+                lines = source.split('\n')
+                matching_lines = []
+                
+                for line_idx, line in enumerate(lines):
+                    check_line = line if case_sensitive else line.lower()
+                    if search_pattern in check_line:
+                        matching_lines.append({
+                            'line_number': line_idx + 1,
+                            'content': line.strip()
+                        })
+                
+                # Create snippet (first 500 chars)
+                snippet = source[:500]
+                if len(source) > 500:
+                    snippet += "... [truncated]"
+                
+                matches.append({
+                    'cell_index': idx,
+                    'cell_type': cell['cell_type'],
+                    'matches': len(matching_lines),
+                    'matching_lines': matching_lines[:10],  # Limit to 10 lines
+                    'snippet': snippet
+                })
+        
+        return ToolResult(
+            success=True,
+            data={
+                'pattern': pattern,
+                'notebook': notebook_path,
+                'total_matches': len(matches),
+                'matches': matches
+            }
+        ).to_json()
+        
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg=f"Search failed: {str(e)}"
+        ).to_json()
+
+@mcp.tool()
+async def install_package(notebook_path: str, package: str):
+    """
+    [ENVIRONMENT] Install a Python package in the kernel's environment.
+    
+    Better than !pip install because:
+    - Uses the correct pip for the kernel
+    - Returns clear success/failure
+    - Reminds about kernel restart if needed
+    
+    Args:
+        notebook_path: Path to notebook (determines which kernel environment)
+        package: Package name or pip specifier (e.g., "pandas", "numpy>=1.20")
+    
+    Returns:
+        JSON with installation status and instructions
+        
+    Example:
+        install_package("analysis.ipynb", "pandas==2.0.0")
+        # Returns: {"success": true, "message": "Package installed. Restart kernel to use."}
+    """
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    # Install command using sys.executable (correct Python for kernel)
+    install_code = f"""
+import subprocess
+import sys
+
+result = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "{package}"],
+    capture_output=True,
+    text=True
+)
+
+print("STDOUT:", result.stdout)
+print("STDERR:", result.stderr)
+print("RETURNCODE:", result.returncode)
+"""
+    
+    # Execute installation using SessionManager's queue (index -1 = internal tool)
+    exec_id = await session_manager.execute_cell_async(notebook_path, -1, install_code)
+    if not exec_id:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="Failed to submit installation"
+        ).to_json()
+    
+    # Wait for completion
+    import time
+    timeout = 60  # Package installation can take time
+    start_time = time.time()
+    
+    while time.time() - start_time < timeout:
+        status = session_manager.get_execution_status(notebook_path, exec_id)
+        if status['status'] in ['completed', 'error']:
+            # Check if installation succeeded
+            outputs = status.get('outputs', [])
+            output_text = ""
+            for out in outputs:
+                if out.get('output_type') == 'stream' and 'text' in out:
+                    output_text += out['text']
+            
+            # Parse return code
+            success = "RETURNCODE: 0" in output_text
+            
+            if success:
+                return ToolResult(
+                    success=True,
+                    data={
+                        'package': package,
+                        'output': output_text
+                    },
+                    user_suggestion=f"Package '{package}' installed successfully. Restart kernel to use new package."
+                ).to_json()
+            else:
+                return ToolResult(
+                    success=False,
+                    data={'output': output_text},
+                    error_msg=f"Failed to install '{package}'",
+                    user_suggestion="Check package name and version. See output for details."
+                ).to_json()
+        
+        await asyncio.sleep(0.5)
+    
+    return ToolResult(
+        success=False,
+        data={},
+        error_msg="Installation timeout (60s)"
+    ).to_json()
+
+# --- SUPERPOWER TOOLS: SQL Queries, Auto-EDA, Time Travel ---
+
+@mcp.tool()
+async def query_dataframes(notebook_path: str, sql_query: str):
+    """
+    [SUPERPOWER] Run SQL directly on active DataFrames using DuckDB.
+    
+    Execute SQL queries against pandas/polars DataFrames in memory.
+    No data copying required - DuckDB reads directly from Python objects.
+    
+    Args:
+        notebook_path: Path to notebook with running kernel
+        sql_query: SQL query (e.g., "SELECT * FROM df WHERE amount > 100")
+    
+    Returns:
+        JSON with query results as markdown table
+        
+    Example:
+        query_dataframes("analysis.ipynb", "SELECT region, SUM(revenue) FROM df_sales GROUP BY region")
+        # Returns: Markdown table with aggregated results
+        
+    Wow Factor:
+        Users can explore data with SQL instead of pandas syntax.
+        "Show me top 5 users by revenue" becomes a simple SQL query.
+    """
+    from src.data_tools import query_dataframes as _query_df
+    return await _query_df(session_manager, notebook_path, sql_query)
+
+@mcp.tool()
+async def save_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
+    """
+    [TIME TRAVEL] Save current kernel state for rollback.
+    
+    Creates a snapshot of all variables in the kernel's namespace.
+    Use before running risky code that might crash the kernel.
+    
+    Args:
+        notebook_path: Path to notebook
+        checkpoint_name: Name for this checkpoint (default: "auto")
+    
+    Returns:
+        JSON with checkpoint info (size, variable count, timestamp)
+        
+    Example:
+        save_checkpoint("analysis.ipynb", "before_model_training")
+        # Later: load_checkpoint("analysis.ipynb", "before_model_training")
+        
+    Wow Factor:
+        Agent can say "I tried X, it crashed. I restored your state from 2 min ago."
+    """
+    # Reuse existing checkpoint logic from SessionManager
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    result = await session_manager.save_checkpoint(notebook_path, checkpoint_name)
+    return json.dumps(result, indent=2)
+
+@mcp.tool()
+async def load_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
+    """
+    [TIME TRAVEL] Restore kernel state from checkpoint.
+    
+    Rolls back all variables to a previous saved state.
+    Use when code execution fails and you need to recover.
+    
+    Args:
+        notebook_path: Path to notebook
+        checkpoint_name: Name of checkpoint to restore (default: "auto")
+    
+    Returns:
+        JSON with restoration status
+        
+    Example:
+        load_checkpoint("analysis.ipynb", "before_model_training")
+        # Kernel state restored to checkpoint time
+        
+    Safety:
+        Uses HMAC signing to prevent checkpoint tampering.
+    """
+    # Reuse existing checkpoint logic from SessionManager
+    session = session_manager.get_session(notebook_path)
+    if not session:
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg="No running kernel. Call start_kernel first."
+        ).to_json()
+    
+    result = await session_manager.load_checkpoint(notebook_path, checkpoint_name)
+    return json.dumps(result, indent=2)
+
+# --- PROMPTS: Consumer-Ready Personas for Claude Desktop ---
+
+def _read_prompt(filename: str) -> str:
+    """Helper to read prompt files from the package."""
+    try:
+        # Locate the prompts directory relative to this file (src/main.py)
+        current_dir = Path(__file__).parent
+        prompt_path = current_dir / "prompts" / filename
+        
+        if not prompt_path.exists():
+            return f"Error: Prompt file '{filename}' not found at {prompt_path}"
+            
+        return prompt_path.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error reading prompt: {str(e)}"
+
+@mcp.prompt()
+def jupyter_expert() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Jupyter Expert persona.
+    Use this to turn Claude into a safe, state-aware Data Science co-pilot.
+    
+    Activates with: /prompt jupyter-expert
+    
+    Persona traits:
+    - Always checks sync status before execution
+    - Uses inspect_variable for large DataFrames
+    - Searches notebooks before reading full content
+    - Follows Hub and Spoke architecture
+    """
+    content = _read_prompt("jupyter_expert.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
+
+@mcp.prompt()
+def autonomous_researcher() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Autonomous Researcher.
+    Use this for long-running, self-correcting tasks.
+    
+    Activates with: /prompt autonomous-researcher
+    
+    Persona traits:
+    - Follows OODA loop (Observe, Orient, Decide, Act)
+    - Self-healing error recovery
+    - Autonomous decision-making
+    - Documents findings automatically
+    """
+    content = _read_prompt("autonomous_researcher.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
+
+@mcp.prompt()
+def auto_analyst() -> list[types.PromptMessage]:
+    """
+    Returns the System Prompt for the Auto-Analyst.
+    Use this for automatic Exploratory Data Analysis (EDA).
+    
+    Activates with: /prompt auto-analyst
+    
+    Persona traits:
+    - Autonomous EDA generation (no permission needed)
+    - Generates missing values maps, distributions, correlations
+    - Saves all plots to assets/
+    - Creates comprehensive summary reports
+    - Uses SQL for fast data exploration
+    
+    Wow Factor:
+        User drops a CSV and says "analyze this."
+        Agent generates full EDA report with 5 plots in 60 seconds.
+    """
+    content = _read_prompt("auto_analyst.md")
+    return [
+        types.PromptMessage(
+            role="user", 
+            content=types.TextContent(type="text", text=content)
+        )
+    ]
 
 # --- NEW: Client Bridge Logic ---
 async def run_bridge(uri: str):

@@ -22,6 +22,15 @@ websockets = "^14.0"
 structlog = "^24.1.0"
 pydantic = "^2.0.0"
 
+[tool.poetry.extras]
+superpowers = ["duckdb"]
+
+[tool.poetry.group.superpowers]
+optional = true
+
+[tool.poetry.group.superpowers.dependencies]
+duckdb = "^1.1.0"
+
 [tool.poetry.scripts]
 mcp-jupyter = "src.main:main"
 

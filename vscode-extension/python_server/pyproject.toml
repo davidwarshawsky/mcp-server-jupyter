@@ -5,6 +5,8 @@ description = "A MCP server for executing Jupyter Notebooks"
 authors = ["Antigravity <antigravity@example.com>"]
 readme = "README.md"
 packages = [{include = "src"}]
+# [CRITICAL] Ensure non-python files in src are included
+include = ["src/prompts/*.md"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
@@ -19,6 +21,15 @@ starlette = "^0.51.0"
 websockets = "^14.0"
 structlog = "^24.1.0"
 pydantic = "^2.0.0"
+
+[tool.poetry.extras]
+superpowers = ["duckdb"]
+
+[tool.poetry.group.superpowers]
+optional = true
+
+[tool.poetry.group.superpowers.dependencies]
+duckdb = "^1.1.0"
 
 [tool.poetry.scripts]
 mcp-jupyter = "src.main:main"
