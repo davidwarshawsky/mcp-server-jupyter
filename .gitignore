@@ -10,3 +10,4 @@ assets/
 vscode-extension/python_server/wheels/
 
 .coverage.*
+.coverage
