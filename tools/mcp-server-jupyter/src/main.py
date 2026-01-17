@@ -2401,12 +2401,17 @@ def main():
 
     # --- SERVER MODE (Existing Logic) ---
     try:
-        # [SECURITY] Generate and print session token
+        # [SECURITY] Generate and communicate auth token
         import secrets
+        import tempfile
         token = secrets.token_urlsafe(32)
         os.environ["MCP_SESSION_TOKEN"] = token
-        # This stderr message is captured by the VS Code extension to authenticate
-        print(f"[AUTH_TOKEN]: {token}", file=sys.stderr)
+        
+        # Use a secure temporary file to pass the token
+        fd, key_path = tempfile.mkstemp(prefix="mcp-key-")
+        with os.fdopen(fd, 'w') as f:
+            f.write(token)
+        print(f"[AUTH_TOKEN_FILE]: {key_path}", file=sys.stderr)
 
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
         if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:

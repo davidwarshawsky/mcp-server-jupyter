@@ -336,22 +336,13 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                         with open(save_path, "w", encoding='utf-8') as f:
                             f.write(content if isinstance(content, str) else content.decode('utf-8'))
                     
-                    # [DATA GRAVITY FIX] Report HTTP URL instead of file path
-                    # This prevents 50MB Base64 blobs from choking the WebSocket
-                    port = os.environ.get('MCP_PORT', '3000')
-                    host = os.environ.get('MCP_HOST', 'localhost')
-                    # Normalize host for URL (0.0.0.0 -> localhost for client access)
-                    if host == '0.0.0.0':
-                        host = 'localhost'
-                    
-                    asset_url = f"http://{host}:{port}/assets/{fname}"
-                    
                     # [PHASE 3.1] Inline Asset Rendering
-                    # Replace the old text stub with a structured MIME type
                     # The VS Code extension will have a renderer for this type.
+                    # Embed base64 data directly for robust rendering in sandboxed webviews.
                     data[f"application/vnd.mcp.asset+json"] = {
-                        "path": str(save_path),
+                        "path": str(save_path), # Keep path for reference, but don't use for rendering
                         "type": mime_type,
+                        "content": content, # The original base64 content
                         "alt": f"{ext.upper()} plot"
                     }
                     # Remove the original large binary data to save space

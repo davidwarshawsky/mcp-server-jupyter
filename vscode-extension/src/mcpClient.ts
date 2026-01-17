@@ -6,6 +6,7 @@ import * as net from 'net';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
+import { trace, context } from '@opentelemetry/api';
 
 export class McpClient {
   private process?: ChildProcess;
@@ -229,6 +230,19 @@ export class McpClient {
           const headers: { [key: string]: string } = {};
           if (this.sessionToken) {
             headers['X-MCP-Token'] = this.sessionToken;
+          }
+
+          // [TRACING] Propagate OpenTelemetry trace context
+          const activeContext = context.active();
+          const traceParent = trace.getSpan(activeContext)?.spanContext().traceId;
+          if (traceParent) {
+            // This is a simplified example. A real implementation would use W3C Trace Context format.
+            // For now, we'll create a basic traceparent header.
+            const spanId = trace.getSpan(activeContext)?.spanContext().spanId;
+            const traceFlags = trace.getSpan(activeContext)?.spanContext().traceFlags;
+            if (spanId && traceFlags !== undefined) {
+                headers['traceparent'] = `00-${traceParent}-${spanId}-0${traceFlags}`;
+            }
           }
 
           this.ws = new WebSocket(url, ['mcp'], { headers });

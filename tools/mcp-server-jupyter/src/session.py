@@ -422,6 +422,7 @@ class SessionManager:
              container_cwd = "/workspace/sandbox"
              
              # Construct Docker Command
+             uid_args = ['-u', str(os.getuid())] if os.name != 'nt' else ['-u', '1000']
              cmd = [
                  'docker', 'run', 
                  '--rm',                     # Cleanup container on exit
@@ -437,15 +438,10 @@ class SessionManager:
                  '-v', f'{sandbox_dir}:/workspace/sandbox:rw',
                  '-v', '{connection_file}:/kernel.json:ro',
                  '-w', container_cwd,        # CWD is the sandbox
+             ] + uid_args + [
                  docker_image,
                  'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
              ]
-
-             # [FIX] Only set UID mapping on POSIX systems (os.getuid() is not on Windows)
-             if os.name != 'nt':
-                 # Insert UID mapping after network arg for readability
-                 cmd.insert(4, str(os.getuid()))
-                 cmd.insert(4, '-u')
 
              # Resource limit for Docker: cap memory to 4GB to avoid noisy neighbor OOMs
              cmd.insert(2, '--memory')
