@@ -23,10 +23,11 @@ from src.models import StartKernelArgs, RunCellArgs
 from src.validation import validated_tool
 
 # Initialize structured logging via structlog (observability)
-from src.observability import configure_logging, get_logger
+from src.observability import configure_logging, get_logger, get_tracer
 import traceback
 
 logger = configure_logging()
+tracer = get_tracer(__name__)
 
 # [HEARTBEAT] Auto-shutdown configuration
 HEARTBEAT_INTERVAL = 60  # Check every minute
@@ -231,42 +232,47 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
     Timeout: Seconds before killing long-running cells (default: 300).
     Output: "Kernel started (PID: 1234). Ready for execution."
     """
-    # Capture the active session for notifications
-    try:
-        ctx = mcp.get_context()
-        if ctx and ctx.request_context:
-            session_manager.register_session(ctx.request_context.session)
-    except:
-         # Ignore if context not available (e.g. testing)
-         pass
+    with tracer.start_as_current_span("tool.start_kernel") as span:
+        span.set_attribute("notebook_path", notebook_path)
+        span.set_attribute("docker_image", docker_image)
+        # Capture the active session for notifications
+        try:
+            ctx = mcp.get_context()
+            if ctx and ctx.request_context:
+                session_manager.register_session(ctx.request_context.session)
+        except:
+             # Ignore if context not available (e.g. testing)
+             pass
 
-    # Security Check
-    if not docker_image:
-        logger.warning(f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges.")
+        # Security Check
+        if not docker_image:
+            logger.warning(f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges.")
 
-    return await session_manager.start_kernel(
-        notebook_path, 
-        venv_path if venv_path else None,
-        docker_image if docker_image else None,
-        timeout,
-        agent_id=agent_id
-    )
+        return await session_manager.start_kernel(
+            notebook_path, 
+            venv_path if venv_path else None,
+            docker_image if docker_image else None,
+            timeout,
+            agent_id=agent_id
+        )
 
 @mcp.tool()
 async def stop_kernel(notebook_path: str):
     """
     Kill the process to free RAM and clean up assets.
     """
-    # 1. Prune assets before stopping
-    from src.asset_manager import prune_unused_assets
-    try:
-        # Run cleanup. This ensures that if I delete a cell and close the notebook,
-        # the orphaned image is deleted.
-        prune_unused_assets(notebook_path, dry_run=False)
-    except Exception as e:
-        logger.warning(f"Asset cleanup failed: {e}")
+    with tracer.start_as_current_span("tool.stop_kernel") as span:
+        span.set_attribute("notebook_path", notebook_path)
+        # 1. Prune assets before stopping
+        from src.asset_manager import prune_unused_assets
+        try:
+            # Run cleanup. This ensures that if I delete a cell and close the notebook,
+            # the orphaned image is deleted.
+            prune_unused_assets(notebook_path, dry_run=False)
+        except Exception as e:
+            logger.warning(f"Asset cleanup failed: {e}")
 
-    return await session_manager.stop_kernel(notebook_path)
+        return await session_manager.stop_kernel(notebook_path)
 
 @mcp.tool()
 def list_kernels():
@@ -595,64 +601,6 @@ def _derive_env_vars(python_path: str) -> Optional[dict]:
         return None
 
 @mcp.tool()
-async def run_shell_command(command: str, notebook_path: Optional[str] = None):
-    """
-    [System Diagnostic] Run a safe, non-interactive system command.
-    Use this to debug system dependencies (e.g. 'ldd', 'which', 'uname', 'ls -l /usr/lib').
-    Restricted to non-interactive commands.
-    """
-    import shlex
-    import subprocess
-    
-    # 1. Validation: Block dangerous or interactive commands
-    forbidden_starters = ['vim', 'nano', 'tmux', 'top', 'htop', 'less', 'more', 'ssh', 'git push']
-    cmd_parts = shlex.split(command)
-    if not cmd_parts or cmd_parts[0] in forbidden_starters:
-        return ToolResult(success=False, data={}, error_msg="Command forbidden or interactive.").to_json()
-    
-    # DETERMINE ENVIRONMENT
-    # If notebook_path provided, we try to run in that environment context
-    env = None
-    cwd = None
-    
-    if notebook_path:
-        session = session_manager.get_session(notebook_path)
-        if session:
-            cwd = session.get('cwd')
-            
-            # [CRITICAL] Inject the kernel's environment variables
-            # This ensures 'pip list' or 'python --version' matches the kernel
-            if 'env_info' in session:
-                python_path = session['env_info'].get('python_path')
-                env = _derive_env_vars(python_path)
-
-    try:
-        # Run with timeout to prevent hangs
-        # stdin=subprocess.DEVNULL prevents hanging on prompts like 'sudo password:' or 'apt-get [Y/n]'
-        result = subprocess.run(
-            cmd_parts, 
-            capture_output=True, 
-            text=True, 
-            timeout=10,
-            cwd=cwd,
-            env=env if env else os.environ.copy(),
-            stdin=subprocess.DEVNULL
-        )
-        
-        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
-        return ToolResult(
-            success=result.returncode == 0,
-            data={"stdout": result.stdout, "stderr": result.stderr},
-            error_msg=None if result.returncode == 0 else f"Command failed with code {result.returncode}",
-            user_suggestion=output
-        ).to_json()
-        
-    except subprocess.TimeoutExpired:
-        return ToolResult(success=False, data={}, error_msg="Command timed out (limit: 10s)").to_json()
-    except Exception as e:
-         return ToolResult(success=False, data={}, error_msg=str(e)).to_json()
-
-@mcp.tool()
 def check_code_syntax(code: str):
     """
     [LSP] Check Python code for syntax errors. 
@@ -760,61 +708,6 @@ def is_kernel_busy(notebook_path: str):
                     result["reason"] = f"{active_count} executions running"
     
     return json.dumps(result)
-
-@mcp.tool()
-async def get_execution_stream(notebook_path: str, task_id: str, since_output_index: int = 0):
-    """
-    [PHASE 3.1] Get real-time streaming outputs from a running execution.
-
-    Async-aware: uses non-blocking sanitize_outputs to avoid event-loop stutters on large payloads.
-    """
-    session = session_manager.get_session(notebook_path)
-    if not session:
-        return json.dumps({"status": "error", "message": "No active kernel session"})
-    
-    # Check if still queued
-    if task_id in session['queued_executions']:
-        queued_data = session['queued_executions'][task_id]
-        return json.dumps({
-            "status": "queued",
-            "new_outputs": "",
-            "next_index": 0,
-            "queued_time": queued_data.get('queued_time', 0),
-            "cell_index": queued_data.get('cell_index')
-        })
-    
-    # Find execution in active executions
-    target_data = None
-    for msg_id, data in session['executions'].items():
-        if data['id'] == task_id:
-            target_data = data
-            break
-    
-    if not target_data:
-        return json.dumps({"status": "not_found", "message": "Execution ID not found"})
-    
-    # Get new outputs since last poll
-    all_outputs = target_data['outputs']
-    new_outputs = all_outputs[since_output_index:]
-    
-    # Sanitize outputs (converts binary images to assets, strips ANSI, etc.)
-    assets_dir = str(Path(notebook_path).parent / "assets")
-    sanitized_json = await utils._sanitize_outputs_async(new_outputs, assets_dir)
-    
-    # Unpack to avoid double-JSON encoding
-    try:
-        new_outputs_data = json.loads(sanitized_json)
-    except:
-        new_outputs_data = sanitized_json
-
-    return json.dumps({
-        "status": target_data['status'],
-        "new_outputs": new_outputs_data,
-        "next_index": len(all_outputs),
-        "total_outputs": len(all_outputs),
-        "last_activity": target_data.get('last_activity', 0),
-        "cell_index": target_data.get('cell_index')
-    }, indent=2)
 
 @mcp.tool()
 def check_kernel_resources(notebook_path: str):
@@ -2508,6 +2401,13 @@ def main():
 
     # --- SERVER MODE (Existing Logic) ---
     try:
+        # [SECURITY] Generate and print session token
+        import secrets
+        token = secrets.token_urlsafe(32)
+        os.environ["MCP_SESSION_TOKEN"] = token
+        # This stderr message is captured by the VS Code extension to authenticate
+        print(f"[AUTH_TOKEN]: {token}", file=sys.stderr)
+
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
         if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:
             connection_manager.set_idle_timeout(args.idle_timeout)
@@ -2584,12 +2484,18 @@ def main():
             os.environ['MCP_PORT'] = str(args.port)
             os.environ['MCP_HOST'] = args.host
 
+            from src.security import TokenAuthMiddleware
+            from starlette.middleware import Middleware
+
             app = Starlette(
                 routes=[
                     Route("/health", health_check),
                     WebSocketRoute("/ws", mcp_websocket_endpoint),
                     # Mount assets at /assets for HTTP access
                     Mount("/assets", app=StaticFiles(directory=str(assets_path)), name="assets")
+                ],
+                middleware=[
+                    Middleware(TokenAuthMiddleware)
                 ]
             )
             

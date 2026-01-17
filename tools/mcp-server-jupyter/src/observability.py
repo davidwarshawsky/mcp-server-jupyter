@@ -4,17 +4,45 @@ import structlog
 import uuid
 import contextvars
 from typing import Any, Dict
+import os
+
+# OpenTelemetry imports
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.sdk.resources import Resource
 
 # Context variables for tracing (Request ID, Session ID)
 request_id_ctx = contextvars.ContextVar("request_id", default="startup")
 
+def add_otel_trace_info(logger, method_name, event_dict):
+    """
+    A structlog processor to add OpenTelemetry trace and span IDs to logs.
+    """
+    span = trace.get_current_span()
+    if span != trace.INVALID_SPAN:
+        event_dict['trace_id'] = f"0x{span.get_span_context().trace_id:032x}"
+        event_dict['span_id'] = f"0x{span.get_span_context().span_id:016x}"
+    return event_dict
 
 def configure_logging(level="INFO"):
     """
-    Configures structured JSON logging for production.
+    Configures structured JSON logging with OpenTelemetry integration.
     """
+    # --- OpenTelemetry Configuration ---
+    otel_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if otel_endpoint:
+        resource = Resource(attributes={"service.name": "mcp-jupyter-server"})
+        provider = TracerProvider(resource=resource)
+        processor = BatchSpanProcessor(OTLPSpanExporter(endpoint=otel_endpoint))
+        provider.add_span_processor(processor)
+        trace.set_tracer_provider(provider)
+        print(f"[OTEL] Tracing enabled. Exporting to {otel_endpoint}", file=sys.stderr)
+
     shared_processors = [
         structlog.contextvars.merge_contextvars,
+        add_otel_trace_info,  # Add OTEL trace info
         structlog.processors.add_log_level,
         structlog.processors.TimeStamper(fmt="iso"),
         structlog.processors.StackInfoRenderer(),
@@ -47,6 +75,9 @@ def configure_logging(level="INFO"):
 def get_logger(name=None):
     return structlog.get_logger(name)
 
+def get_tracer(name=None):
+    """Returns an OpenTelemetry tracer instance."""
+    return trace.get_tracer(name if name else __name__)
 
 def generate_request_id():
     req_id = str(uuid.uuid4())

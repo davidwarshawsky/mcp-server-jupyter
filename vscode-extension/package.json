@@ -169,16 +169,13 @@
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile",
-    "test": "node ./out/test/runTest.js",
-    "lint": "eslint src --ext ts",
-    "package": "npm run vscode:prepublish && npx @vscode/vsce package",
-    "package:thin": "npm run bundle-python && npm run bundle-wheels:skip && npm run compile && npx @vscode/vsce package"
+    "test:e2e": "playwright test --config=playwright.config.ts",
+    "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/mocha": "^10.x",
+    "@playwright/test": "^1.40.1",    "@playwright/test": "^1.40.1",    "@types/mocha": "^10.x",
     "@types/node": "^20.x",
     "@types/sinon": "^21.0.0",
-    "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^6.x",
     "@typescript-eslint/parser": "^6.x",
     "@vscode/test-electron": "^2.3.x",

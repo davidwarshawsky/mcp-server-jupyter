@@ -17,10 +17,11 @@ from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
 from src.cell_id_manager import get_cell_id_at_index
+from src.observability import get_logger, get_tracer
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger()
+tracer = get_tracer(__name__)
 
 # [SECURITY] Safe Inspection Helper
 INSPECT_HELPER_CODE = """
@@ -412,50 +413,30 @@ class SessionManager:
              mount_source = str(project_root)
              mount_target = "/workspace"
              
-             # [SECURITY WARNING] Adversarial Agent Protection
-             # Docker container has read access to entire project root, including:
-             # - .env files (API keys, secrets)
-             # - .git directory (commit history)
-             # - SSH keys if present
-             #
-             # MITIGATION STRATEGY:
-             # 1. Log explicit warning to user
-             # 2. Use --network none to prevent exfiltration
-             # 3. Recommend: Create data/ subdirectory for sensitive notebooks
-             #               (then mount only that subdirectory instead of project_root)
-             #
-             # FUTURE: Add restricted mount mode that only mounts specific subdirs
-             logger.warning(
-                 f"[ADVERSARIAL WARNING] Docker container has read access to: {mount_source}. "
-                 f"Ensure no secrets (.env, API keys) are in this directory. "
-                 f"Consider moving notebook to a dedicated data/ subdirectory with restricted mounts."
-             )
+             # [SECURITY] Implement "Sandbox Subdirectory" pattern
+             # Mount source code read-only, but provide a read-write sandbox for outputs.
+             sandbox_dir = project_root / ".mcp_sandbox"
+             sandbox_dir.mkdir(exist_ok=True)
              
-             # Calculate CWD inside container
-             try:
-                 rel_path = Path(notebook_dir).relative_to(project_root)
-                 container_cwd = str(Path(mount_target) / rel_path)
-             except ValueError:
-                 # Fallback if notebook is outside project root
-                 container_cwd = mount_target
+             # Calculate CWD inside container, which is now the sandbox
+             container_cwd = "/workspace/sandbox"
              
              # Construct Docker Command
-             # We use {connection_file} which Jupyter substitutes with the host path
-             # We map Host Path -> Container Path (/kernel.json)
-             # Then tell ipykernel to read /kernel.json
-             
              cmd = [
                  'docker', 'run', 
                  '--rm',                     # Cleanup container on exit
                  '-i',                       # Interactive (keeps stdin open)
                  '--init',                   # Ensure PID 1 forwards signals to children
-                 '--network', 'none',        # [SECURITY] Disable networking to prevent exfiltration
-                 '--security-opt', 'no-new-privileges',  # [SECURITY] Prevent privilege escalation
-                 '--read-only',              # [SECURITY] Read-only root filesystem
-                 '--tmpfs', '/tmp:rw,noexec,nosuid,size=1g',  # [SECURITY] Writable tmp (no exec)
-                 '-v', f'{mount_source}:{mount_target}:ro',  # [SECURITY] Read-only workspace mount
-                 '-v', '{connection_file}:/kernel.json:ro',  # [SECURITY] Read-only connection file
-                 '-w', container_cwd,
+                 '--network', 'none',        # [SECURITY] Disable networking
+                 '--security-opt', 'no-new-privileges',
+                 '--read-only',
+                 '--tmpfs', '/tmp:rw,noexec,nosuid,size=1g',
+                 # Mount source code read-only for reference
+                 '-v', f'{project_root}:/workspace/source:ro',
+                 # Mount sandbox read-write for assets/outputs
+                 '-v', f'{sandbox_dir}:/workspace/sandbox:rw',
+                 '-v', '{connection_file}:/kernel.json:ro',
+                 '-w', container_cwd,        # CWD is the sandbox
                  docker_image,
                  'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
              ]
@@ -808,6 +789,20 @@ except ImportError:
                         output = nbformat.v4.new_output('error', ename=content['ename'], evalue=content['evalue'], traceback=content['traceback'])
                     
                     if output:
+                        # [PHASE 2.1] Event-Driven Outputs: Push notifications instead of polling
+                        # Broadcast the raw output message immediately.
+                        if self.connection_manager:
+                            await self.connection_manager.broadcast({
+                                "jsonrpc": "2.0",
+                                "method": "notebook/output",
+                                "params": {
+                                    "notebook_path": nb_path,
+                                    "task_id": exec_data.get('id'),
+                                    "cell_index": exec_data.get('cell_index'),
+                                    "output": output,
+                                }
+                            })
+
                         exec_data['outputs'].append(output)
                         # [PHASE 3.1] Update streaming metadata
                         exec_data['output_count'] = len(exec_data['outputs'])
@@ -1296,103 +1291,80 @@ print(_get_var_info())
         return await self._run_and_wait_internal(nb_path, code)
 
     async def save_checkpoint(self, notebook_path: str, checkpoint_name: str):
-        """Snapshot the kernel heap (variables) to disk."""
+        """[RECIPE REPLAY] Save the execution history, not the heap."""
         session = self.sessions.get(str(Path(notebook_path).resolve()))
         if not session: return "No session"
+
+        # Get the history of executed cell indices
+        executed_indices = sorted(list(session.get('executed_indices', set())))
+        if not executed_indices:
+            return "No cells have been executed; nothing to save."
+
+        # Read the notebook to get the source of executed cells
+        try:
+            nb = nbformat.read(notebook_path, as_version=4)
+        except Exception as e:
+            return f"Error reading notebook: {e}"
+
+        # Create the recipe
+        recipe = []
+        for index in executed_indices:
+            if 0 <= index < len(nb.cells):
+                cell = nb.cells[index]
+                if cell.cell_type == 'code':
+                    recipe.append({
+                        "index": index,
+                        "source": cell.source
+                    })
         
-        # Execute dill dump inside the kernel
-        # We save to a hidden .mcp folder next to the notebook
-        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
-        # Ensure directory exists on server side just in case, though kernel writes it
+        # Save the recipe to disk
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.json"
         ckpt_path.parent.mkdir(exist_ok=True, parents=True)
         
-        # Path for the kernel (cross-platform safe)
-        path_str = str(ckpt_path).replace("\\", "\\\\")
+        manifest = {
+            "version": "2.0",
+            "type": "recipe_replay",
+            "timestamp": datetime.datetime.now().isoformat(),
+            "notebook_path": notebook_path,
+            "recipe": recipe
+        }
         
-        secret_hex = SESSION_SECRET.hex()
-
-        code = f"""
-import dill
-import os
-import pickle
-import hmac
-import hashlib
-
-try:
-    os.makedirs(os.path.dirname(r'{path_str}'), exist_ok=True)
-    
-    safe_state = {{}}
-    excluded_vars = []
-    ignored = ['In', 'Out', 'exit', 'quit', 'get_ipython'] 
-
-    # Iterate over user variables only (skip system dunders)
-    user_vars = {{k:v for k,v in globals().items() if not k.startswith('_') and k not in ignored}}
-
-    for k, v in user_vars.items():
         try:
-            # Test pickleability in memory first
-            dill.dumps(v)
-            safe_state[k] = v
-        except:
-            excluded_vars.append(k)
-
-    # Serialize and sign
-    data = dill.dumps(safe_state)
-    signature = hmac.new(bytes.fromhex('{secret_hex}'), data, hashlib.sha256).hexdigest()
-
-    with open(r'{path_str}', 'wb') as f:
-        f.write(signature.encode('utf-8'))
-        f.write(data)
-
-    msg = f"Checkpoint saved and signed. Preserved {{len(safe_state)}} variables."
-    if excluded_vars:
-        msg += f" Skipped {{len(excluded_vars)}} complex objects: {{', '.join(excluded_vars)}}"
-    print(msg)
-
-except ImportError:
-    print("Error: 'dill' is not installed in the kernel environment. Please run '!pip install dill' first.")
-except Exception as e:
-    print(f"Checkpoint error: {{e}}")
-"""
-        # Use -1 index for internal commands
-        exec_id = await self.execute_cell_async(notebook_path, -1, code)
-        return exec_id
+            with open(ckpt_path, 'w') as f:
+                json.dump(manifest, f, indent=2)
+            return f"Checkpoint recipe saved. Contains {len(recipe)} executed cells."
+        except Exception as e:
+            return f"Failed to save checkpoint recipe: {e}"
 
     async def load_checkpoint(self, notebook_path: str, checkpoint_name: str):
-        """Restore the kernel heap from disk."""
-        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.pkl"
-        path_str = str(ckpt_path).replace("\\", "\\\\")
+        """[RECIPE REPLAY] Restore state by re-executing from a recipe."""
+        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.json"
+        if not ckpt_path.exists():
+            return f"Checkpoint recipe not found: {ckpt_path}"
+
+        try:
+            with open(ckpt_path, 'r') as f:
+                manifest = json.load(f)
+        except Exception as e:
+            return f"Failed to read checkpoint recipe: {e}"
+
+        # 1. Restart the kernel for a clean slate
+        await self.restart_kernel(notebook_path)
+        await asyncio.sleep(2) # Give kernel time to be ready
+
+        # 2. Concatenate all code into a single block for fast replay
+        full_code = "\n\n# --- Recipe Replay ---\n\n".join(
+            [cell['source'] for cell in manifest.get('recipe', [])]
+        )
         
-        secret_hex = SESSION_SECRET.hex()
+        if not full_code:
+            return "Checkpoint recipe is empty; nothing to replay."
 
-        code = f"""
-import dill
-import hmac
-import hashlib
-import os
-
-try:
-    if not os.path.exists(r'{path_str}'):
-        print(f"Checkpoint not found: {path_str}")
-    else:
-        with open(r'{path_str}', 'rb') as f:
-            # Signature is stored as a 64-char hex string at the start
-            sig_len = 64
-            file_sig = f.read(sig_len).decode('utf-8')
-            data = f.read()
-
-            expected_sig = hmac.new(bytes.fromhex('{secret_hex}'), data, hashlib.sha256).hexdigest()
-            if not hmac.compare_digest(file_sig, expected_sig):
-                raise Exception('Checkpoint signature mismatch. Refusing to load.')
-
-            state_dict = dill.loads(data)
-            globals().update(state_dict)
-        print(f"State restored ({{len(state_dict)}} variables)")
-except Exception as e:
-    print(f"Restore error: {{e}}")
-"""
-        exec_id = await self.execute_cell_async(notebook_path, -1, code)
-        return exec_id
+        # 3. Execute the combined code block
+        # We use a special index -2 to signify a replay operation
+        exec_id = await self.execute_cell_async(notebook_path, -2, full_code)
+        
+        return f"State restoration started by replaying {len(manifest.get('recipe', []))} cells. Task ID: {exec_id}"
 
     async def get_variable_info(self, nb_path: str, var_name: str):
         """

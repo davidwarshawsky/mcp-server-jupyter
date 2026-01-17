@@ -345,7 +345,20 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                         host = 'localhost'
                     
                     asset_url = f"http://{host}:{port}/assets/{fname}"
-                    llm_summary.append(f"[{ext.upper()} AVAILABLE: {asset_url}]")
+                    
+                    # [PHASE 3.1] Inline Asset Rendering
+                    # Replace the old text stub with a structured MIME type
+                    # The VS Code extension will have a renderer for this type.
+                    data[f"application/vnd.mcp.asset+json"] = {
+                        "path": str(save_path),
+                        "type": mime_type,
+                        "alt": f"{ext.upper()} plot"
+                    }
+                    # Remove the original large binary data to save space
+                    if mime_type in data:
+                        del data[mime_type]
+
+                    llm_summary.append(f"[{ext.upper()} ASSET RENDERED INLINE]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
