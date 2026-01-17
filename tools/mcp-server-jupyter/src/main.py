@@ -10,6 +10,8 @@ import sys
 import logging
 import datetime
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.staticfiles import StaticFiles
+from starlette.routing import Mount
 from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
@@ -2572,10 +2574,22 @@ def main():
 
             from starlette.routing import Route
 
+            # [DATA GRAVITY FIX] Mount assets directory for HTTP access
+            # Instead of sending 50MB Base64 blobs over WebSocket, serve assets via HTTP
+            # This prevents JSON-RPC connection choking on large binary data
+            assets_path = Path.cwd() / "assets"
+            assets_path.mkdir(exist_ok=True)
+            
+            # Store port in environment for utils.py to construct URLs
+            os.environ['MCP_PORT'] = str(args.port)
+            os.environ['MCP_HOST'] = args.host
+
             app = Starlette(
                 routes=[
                     Route("/health", health_check),
-                    WebSocketRoute("/ws", mcp_websocket_endpoint)
+                    WebSocketRoute("/ws", mcp_websocket_endpoint),
+                    # Mount assets at /assets for HTTP access
+                    Mount("/assets", app=StaticFiles(directory=str(assets_path)), name="assets")
                 ]
             )
             

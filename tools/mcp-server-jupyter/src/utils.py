@@ -21,6 +21,58 @@ io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 MAX_OUTPUT_LENGTH = 3000
 
 
+def compress_traceback(traceback_lines: List[str]) -> List[str]:
+    """
+    [TOKENOMICS] Compress stack traces to save context window tokens.
+    
+    Removes frames from site-packages/dist-packages (library code)
+    unless they are the immediate cause of the error.
+    
+    Problem: A pandas schema mismatch produces 60-line stack traces.
+    This flushes 1,000+ tokens per error. After 3 retries, the agent
+    has consumed 3,000 tokens on noise and "forgets" original instructions.
+    
+    Solution: Strip internal library frames, keep only:
+    1. Traceback header
+    2. User code frames
+    3. Final error message
+    
+    Returns:
+        Compressed traceback with library frames replaced by placeholder
+    """
+    if not traceback_lines:
+        return []
+
+    compressed = []
+    # Always keep the header ("Traceback (most recent call last):")
+    if traceback_lines:
+        compressed.append(traceback_lines[0])
+
+    # Filter intermediate frames
+    user_frames = []
+    inside_library_block = False
+    
+    for line in traceback_lines[1:]:
+        # Heuristic: If it contains site-packages or dist-packages, it's library code
+        is_lib = any(marker in line for marker in ['site-packages', 'dist-packages', 'lib/python', '<frozen', 'importlib'])
+        # Always keep the final error message (usually doesn't start with "  File")
+        is_message = not line.strip().startswith('File')
+        
+        if not is_lib or is_message:
+            # This is user code or the final error message
+            inside_library_block = False
+            user_frames.append(line)
+        else:
+            # It's a library frame. Replace blocks of lib frames with a placeholder
+            if not inside_library_block:
+                user_frames.append("  ... [Internal Library Frames] ...\n")
+                inside_library_block = True
+            # Otherwise, skip this library frame (already have placeholder)
+
+    compressed.extend(user_frames)
+    return compressed
+
+
 async def offload_json_dumps(data: Any) -> str:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(io_pool, lambda: json.dumps(data))
@@ -284,9 +336,16 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                         with open(save_path, "w", encoding='utf-8') as f:
                             f.write(content if isinstance(content, str) else content.decode('utf-8'))
                     
-                    # Report to LLM with forward slashes for cross-platform compatibility
-                    report_path = str(save_path).replace("\\", "/")
-                    llm_summary.append(f"[{ext.upper()} SAVED: {report_path}]")
+                    # [DATA GRAVITY FIX] Report HTTP URL instead of file path
+                    # This prevents 50MB Base64 blobs from choking the WebSocket
+                    port = os.environ.get('MCP_PORT', '3000')
+                    host = os.environ.get('MCP_HOST', 'localhost')
+                    # Normalize host for URL (0.0.0.0 -> localhost for client access)
+                    if host == '0.0.0.0':
+                        host = 'localhost'
+                    
+                    asset_url = f"http://{host}:{port}/assets/{fname}"
+                    llm_summary.append(f"[{ext.upper()} AVAILABLE: {asset_url}]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
@@ -391,18 +450,21 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             evalue = out_dict.get('evalue', '')
             traceback = out_dict.get('traceback', [])
             
-            # Strip ANSI from traceback
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-            clean_traceback = [ansi_escape.sub('', line) for line in traceback]
+            # [TOKENOMICS] 1. Compress traceback FIRST (removes library noise)
+            clean_traceback = compress_traceback(traceback)
             
-            # [SECRET REDACTION]
+            # 2. Strip ANSI escape codes
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            clean_traceback = [ansi_escape.sub('', line) for line in clean_traceback]
+            
+            # 3. Redact secrets
             clean_traceback = [_redact_text(line) for line in clean_traceback]
-
             
             # Build clean error message
             error_msg = f"Error: {ename}: {evalue}"
             if clean_traceback:
-                error_msg += "\n" + "\n".join(clean_traceback[-10:])  # Last 10 lines of traceback
+                # After compression, limit to last 20 lines (already compressed)
+                error_msg += "\n" + "\n".join(clean_traceback[-20:])
             llm_summary.append(error_msg)
 
     # Return structured data for both LLM (summary) and VS Code (rich output)

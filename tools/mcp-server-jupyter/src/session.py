@@ -412,6 +412,25 @@ class SessionManager:
              mount_source = str(project_root)
              mount_target = "/workspace"
              
+             # [SECURITY WARNING] Adversarial Agent Protection
+             # Docker container has read access to entire project root, including:
+             # - .env files (API keys, secrets)
+             # - .git directory (commit history)
+             # - SSH keys if present
+             #
+             # MITIGATION STRATEGY:
+             # 1. Log explicit warning to user
+             # 2. Use --network none to prevent exfiltration
+             # 3. Recommend: Create data/ subdirectory for sensitive notebooks
+             #               (then mount only that subdirectory instead of project_root)
+             #
+             # FUTURE: Add restricted mount mode that only mounts specific subdirs
+             logger.warning(
+                 f"[ADVERSARIAL WARNING] Docker container has read access to: {mount_source}. "
+                 f"Ensure no secrets (.env, API keys) are in this directory. "
+                 f"Consider moving notebook to a dedicated data/ subdirectory with restricted mounts."
+             )
+             
              # Calculate CWD inside container
              try:
                  rel_path = Path(notebook_dir).relative_to(project_root)
@@ -430,9 +449,12 @@ class SessionManager:
                  '--rm',                     # Cleanup container on exit
                  '-i',                       # Interactive (keeps stdin open)
                  '--init',                   # Ensure PID 1 forwards signals to children
-                 '--network', 'none',        # [SECURITY] Disable networking
-                 '-v', f'{mount_source}:{mount_target}',
-                 '-v', '{connection_file}:/kernel.json',
+                 '--network', 'none',        # [SECURITY] Disable networking to prevent exfiltration
+                 '--security-opt', 'no-new-privileges',  # [SECURITY] Prevent privilege escalation
+                 '--read-only',              # [SECURITY] Read-only root filesystem
+                 '--tmpfs', '/tmp:rw,noexec,nosuid,size=1g',  # [SECURITY] Writable tmp (no exec)
+                 '-v', f'{mount_source}:{mount_target}:ro',  # [SECURITY] Read-only workspace mount
+                 '-v', '{connection_file}:/kernel.json:ro',  # [SECURITY] Read-only connection file
                  '-w', container_cwd,
                  docker_image,
                  'python', '-m', 'ipykernel_launcher', '-f', '/kernel.json'
@@ -670,6 +692,7 @@ except ImportError:
             'execution_queue': asyncio.Queue(),
             'executed_indices': set(), # Track which cells have been run in this session
             'execution_counter': 0,
+            'max_executed_index': -1,  # [SCIENTIFIC INTEGRITY] Track execution wavefront
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
             'execution_timeout': execution_timeout,  # Per-session timeout
             'env_info': {  # NEW: Environment provenance tracking
@@ -927,6 +950,25 @@ except ImportError:
                 if exec_id in session_data['queued_executions']:
                     del session_data['queued_executions'][exec_id]
                 
+                # [SCIENTIFIC INTEGRITY] Check Linearity
+                current_index = cell_index
+                max_idx = session_data.get('max_executed_index', -1)
+                
+                linearity_warning = ""
+                if current_index >= 0 and current_index < max_idx:
+                    # Agent is executing out of order (e.g., edited Cell 1 after running Cell 3)
+                    linearity_warning = (
+                        f"\n\n⚠️  [INTEGRITY WARNING] You are executing Cell {current_index + 1} "
+                        f"after Cell {max_idx + 1}. This creates hidden state. "
+                        f"The notebook state in memory (Cell {current_index + 1} v2 + later cells v1) "
+                        f"cannot be reproduced by running 'Run All' from top to bottom. "
+                        f"Recommend re-running subsequent cells to ensure reproducibility.\n"
+                    )
+                
+                # Update wavefront (track highest executed index)
+                if current_index > max_idx:
+                    session_data['max_executed_index'] = current_index
+                
                 try:
                     # Increment execution counter
                     session_data['execution_counter'] += 1
@@ -943,7 +985,7 @@ except ImportError:
                         'status': 'running',
                         'outputs': [],
                         'execution_count': expected_count,
-                        'text_summary': "",
+                        'text_summary': linearity_warning,  # [SCIENTIFIC INTEGRITY] Inject warning
                         'kernel_state': 'busy',
                         'start_time': asyncio.get_event_loop().time(),
                         'output_count': 0,  # [PHASE 3.1] Track total output count for streaming

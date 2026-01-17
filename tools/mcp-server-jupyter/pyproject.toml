@@ -21,6 +21,7 @@ starlette = "^0.51.0"
 websockets = "^14.0"
 structlog = "^24.1.0"
 pydantic = "^2.0.0"
+aiofiles = "^23.2.0"  # Required by Starlette StaticFiles for async file serving
 
 [tool.poetry.extras]
 superpowers = ["duckdb"]
