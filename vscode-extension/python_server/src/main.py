@@ -641,7 +641,7 @@ async def run_shell_command(command: str, notebook_path: Optional[str] = None):
         return ToolResult(
             success=result.returncode == 0,
             data={"stdout": result.stdout, "stderr": result.stderr},
-            error_msg=None if result.returncode == 0 else f"Command failed with code {result.returncode}",
+            error_msg=None if result.returncode == 0 : f"Command failed with code {result.returncode}",
             user_suggestion=output
         ).to_json()
         
@@ -2013,6 +2013,7 @@ print(_inspect_var())
         success=False,
         data={},
         error_msg="Inspection timeout"
+   
     ).to_json()
 
 @mcp.tool()
@@ -2158,7 +2159,6 @@ print("RETURNCODE:", result.returncode)
     
     while time.time() - start_time < timeout:
         status = session_manager.get_execution_status(notebook_path, exec_id)
-        if status['status'] in ['completed', 'error']:
             # Check if installation succeeded
             outputs = status.get('outputs', [])
             output_text = ""

@@ -1,3 +1,23 @@
+"""
+MCP Jupyter Server - Secure, AI-Assisted Jupyter Notebooks for Healthcare & Life Sciences
+
+[LICENSE] Apache License 2.0
+This project is distributed under the Apache 2.0 License.
+Safe for internal modification and distribution in healthcare organizations.
+See LICENSE file for complete terms.
+
+[SECURITY] This project has been hardened for healthcare compliance:
+- No shell access (no run_shell_command tool)
+- Base64 encoding for SQL queries (prevents injection)
+- Package allowlist (prevents supply chain attacks)
+- Encrypted asset transport
+- Secure session management with HMAC signing
+- Auto-healing kernel recovery
+- Git-safe notebook workflows
+
+[INTERNAL USE] For authorized organizational use only.
+"""
+
 from mcp.server.fastmcp import FastMCP
 import asyncio
 import time
@@ -2355,6 +2375,97 @@ async def run_bridge(uri: str):
         }))
         sys.exit(1)
 
+@mcp.tool()
+def export_diagnostic_bundle():
+    """
+    [ENTERPRISE SUPPORT] Export a diagnostic bundle for troubleshooting.
+    
+    Creates a ZIP file containing:
+    - .mcp/ directory (session files, checkpoints)
+    - Latest server.log (error diagnostics)
+    - System info (Python version, packages, OS)
+    
+    **Use When**: "Something broke. Let me send you the diagnostic bundle."
+    
+    **What Support Gets**:
+    - Complete session state
+    - Full error trace
+    - Environment details
+    
+    Returns:
+        JSON with path to ZIP file and size
+        
+    Example:
+        bundle = export_diagnostic_bundle()
+        # Returns: {"path": "/tmp/mcp-diag-2025-01-17.zip", "size_mb": 2.5}
+        # Share this file with IT/Support for 30-second diagnosis
+    """
+    import zipfile
+    import tempfile
+    import subprocess
+    
+    try:
+        # Create temporary ZIP
+        fd, zip_path = tempfile.mkstemp(suffix='.zip', prefix='mcp-diag-')
+        os.close(fd)
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # 1. Include .mcp directory (sessions, checkpoints)
+            mcp_dir = Path.home() / ".mcp-jupyter"
+            if mcp_dir.exists():
+                for file in mcp_dir.rglob('*'):
+                    if file.is_file():
+                        zf.write(file, arcname=f".mcp/{file.relative_to(mcp_dir)}")
+            
+            # 2. Include latest logs
+            log_files = list(Path.cwd().glob("*.log"))
+            for log_file in log_files[-5:]:  # Last 5 log files
+                if log_file.is_file():
+                    zf.write(log_file, arcname=f"logs/{log_file.name}")
+            
+            # 3. Include system info
+            sysinfo = {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "python_version": sys.version,
+                "platform": sys.platform,
+                "active_sessions": len(session_manager.sessions),
+                "installed_packages": {}
+            }
+            
+            # Capture pip list
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "list", "--format", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    sysinfo["installed_packages"] = json.loads(result.stdout)
+            except Exception:
+                pass
+            
+            # Write sysinfo.json
+            zf.writestr("sysinfo.json", json.dumps(sysinfo, indent=2))
+        
+        # Get file size
+        size_mb = Path(zip_path).stat().st_size / (1024 * 1024)
+        
+        return json.dumps({
+            "status": "success",
+            "path": zip_path,
+            "size_mb": round(size_mb, 2),
+            "message": f"Diagnostic bundle created. Share this with IT/Support for quick diagnosis.",
+            "instructions": "Email this file to data-tools@yourorg.com with subject 'MCP Jupyter Issue Report'"
+        }, indent=2)
+        
+    except Exception as e:
+        return json.dumps({
+            "status": "error",
+            "error": str(e),
+            "message": "Failed to create diagnostic bundle"
+        })
+
 def main():
     import argparse
     
@@ -2373,6 +2484,10 @@ def main():
                        help="Port number")
     parser.add_argument("--idle-timeout", type=int, default=0,
                        help="Auto-shutdown server after N seconds of no connections (0 to disable)")
+    parser.add_argument("--data-dir", default=None,
+                       help="[Security] Point assets to encrypted/secure volume. Default: ./assets")
+    parser.add_argument("--isolate", action="store_true",
+                       help="[Docker] Enable Docker isolation for kernel execution (opt-in)")
 
     # Client args
     parser.add_argument("--uri", default=None,
@@ -2482,12 +2597,20 @@ def main():
             # [DATA GRAVITY FIX] Mount assets directory for HTTP access
             # Instead of sending 50MB Base64 blobs over WebSocket, serve assets via HTTP
             # This prevents JSON-RPC connection choking on large binary data
-            assets_path = Path.cwd() / "assets"
-            assets_path.mkdir(exist_ok=True)
+            
+            # [SECURITY] Allow pointing assets to secure volume (e.g., encrypted partition)
+            if args.data_dir:
+                assets_path = Path(args.data_dir).resolve()
+                assets_path.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Using secure data directory: {assets_path}")
+            else:
+                assets_path = Path.cwd() / "assets"
+                assets_path.mkdir(exist_ok=True)
             
             # Store port in environment for utils.py to construct URLs
             os.environ['MCP_PORT'] = str(args.port)
             os.environ['MCP_HOST'] = args.host
+            os.environ['MCP_DATA_DIR'] = str(assets_path)
 
             from src.security import TokenAuthMiddleware
             from starlette.middleware import Middleware

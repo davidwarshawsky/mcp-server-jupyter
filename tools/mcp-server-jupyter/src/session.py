@@ -111,7 +111,8 @@ class SessionManager:
         #   'execution_queue': asyncio.Queue,
         #   'queue_processor_task': asyncio.Task,
         #   'execution_counter': int,
-        #   'stop_on_error': bool
+        #   'stop_on_error': bool,
+        #   'exec_lock': asyncio.Lock  # [RACE CONDITION FIX]
         # }
         self.sessions = {}
         # Global timeout for cell executions (in seconds)
@@ -127,6 +128,9 @@ class SessionManager:
         # Session persistence directory
         self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
+
+        # [REAPER] Start the background reaper task
+        self._reaper_task = asyncio.create_task(self._reaper_loop())
         
     def set_mcp_server(self, mcp_server):
         """Set the MCP server instance to enable notifications."""
@@ -166,28 +170,87 @@ class SessionManager:
 
         notification = CustomNotification(method, params)
 
-        # Broadcast to all active sessions (Agent + Human)
-        if hasattr(self, 'active_sessions') and self.active_sessions:
-            # We must iterate a copy because sessions might disconnect during send
-            dead_sessions = set()
-            for session in list(self.active_sessions):
-                try:
-                    await session.send_notification(notification)
-                except Exception as e:
-                    logger.warning(f"Failed to send notification to session: {e}")
-                    dead_sessions.add(session)
-            
-            # Cleanup dead sessions
-            if dead_sessions:
-                self.active_sessions -= dead_sessions
-                
-        elif self.server_session:
-            # Fallback for legacy single session
+        # 2. Fallback to individual session notifications
+        # This is less efficient but works for single-client setups
+        if self.server_session:
             await self.server_session.send_notification(notification)
         elif self.mcp_server and hasattr(self.mcp_server, "send_notification"):
              # Fallback to server level if no sessions registered (e.g. stdio)
             await self.mcp_server.send_notification(notification)
 
+    async def _reaper_loop(self, interval: int = 60):
+        """
+        [REAPER] Periodically scans for and cleans up zombie kernels from dead server processes.
+        """
+        logger.info(f"Starting Grim Reaper task (scan interval: {interval}s)")
+        try:
+            import psutil
+        except ImportError:
+            logger.warning("[REAPER] psutil not installed. Zombie process reaping is disabled.")
+            return
+
+        await asyncio.sleep(interval) # Initial delay
+
+        while True:
+            try:
+                current_pid = os.getpid()
+                current_proc = psutil.Process(current_pid)
+                current_create_time = current_proc.create_time()
+
+                for session_file in self.persistence_dir.glob("session_*.json"):
+                    try:
+                        with open(session_file, 'r') as f:
+                            session_data = json.load(f)
+                        
+                        server_pid = session_data.get('server_pid')
+                        kernel_pid = session_data.get('pid')
+                        server_create_time = session_data.get('server_create_time')
+
+                        if not server_pid or not kernel_pid:
+                            continue
+
+                        # If the server PID is not us and that server process is dead...
+                        is_zombie = False
+                        if server_pid != current_pid:
+                            try:
+                                proc = psutil.Process(server_pid)
+                                # [REAPER FIX] Check create time to disambiguate reused PIDs
+                                if proc.create_time() != server_create_time:
+                                    is_zombie = True # PID was reused, original server is dead
+                                elif not proc.is_running():
+                                    is_zombie = True # Process is a zombie in the process table
+                            except psutil.NoSuchProcess:
+                                is_zombie = True # Process is gone
+
+                        if is_zombie:
+                            logger.warning(f"[REAPER] Found orphan session file from dead server PID {server_pid} for kernel PID {kernel_pid}.")
+                            
+                            # ...then the kernel is a zombie. Reap it.
+                            if psutil.pid_exists(kernel_pid):
+                                try:
+                                    proc = psutil.Process(kernel_pid)
+                                    proc.kill()
+                                    logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid}.")
+                                except psutil.NoSuchProcess:
+                                    pass # Already gone
+                                except Exception as e:
+                                    logger.error(f"[REAPER] Error killing zombie kernel {kernel_pid}: {e}")
+                            
+                            # Clean up the session file
+                            session_file.unlink()
+                            logger.info(f"[REAPER] Cleaned up orphan session file: {session_file.name}")
+
+                    except Exception as e:
+                        logger.warning(f"[REAPER] Error processing session file {session_file.name}: {e}")
+                
+                await asyncio.sleep(interval)
+
+            except asyncio.CancelledError:
+                logger.info("Reaper task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"[REAPER] Unhandled error in reaper loop: {e}")
+                await asyncio.sleep(interval) # Avoid fast crash loop
     
     def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
         """
@@ -201,14 +264,18 @@ class SessionManager:
         try:
             # Use notebook path hash as filename to handle special chars
             import hashlib
+            import psutil
             path_hash = hashlib.md5(nb_path.encode()).hexdigest()
             session_file = self.persistence_dir / f"session_{path_hash}.json"
             
+            current_proc = psutil.Process(os.getpid())
+
             session_data = {
                 "notebook_path": nb_path,
                 "connection_file": connection_file,
                 "pid": pid if isinstance(pid, int) else None,
                 "server_pid": os.getpid(),  # [REAPER FIX] Track which server owns this kernel
+                "server_create_time": current_proc.create_time(), # [REAPER FIX] And its start time
                 "env_info": env_info,
                 "created_at": datetime.datetime.now().isoformat()
             }
@@ -287,6 +354,7 @@ class SessionManager:
                                 'execution_queue': asyncio.Queue(),
                                 'execution_counter': 0,
                                 'stop_on_error': False,
+                                'exec_lock': asyncio.Lock(), # [RACE CONDITION FIX]
                                 'env_info': session_data.get('env_info', {
                                     'python_path': 'unknown',
                                     'env_name': 'unknown',
@@ -737,6 +805,12 @@ except ImportError:
                     if content['execution_state'] == 'idle':
                         if exec_data['status'] not in ['error', 'cancelled']:
                             exec_data['status'] = 'completed'
+                        
+                        # [RACE CONDITION FIX] Wait for the queue processor to be ready for finalization.
+                        # This ensures stop_on_error logic has a chance to run before we commit the state.
+                        if 'finalization_event' in exec_data:
+                            await exec_data['finalization_event'].wait()
+
                         # Finalize: Save to disk (async-safe)
                         try:
                             await self._finalize_execution_async(nb_path, exec_data)
@@ -896,14 +970,6 @@ except ImportError:
             logger.info(f"Stdin listener cancelled for {nb_path}")
         except Exception as e:
             logger.error(f"Stdin listener error for {nb_path}: {e}")
-
-    async def submit_input(self, notebook_path: str, text: str):
-        """Send user input back to the kernel."""
-        session = self.get_session(notebook_path)
-        if not session:
-            raise ValueError("No active session")
-            
-        kc = session.get('kc')
         # If we don't have a kernel client (test mode or transient), just clear the flag
         if kc is None:
             session['waiting_for_input'] = False
@@ -980,7 +1046,8 @@ except ImportError:
                         'kernel_state': 'busy',
                         'start_time': asyncio.get_event_loop().time(),
                         'output_count': 0,  # [PHASE 3.1] Track total output count for streaming
-                        'last_activity': asyncio.get_event_loop().time()  # [PHASE 3.1] Last output timestamp
+                        'last_activity': asyncio.get_event_loop().time(),  # [PHASE 3.1] Last output timestamp
+                        'finalization_event': asyncio.Event(), # [RACE CONDITION FIX]
                     }
                     
                     # Wait for execution to complete with timeout
@@ -999,22 +1066,22 @@ except ImportError:
                                 # Clear remaining queue items
                                 while not session_data['execution_queue'].empty():
                                     try:
-                                        cancelled_request = session_data['execution_queue'].get_nowait()
-                                        if cancelled_request is not None:
-                                            # Mark as cancelled
-                                            cancelled_id = cancelled_request['exec_id']
-                                            for msg_id_cancel, data_cancel in session_data['executions'].items():
-                                                if data_cancel.get('id') == cancelled_id:
-                                                    data_cancel['status'] = 'cancelled'
-                                                    data_cancel['error'] = f"Cancelled due to error in cell {cell_index}"
-                                                    break
-                                            session_data['execution_queue'].task_done()
+                                        session_data['execution_queue'].get_nowait()
                                     except asyncio.QueueEmpty:
                                         break
-                            break
-                    else:
-                        # Timeout occurred
-                        logger.warning(f"Execution timeout for cell {cell_index} in {nb_path}")
+                            
+                            # [RACE CONDITION FIX] Signal that finalization can proceed.
+                            exec_data['finalization_event'].set()
+                            break # Exit timeout loop
+                    
+                    # [RACE CONDITION FIX] Also signal on timeout to prevent deadlocks
+                    exec_data = session_data['executions'].get(msg_id)
+                    if exec_data:
+                        exec_data['finalization_event'].set()
+
+                    if timeout_remaining <= 0:
+                        # Handle timeout
+                        logger.warning(f"Execution timed out for cell {cell_index} in {nb_path}")
                         if msg_id in session_data['executions']:
                             session_data['executions'][msg_id]['status'] = 'timeout'
                             session_data['executions'][msg_id]['error'] = f"Execution exceeded {session_timeout}s timeout"
@@ -1168,73 +1235,6 @@ except ImportError:
         # Generate execution ID if not provided
         if not exec_id:
             exec_id = str(uuid.uuid4())
-        
-        # Track as queued immediately (fixes race condition with status checks)
-        session['queued_executions'][exec_id] = {
-            'cell_index': cell_index,
-            'code': code,
-            'status': 'queued',
-            'queued_time': asyncio.get_event_loop().time()
-        }
-        
-        # Create execution request
-        exec_request = {
-            'cell_index': cell_index,
-            'code': code,
-            'exec_id': exec_id
-        }
-        
-        # Enqueue the execution
-        await session['execution_queue'].put(exec_request)
-        
-        return exec_id
-
-    def get_execution_status(self, nb_path: str, exec_id: str):
-        abs_path = str(Path(nb_path).resolve())
-        if abs_path not in self.sessions:
-            return {"status": "error", "message": "Kernel not found"}
-            
-        session = self.sessions[abs_path]
-        
-        # Check if still in queue (not started processing yet)
-        if exec_id in session['queued_executions']:
-            queued_data = session['queued_executions'][exec_id]
-            return {
-                "status": "queued",
-                "output": "",
-                "cell_index": queued_data['cell_index'],
-                "intermediate_outputs_count": 0
-            }
-        
-        # Look for the execution by ID in active executions
-        target_data = None
-        for msg_id, data in session['executions'].items():
-            if data['id'] == exec_id:
-                target_data = data
-                break
-                
-        if not target_data:
-            return {"status": "not_found"}
-            
-        return {
-            "status": target_data['status'],
-            "output": target_data['text_summary'],
-            "intermediate_outputs_count": len(target_data['outputs'])
-        }
-    
-    def is_kernel_busy(self, nb_path: str) -> bool:
-        """
-        [PERFORMANCE] Check if kernel is currently executing or has queued work.
-        
-        Used by variable dashboard to skip polling when kernel is busy.
-        Prevents flooding the execution queue with inspection requests.
-        
-        Returns:
-            True if kernel is executing or has queued work, False otherwise
-        """
-        abs_path = str(Path(nb_path).resolve())
-        if abs_path not in self.sessions:
-            return False
         
         session = self.sessions[abs_path]
         

@@ -462,9 +462,27 @@ def create_venv(path: str, python_executable: str = None) -> Dict[str, Any]:
             'error': str(e)
         }
 
+# [SECURITY] Package Allowlist for Healthcare Organizations
+# Restrict to vetted, audited packages to prevent supply chain attacks
+PACKAGE_ALLOWLIST = {
+    # Data Science
+    'pandas', 'numpy', 'scipy', 'scikit-learn',
+    'matplotlib', 'seaborn', 'plotly', 'polars',
+    
+    # ML/DL
+    'torch', 'tensorflow', 'keras', 'xgboost', 'lightgbm',
+    
+    # Utilities
+    'requests', 'beautifulsoup4', 'sqlalchemy', 'duckdb',
+    'openpyxl', 'pyarrow', 'pillow', 'jupyter',
+}
+
 def install_package(package_name: str, python_path: str = None, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
     """
     Install a package using pip in the specified environment.
+    
+    [SECURITY FIX] Validates package against allowlist.
+    Organizations can override with environment variable MCP_PACKAGE_ALLOWLIST.
     
     Args:
         package_name: Name of package (e.g. 'pandas' or 'pandas==2.0.0')
@@ -477,12 +495,29 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     if not python_path:
         python_path = sys.executable
     
+    # [SECURITY] Extract base package name (remove version specifiers)
+    base_package = package_name.split('==')[0].split('>=')[0].split('<=')[0].split('>')[0].split('<')[0].split('[')[0].strip()
+    
+    # Check allowlist
+    allowlist = os.environ.get('MCP_PACKAGE_ALLOWLIST', ','.join(PACKAGE_ALLOWLIST))
+    allowed_packages = set(p.strip().lower() for p in allowlist.split(','))
+    
+    if base_package.lower() not in allowed_packages:
+        return False, f"Package '{base_package}' is not in the allowlist. Contact IT to add it."
+    
     # Use provided env vars or current environment
     run_env = env_vars if env_vars else os.environ.copy()
+    
+    # [GOVERNANCE] Respect corporate proxy if configured
+    if 'PIP_CONFIG_FILE' in os.environ:
+        # pip will automatically use the config file
+        pass
+    elif 'PIP_INDEX_URL' in os.environ:
+        # Use corporate index (e.g., Artifactory/Nexus)
+        run_env['PIP_INDEX_URL'] = os.environ['PIP_INDEX_URL']
         
     try:
         # Use simple pip install
-        # Note: In production, consider --no-input or --quiet
         cmd = [python_path, "-m", "pip", "install", package_name]
         
         result = subprocess.run(

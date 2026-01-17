@@ -24,6 +24,12 @@ export class McpClient {
   private _onConnectionStateChange = new vscode.EventEmitter<'connected' | 'disconnected' | 'connecting'>();
   public readonly onConnectionStateChange = this._onConnectionStateChange.event;
   private connectionState: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
+  
+  // [PHASE 3 UX POLISH] Notification throttling to prevent spam
+  private notificationQueue: Array<{ method: string, params: any }> = [];
+  private lastNotificationSent = 0;
+  private notificationThrottleMs = 100; // Max 10 notifications per second (100ms)
+  private notificationFlushTimer: NodeJS.Timeout | null = null;
 
   constructor() {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
@@ -716,12 +722,69 @@ export class McpClient {
   }
 
   /**
+   * [PHASE 3] Fire notification with throttling to prevent spam.
+   * Buffers notifications and sends max 10 per second (100ms apart).
+   */
+  private _fireNotificationThrottled(notification: { method: string, params: any }): void {
+    // Priority notifications (errors, connection changes) bypass throttling
+    const priorityMethods = ['internal/error', 'internal/reconnected', 'notebook/error'];
+    if (priorityMethods.includes(notification.method)) {
+      this._onNotification.fire(notification);
+      return;
+    }
+
+    // Queue lower-priority notifications
+    this.notificationQueue.push(notification);
+    
+    // Clear existing timer if any
+    if (this.notificationFlushTimer) {
+      clearTimeout(this.notificationFlushTimer);
+    }
+
+    // Send immediately if enough time passed
+    const now = Date.now();
+    if (now - this.lastNotificationSent >= this.notificationThrottleMs) {
+      this._flushNotificationQueue();
+    } else {
+      // Schedule flush for later
+      const delayMs = this.notificationThrottleMs - (now - this.lastNotificationSent);
+      this.notificationFlushTimer = setTimeout(() => {
+        this._flushNotificationQueue();
+      }, delayMs);
+    }
+  }
+
+  /**
+   * Flush pending notifications to UI
+   */
+  private _flushNotificationQueue(): void {
+    if (this.notificationQueue.length === 0) return;
+
+    // Aggregate intermediate log lines (optional optimization)
+    const toSend = this.notificationQueue.splice(0, 5); // Send up to 5 at a time
+    
+    toSend.forEach(n => {
+      this._onNotification.fire(n);
+    });
+
+    this.lastNotificationSent = Date.now();
+
+    // If more items queued, schedule next flush
+    if (this.notificationQueue.length > 0) {
+      this.notificationFlushTimer = setTimeout(() => {
+        this._flushNotificationQueue();
+      }, this.notificationThrottleMs);
+    }
+  }
+
+
+  /**
    * Handle a JSON-RPC response or notification
    */
   private handleResponse(response: McpResponse): void {
     // Check for Notification
     if (response.method && (response.id === undefined || response.id === null)) {
-        this._onNotification.fire({ method: response.method, params: response.params });
+        this._fireNotificationThrottled({ method: response.method, params: response.params });
         return;
     }
 
