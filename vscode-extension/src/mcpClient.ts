@@ -120,13 +120,28 @@ export class McpClient {
             const onData = (data: any) => {
                 const txt = data.toString();
                 this.outputChannel.append(`[stderr] ${txt}`);
-                const m = txt.match(/\[MCP_PORT\]:\s*(\d+)/);
-                if (m) {
+
+                // Look for port
+                const portMatch = txt.match(/\[MCP_PORT\]:\s*(\d+)/);
+                if (portMatch) {
                     clearTimeout(timeout);
-                    const p = parseInt(m[1], 10);
-                    const proc = this.process!;
-                    proc.stderr?.removeListener('data', onData);
+                    const p = parseInt(portMatch[1], 10);
+                    // Don't remove the listener yet, we still need the auth token
                     resolve(p);
+                }
+
+                // Look for auth token file
+                const tokenFileMatch = txt.match(/\[AUTH_TOKEN_FILE\]:\s*(.*)/);
+                if (tokenFileMatch) {
+                    const tokenPath = tokenFileMatch[1].trim();
+                    try {
+                        this.sessionToken = fs.readFileSync(tokenPath, 'utf8').trim();
+                        // SECURITY: Delete file immediately after read
+                        fs.unlinkSync(tokenPath); 
+                        this.outputChannel.appendLine('Successfully read and deleted auth token file.');
+                    } catch (e) {
+                        this.outputChannel.appendLine(`Failed to read auth token: ${e}`);
+                    }
                 }
             };
 

@@ -35,7 +35,15 @@ jobs:
           cd tools/mcp-server-jupyter
           poetry install --with dev
 
-      - name: Build binary
+      - name: Build binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd tools/mcp-server-jupyter
+          pyinstaller --name mcp-server-windows --onedir --clean src/main.py
+          powershell -Command "Compress-Archive -Path dist/mcp-server-windows -DestinationPath dist/mcp-server-windows.zip"
+
+      - name: Build binary (Linux/macOS)
+        if: matrix.os != 'windows-latest'
         run: |
           cd tools/mcp-server-jupyter
           pyinstaller --name mcp-server-${{ matrix.os_name }} --onefile --clean src/main.py
@@ -49,7 +57,7 @@ jobs:
           # Write cert to disk
           echo $CERTIFICATE | base64 --decode > certificate.pfx
           # Sign using signtool (available in windows-latest)
-          "C:\Program Files (x86)\Windows Kits\10\bin\10.0.17763.0\x86\signtool.exe" sign /f certificate.pfx /p $CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 tools/mcp-server-jupyter/dist/mcp-server-windows.exe
+          "C:\Program Files (x86)\Windows Kits\10\bin\10.0.17763.0\x86\signtool.exe" sign /f certificate.pfx /p $CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 tools/mcp-server-jupyter/dist/mcp-server-windows/mcp-server-windows.exe
 
       - name: Sign Binary (macOS)
         if: matrix.os == 'macos-latest'
@@ -69,4 +77,7 @@ jobs:
         uses: actions/upload-artifact@v3
         with:
           name: mcp-server-${{ matrix.os_name }}
-          path: tools/mcp-server-jupyter/dist/mcp-server-${{ matrix.os_name }}*
+          path: |
+            tools/mcp-server-jupyter/dist/mcp-server-windows.zip
+            tools/mcp-server-jupyter/dist/mcp-server-ubuntu-latest
+            tools/mcp-server-jupyter/dist/mcp-server-macos-latest

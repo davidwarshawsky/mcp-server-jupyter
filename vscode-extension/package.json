@@ -198,6 +198,7 @@
     "@types/ws": "^8.18.1"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.7.0",
     "ws": "^8.19.0"
   }
 }
