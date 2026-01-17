@@ -159,7 +159,17 @@
           "group": "navigation"
         }
       ]
-    }
+    },
+    "notebookOutputRenderer": [
+      {
+        "id": "mcp-asset-renderer",
+        "displayName": "MCP Asset Renderer",
+        "entrypoint": "./out/renderer.js",
+        "mimeTypes": [
+          "application/vnd.mcp.asset+json"
+        ]
+      }
+    ]
   },
   "scripts": {
     "vscode:prepublish": "npm run bundle-python && npm run bundle-wheels && npm run compile",

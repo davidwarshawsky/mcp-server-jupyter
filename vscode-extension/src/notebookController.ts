@@ -17,7 +17,7 @@ export class McpNotebookController {
   private completionResolvers = new Map<string, (success: boolean) => void>();
   private activeExecutions = new Map<string, vscode.NotebookCellExecution>(); // taskId -> execution
   private statusBar: vscode.StatusBarItem;
-  private currentEnvironment?: { name: string; path: string; type: string };
+  private currentEnvironment?: { name: string; path: string; type: 'venv' | 'conda' | 'global' };
 
   constructor(mcpClient: McpClient) {
     this.mcpClient = mcpClient;
@@ -445,6 +445,16 @@ export class McpNotebookController {
     const items: vscode.NotebookCellOutputItem[] = [];
 
     if (output.data) {
+      // [UX] Handle custom asset MIME type for inline rendering
+      if (output.data['application/vnd.mcp.asset+json']) {
+        items.push(vscode.NotebookCellOutputItem.json(
+          output.data['application/vnd.mcp.asset+json'],
+          'application/vnd.mcp.asset+json'
+        ));
+        // Return early, as this is the preferred representation
+        return new vscode.NotebookCellOutput(items, output.metadata);
+      }
+
       // Phase 2: Rich Visualization Support
       // Prioritize interactive types (Plotly, Widgets)
       if (output.data['application/vnd.plotly.v1+json']) {
@@ -580,6 +590,21 @@ export class McpNotebookController {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * [UX] Request confirmation before loading a checkpoint
+   */
+  async confirmAndLoadCheckpoint(notebookPath: string, checkpointName: string): Promise<any> {
+    const choice = await vscode.window.showWarningMessage(
+      "Loading a checkpoint will re-execute the code history. This may have unintended side-effects (e.g., re-running API calls). Are you sure you want to proceed?",
+      { modal: true },
+      "Proceed"
+    );
+
+    if (choice === "Proceed") {
+      return this.mcpClient.loadCheckpoint(notebookPath, checkpointName);
+    }
   }
 
   /**

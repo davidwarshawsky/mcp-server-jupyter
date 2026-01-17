@@ -17,6 +17,7 @@ export class McpClient {
   private autoRestart = true;
   private isStarting = false;
   private isShuttingDown = false;
+  private sessionToken: string | null = null; // Add this line
   private _onNotification = new vscode.EventEmitter<{ method: string, params: any }>();
   public readonly onNotification = this._onNotification.event;
   private _onConnectionStateChange = new vscode.EventEmitter<'connected' | 'disconnected' | 'connecting'>();
@@ -223,7 +224,14 @@ export class McpClient {
           // MCP WebSocket servers negotiate the 'mcp' subprotocol.
           // If we don't request it, servers may reject the upgrade or select a protocol
           // we didn't offer, causing clients (and VS Code activation) to fail.
-          this.ws = new WebSocket(url, ['mcp']);
+          
+          // [SECURITY] Include auth token in headers if available
+          const headers: { [key: string]: string } = {};
+          if (this.sessionToken) {
+            headers['X-MCP-Token'] = this.sessionToken;
+          }
+
+          this.ws = new WebSocket(url, ['mcp'], { headers });
                 
                 this.ws.on('open', () => {
                     this.outputChannel.appendLine('WebSocket connected');
