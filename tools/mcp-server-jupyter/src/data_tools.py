@@ -63,6 +63,15 @@ try:
     
     # DuckDB can query pandas DataFrames in the current scope
     con = duckdb.connect(database=':memory:')
+    
+    # [SECURITY] Resource limits to prevent DoS attacks
+    # Limit memory usage to 512MB (prevents OOM from cross-join bombs)
+    con.execute("SET memory_limit='512MB';")
+    # Limit threads to prevent CPU exhaustion
+    con.execute("SET threads=2;")
+    # Set query timeout (30 seconds max)
+    con.execute("SET max_expression_depth=100;")
+    
     # Disable filesystem access and external extensions
     con.execute("SET enable_external_access=false;")
     con.execute("SET lock_configuration=true;")

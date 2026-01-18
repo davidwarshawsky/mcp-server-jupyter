@@ -772,6 +772,9 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
     
     Returns: A Task ID (e.g., "b4f2...").
     Use `get_execution_status(task_id)` to check progress.
+    
+    Raises:
+        RuntimeError: If execution queue is full (HTTP 429 equivalent)
     """
     session = session_manager.get_session(notebook_path)
     if not session:
@@ -788,15 +791,24 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
         except Exception as e:
             return f"Error reading cell: {e}"
     
-    # 2. Submit
-    exec_id = await session_manager.execute_cell_async(notebook_path, index, code, exec_id=task_id_override)
-    if not exec_id:
-        return "Error starting execution."
-        
-    return json.dumps({
-        "task_id": exec_id,
-        "message": "Execution started"
-    })
+    # 2. Submit (with backpressure handling)
+    try:
+        exec_id = await session_manager.execute_cell_async(notebook_path, index, code, exec_id=task_id_override)
+        if not exec_id:
+            return "Error starting execution."
+            
+        return json.dumps({
+            "task_id": exec_id,
+            "message": "Execution started"
+        })
+    except RuntimeError as e:
+        # [SECURITY] Backpressure: Queue is full
+        return json.dumps({
+            "error": "queue_full",
+            "message": str(e),
+            "http_equivalent": 429,
+            "retry_after_seconds": 5
+        })
 
 @mcp.tool()
 def get_execution_status(notebook_path: str, task_id: str):
@@ -902,11 +914,28 @@ async def run_all_cells(notebook_path: str):
     
     # Queue all code cells
     exec_ids = []
+    queue_full_count = 0
     for idx, cell in enumerate(nb.cells):
         if cell.cell_type == 'code':
-            exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
-            if exec_id:
-                exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
+            try:
+                exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
+                if exec_id:
+                    exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
+            except RuntimeError as e:
+                # Queue is full, skip remaining cells
+                queue_full_count += 1
+                if queue_full_count == 1:  # Log once
+                    logger.warning(f"[BACKPRESSURE] Queue full during run_all, stopped at cell {idx}")
+                break
+    
+    if queue_full_count > 0:
+        return json.dumps({
+            'status': 'partial',
+            'message': f'Queue became full. Queued {len(exec_ids)} cells before hitting limit.',
+            'executions': exec_ids,
+            'queue_full': True,
+            'retry_after_seconds': 5
+        }, indent=2)
     
     return json.dumps({
         'message': f'Queued {len(exec_ids)} cells for execution',
@@ -1058,16 +1087,23 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
             strategy_used = "incremental_skipped_all"
 
     # Execute determined cells
+    queue_full = False
     for idx in cells_to_run:
         if idx < len(nb.cells) and nb.cells[idx].cell_type == 'code':
             cell = nb.cells[idx]
-            exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
-            if exec_id:
-                exec_ids.append({
-                    'cell_index': idx,
-                    'exec_id': exec_id,
-                    'reason': rerun_reasons.get(idx, 'unknown')
-                })
+            try:
+                exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
+                if exec_id:
+                    exec_ids.append({
+                        'cell_index': idx,
+                        'exec_id': exec_id,
+                        'reason': rerun_reasons.get(idx, 'unknown')
+                    })
+            except RuntimeError:
+                # Queue is full, stop queuing more
+                queue_full = True
+                logger.warning(f"[BACKPRESSURE] Queue full during sync_state_from_disk at cell {idx}")
+                break
     
     # Calculate metrics
     queue_size = session['execution_queue'].qsize() if 'execution_queue' in session else 0
@@ -1075,8 +1111,8 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     total_code_cells = sum(1 for c in nb.cells if c.cell_type == 'code')
     skipped_cells = total_code_cells - len(exec_ids)
     
-    return json.dumps({
-        'status': 'syncing',
+    response = {
+        'status': 'syncing' if not queue_full else 'partial',
         'message': f'Queued {len(exec_ids)} cells for state synchronization',
         'cells_synced': len(exec_ids),
         'cells_skipped': skipped_cells,
@@ -1086,7 +1122,13 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
         'estimated_duration_seconds': estimate_seconds,
         'strategy_used': strategy_used,
         'hint': 'Use get_execution_status() to monitor progress.'
-    }, indent=2)
+    }
+    
+    if queue_full:
+        response['queue_full'] = True
+        response['retry_after_seconds'] = 5
+    
+    return json.dumps(response, indent=2)
 
 @mcp.tool()
 async def get_version():
@@ -2045,7 +2087,16 @@ print(_inspect_var())
 """
     
     # Execute inspection code using SessionManager's queue (index -1 = internal tool)
-    exec_id = await session_manager.execute_cell_async(notebook_path, -1, inspection_code)
+    try:
+        exec_id = await session_manager.execute_cell_async(notebook_path, -1, inspection_code)
+    except RuntimeError as e:
+        # Queue is full
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg=f"Execution queue is full. Please wait for pending executions to complete. {str(e)}"
+        ).to_json()
+    
     if not exec_id:
         return ToolResult(
             success=False,
@@ -2223,7 +2274,16 @@ print("RETURNCODE:", result.returncode)
 """
     
     # Execute installation using SessionManager's queue (index -1 = internal tool)
-    exec_id = await session_manager.execute_cell_async(notebook_path, -1, install_code)
+    try:
+        exec_id = await session_manager.execute_cell_async(notebook_path, -1, install_code)
+    except RuntimeError as e:
+        # Queue is full
+        return ToolResult(
+            success=False,
+            data={},
+            error_msg=f"Execution queue is full. Cannot install package. {str(e)}"
+        ).to_json()
+    
     if not exec_id:
         return ToolResult(
             success=False,

@@ -15,18 +15,32 @@ class KernelStateManager:
     """
     def __init__(self, persistence_dir: Path):
         self.persistence_dir = persistence_dir
+        self._persistence_available = False
         try:
             self.persistence_dir.mkdir(parents=True, exist_ok=True)
+            self._persistence_available = True
         except (PermissionError, OSError) as e:
-            logger.error(f"Failed to create persistence directory {persistence_dir}: {e}")
-            logger.warning("Session persistence disabled due to directory creation failure")
+            logger.critical(
+                f"CRITICAL: Failed to create persistence directory {persistence_dir}: {e}. "
+                "Zombie kernel reaping is DISABLED. Server will leak kernel processes."
+            )
+            # Fail fast: In production, this should crash the server
+            # Set MCP_FAIL_FAST_ON_PERSISTENCE=1 to enforce
+            if os.getenv('MCP_FAIL_FAST_ON_PERSISTENCE') == '1':
+                raise RuntimeError(
+                    f"Cannot start server: Persistence directory {persistence_dir} is not writable. "
+                    "This will cause kernel process leaks."
+                ) from e
         self._session_locks = {}
 
     def persist_session(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None):
         """Save session info to disk to prevent zombie kernels after server restart."""
-        # Skip if persistence directory is not available
-        if not self.persistence_dir.exists():
-            logger.debug(f"Skipping session persistence for {nb_path}: directory unavailable")
+        # Alert if persistence directory is not available
+        if not self._persistence_available:
+            logger.error(
+                f"[OPERATIONAL RISK] Cannot persist session for {nb_path}: "
+                "Persistence layer is disabled. Kernel PID {pid} will become a zombie if server crashes."
+            )
             return
             
         try:
@@ -59,6 +73,9 @@ class KernelStateManager:
             
             with open(session_file, 'w') as f:
                 json.dump(session_data, f, indent=2)
+            
+            # [COMPLIANCE] Set file permissions to 600 (owner read/write only)
+            os.chmod(session_file, 0o600)
             
             # Create and hold a lock file
             lock_file = self.persistence_dir / f"session_{path_hash}.lock"
@@ -131,9 +148,12 @@ class KernelStateManager:
         [REAPER] Kills orphan kernels from dead server processes.
         Uses UUID verification and Server PID liveness checks.
         """
-        # Skip if persistence directory is not available
-        if not self.persistence_dir.exists():
-            logger.debug("Skipping zombie reconciliation: persistence directory unavailable")
+        # Alert critically if persistence directory is not available
+        if not self._persistence_available:
+            logger.critical(
+                "[REAPER DISABLED] Zombie kernel reconciliation is DISABLED due to persistence failure. "
+                "Orphaned kernel processes will accumulate and exhaust system resources."
+            )
             return
             
         logger.info("reaper_start: Scanning for zombie kernels...")

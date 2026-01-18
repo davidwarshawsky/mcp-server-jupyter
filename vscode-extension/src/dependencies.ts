@@ -49,6 +49,52 @@ except ImportError as e:
 `;
 
   return new Promise((resolve) => {
+    // [SECURITY] Validate pythonPath before execution
+    // Prevent command injection if pythonPath is controlled by workspace settings
+    if (!pythonPath || typeof pythonPath !== 'string') {
+      outputChannel.appendLine('✗ Invalid Python path configuration');
+      resolve(false);
+      return;
+    }
+
+    // Check if pythonPath looks suspicious (contains shell metacharacters)
+    const suspiciousChars = /[;&|$`]/;
+    if (suspiciousChars.test(pythonPath)) {
+      outputChannel.appendLine(
+        `✗ SECURITY WARNING: Python path contains suspicious characters: ${pythonPath}`
+      );
+      outputChannel.appendLine('  This may be a command injection attempt.');
+      resolve(false);
+      return;
+    }
+
+    // Verify pythonPath is an executable file (not a directory or script)
+    const fs = require('fs');
+    const path = require('path');
+    try {
+      const stats = fs.statSync(pythonPath);
+      if (!stats.isFile()) {
+        outputChannel.appendLine(`✗ Python path is not a file: ${pythonPath}`);
+        resolve(false);
+        return;
+      }
+      
+      // On Unix, verify it's executable
+      if (process.platform !== 'win32') {
+        try {
+          fs.accessSync(pythonPath, fs.constants.X_OK);
+        } catch {
+          outputChannel.appendLine(`✗ Python path is not executable: ${pythonPath}`);
+          resolve(false);
+          return;
+        }
+      }
+    } catch (error) {
+      outputChannel.appendLine(`✗ Cannot access Python path: ${pythonPath}`);
+      resolve(false);
+      return;
+    }
+
     // Only set cwd if we have a valid path, otherwise run from anywhere (testing global site-packages)
     const spawnOpts = serverPath ? { cwd: serverPath } : {};
     

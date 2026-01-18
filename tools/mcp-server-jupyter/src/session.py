@@ -365,6 +365,8 @@ class SessionManager:
                             
                             # Restore session structure
                             abs_path = str(Path(nb_path).resolve())
+                            # [SECURITY] Bounded queue prevents DoS from runaway executions
+                            max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '100'))
                             session_dict = {
                                 'km': km,
                                 'kc': kc,
@@ -372,7 +374,7 @@ class SessionManager:
                                 'listener_task': None,
                                 'executions': {},
                                 'queued_executions': {},
-                                'execution_queue': asyncio.Queue(),
+                                'execution_queue': asyncio.Queue(maxsize=max_queue_size),
                                 'execution_counter': 0,
                                 'stop_on_error': False,
                                 'exec_lock': asyncio.Lock(), # [RACE CONDITION FIX]
@@ -457,12 +459,24 @@ class SessionManager:
     
     def _validate_mount_path(self, project_root: Path) -> Path:
         """
-        [FIX #5] Validate Docker mount path to prevent path traversal attacks.
+        [SECURITY] Validate Docker mount path to prevent container breakout attacks.
         
         Ensures the mount path is within allowed directories and doesn't
         escape via symlinks or .. traversal.
+        
+        IIRB COMPLIANCE: Blocks mounting of root (/) or system paths.
         """
         resolved_root = project_root.resolve()
+        
+        # [CRITICAL] Block mounting root or system paths
+        dangerous_paths = [Path('/'), Path('/etc'), Path('/var'), Path('/usr'), 
+                          Path('/bin'), Path('/sbin'), Path('/boot'), Path('/sys')]
+        for dangerous in dangerous_paths:
+            if resolved_root == dangerous or resolved_root.is_relative_to(dangerous):
+                raise ValueError(
+                    f"SECURITY VIOLATION: Cannot mount system path {resolved_root}. "
+                    f"Mounting root or system directories is forbidden."
+                )
         
         # Define allowed base path (configurable via environment)
         allowed_base = Path(os.environ.get("MCP_ALLOWED_ROOT", Path.home())).resolve()
@@ -477,6 +491,7 @@ class SessionManager:
                 f"Set MCP_ALLOWED_ROOT environment variable to change this."
             )
         
+        logger.info(f"[SECURITY] Validated mount path: {resolved_root}")
         return resolved_root
 
     async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None, agent_id: Optional[str] = None):
@@ -819,7 +834,9 @@ except ImportError:
             
         # Create session dictionary structure
         import time
-        execution_queue = asyncio.Queue()
+        # [SECURITY] Bounded queue prevents DoS from runaway executions  
+        max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '100'))
+        execution_queue = asyncio.Queue(maxsize=max_queue_size)
         session_data = {
             'km': km,
             'kc': kc,
@@ -827,7 +844,7 @@ except ImportError:
             'listener_task': None,
             'executions': {},
             'queued_executions': {},  # Track queued executions before processing
-            'execution_queue': asyncio.Queue(),
+            'execution_queue': asyncio.Queue(maxsize=max_queue_size),
             'executed_indices': set(), # Track which cells have been run in this session
             'execution_counter': 0,
             'max_executed_index': -1,  # [SCIENTIFIC INTEGRITY] Track execution wavefront
@@ -1349,7 +1366,19 @@ except ImportError:
             logger.error(f"Failed to finalize execution: {e}")
 
     async def execute_cell_async(self, nb_path: str, cell_index: int, code: str, exec_id: Optional[str] = None) -> Optional[str]:
-        """Submits execution to the queue and returns an ID immediately."""
+        """
+        Submits execution to the queue and returns an ID immediately.
+        
+        [SECURITY] Implements backpressure: raises RuntimeError if queue is full.
+        This prevents DoS attacks from flooding the server with execution requests.
+        
+        Returns:
+            exec_id (str): Unique execution identifier for tracking status
+            None: If kernel is not running
+            
+        Raises:
+            RuntimeError: If execution queue is full (backpressure)
+        """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
             return None
@@ -1365,18 +1394,40 @@ except ImportError:
         if not exec_id:
             exec_id = str(uuid.uuid4())
         
-        session = self.sessions[abs_path]
+        # [SECURITY] Check if queue is full (backpressure)
+        if session['execution_queue'].full():
+            queue_size = session['execution_queue'].qsize()
+            max_size = session['execution_queue'].maxsize
+            logger.error(
+                f"[BACKPRESSURE] Execution queue full for {nb_path} "
+                f"({queue_size}/{max_size} items). Rejecting execution request."
+            )
+            raise RuntimeError(
+                f"Execution queue is full ({queue_size}/{max_size} pending executions). "
+                "Please wait for current executions to complete before submitting more. "
+                "This prevents server resource exhaustion."
+            )
         
-        # Check if there are queued executions waiting to be processed
-        if session['queued_executions']:
-            return True
+        # Track as queued immediately (fixes race condition with status checks)
+        session['queued_executions'][exec_id] = {
+            'cell_index': cell_index,
+            'code': code,
+            'status': 'queued',
+            'queued_time': asyncio.get_event_loop().time()
+        }
         
-        # Check if there are active executions currently running
-        for msg_id, data in session['executions'].items():
-            if data['status'] in ['busy', 'queued']:
-                return True
+        # Create execution request
+        exec_request = {
+            'cell_index': cell_index,
+            'code': code,
+            'exec_id': exec_id
+        }
         
-        return False
+        # Enqueue the execution
+        await session['execution_queue'].put(exec_request)
+        
+        logger.debug(f"Queued execution {exec_id} for {nb_path} cell {cell_index}")
+        return exec_id
 
     async def get_kernel_info(self, nb_path: str):
         """

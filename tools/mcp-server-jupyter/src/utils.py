@@ -61,10 +61,12 @@ def check_asset_limits(asset_dir: Path, max_size_bytes: int = 1024 * 1024 * 1024
                     total_size -= sz
                 except Exception as e:
                     # Log but don't crash on permission errors, etc.
-                    print(f"[ASSET GC] Failed to delete {f.name}: {e}", file=sys.stderr)
+                    import logging
+                    logging.getLogger(__name__).warning(f"[ASSET GC] Failed to delete {f.name}: {e}")
     except Exception as e:
         # Don't let cleanup crash the main process, but log the issue
-        print(f"[ASSET GC] Error during check: {e}", file=sys.stderr)
+        import logging
+        logging.getLogger(__name__).error(f"[ASSET GC] Error during check: {e}")
 
 
 def compress_traceback(traceback_lines: List[str]) -> List[str]:
@@ -552,9 +554,22 @@ def get_project_root(start_path: Path) -> Path:
     """
     Finds the project root by looking for common markers (.git, pyproject.toml).
     Walks up from start_path.
+    
+    SECURITY: Never returns system root or paths outside user's home directory.
     """
     current = start_path.resolve()
+    home = Path.home().resolve()
+    
     for _ in range(10): # Limit traversing depth
+        # [SECURITY] Stop if we've escaped $HOME (prevents mounting system dirs)
+        if not current.is_relative_to(home):
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[SECURITY] Project root search escaped HOME directory at {current}. "
+                f"Falling back to start_path."
+            )
+            return start_path
+        
         if (current / ".git").exists() or \
            (current / "pyproject.toml").exists() or \
            (current / "requirements.txt").exists() or \
@@ -567,6 +582,7 @@ def get_project_root(start_path: Path) -> Path:
             break
         current = parent
     
-    return start_path # Fallback to start path if no root marker found
+    # Fallback to start path if no root marker found
+    return start_path
 
 
