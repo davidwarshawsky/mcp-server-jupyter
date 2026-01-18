@@ -34,48 +34,36 @@ def check_asset_limits(asset_dir: Path, max_size_bytes: int = 1024 * 1024 * 1024
         asset_dir: Path to assets directory
         max_size_bytes: Maximum directory size (default: 1GB)
     """
+    if not asset_dir.exists():
+        return
+
     try:
-        if not asset_dir.exists():
-            return
-        
-        # Calculate total size
-        files = list(asset_dir.glob('*'))
+        files = list(asset_dir.glob("*"))
         total_size = sum(f.stat().st_size for f in files if f.is_file())
-        
+
         if total_size > max_size_bytes:
             # Target 80% of limit to avoid thrashing
             target_size = int(max_size_bytes * 0.8)
             
             # Sort by modification time (oldest first)
+            # [BUG FIX] Filter out directories to prevent stat() errors
             files_sorted = sorted(
                 [f for f in files if f.is_file()],
                 key=lambda f: f.stat().st_mtime
             )
             
-            deleted_count = 0
-            deleted_bytes = 0
-            
             for f in files_sorted:
                 if total_size <= target_size:
                     break
                 try:
-                    size = f.stat().st_size
+                    sz = f.stat().st_size
                     f.unlink()
-                    total_size -= size
-                    deleted_bytes += size
-                    deleted_count += 1
+                    total_size -= sz
                 except Exception:
                     pass
-            
-            if deleted_count > 0:
-                print(
-                    f"[ASSET GC] Reactive prune: deleted {deleted_count} files "
-                    f"({deleted_bytes / (1024**2):.1f} MB) to free space",
-                    file=sys.stderr
-                )
-                
     except Exception as e:
-        print(f"[ASSET GC] Error during check: {e}", file=sys.stderr)
+        # Don't let cleanup crash the main process
+        pass
 
 
 def compress_traceback(traceback_lines: List[str]) -> List[str]:

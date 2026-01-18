@@ -19,6 +19,7 @@ from src import notebook, utils
 from src.cell_id_manager import get_cell_id_at_index
 from src.observability import get_logger, get_tracer
 from src.utils import check_asset_limits
+from src.kernel_state import KernelStateManager
 
 # Configure logging
 logger = get_logger()
@@ -161,12 +162,9 @@ class SessionManager:
         self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
         
-        # [REAPER FIX] Track file locks for sessions to prevent fratricide
-        self._session_locks = {}
+        # [REFACTOR] Use KernelStateManager
+        self.state_manager = KernelStateManager(self.persistence_dir)
 
-        # [REAPER] Start the background reaper task
-        self._reaper_task = asyncio.create_task(self._reaper_loop())
-        
         # [PHASE 2.3] Start asset cleanup task
         self._asset_cleanup_task = asyncio.create_task(self._asset_cleanup_loop())
         
@@ -261,127 +259,6 @@ class SessionManager:
                 logger.error(f"[ASSET CLEANUP] Unhandled error: {e}")
                 await asyncio.sleep(interval)
     
-    async def _reaper_loop(self, interval: int = 60):
-        """
-        [REAPER] Periodically scans for and cleans up zombie kernels from dead server processes.
-        """
-        logger.info(f"Starting Grim Reaper task (scan interval: {interval}s)")
-        try:
-            import psutil
-        except ImportError:
-            logger.warning("[REAPER] psutil not installed. Zombie process reaping is disabled.")
-            return
-
-        await asyncio.sleep(interval) # Initial delay
-
-        while True:
-            try:
-                current_pid = os.getpid()
-                current_proc = psutil.Process(current_pid)
-                current_create_time = current_proc.create_time()
-
-                # [REAPER FIX] Use file locking to detect dead sessions
-                for lock_file in self.persistence_dir.glob("session_*.lock"):
-                    try:
-                        # Try to acquire the lock
-                        # If successful, the owning process is dead
-                        try:
-                            import fcntl
-                            with open(lock_file, 'r+') as f:
-                                try:
-                                    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                                    # Lock acquired! This means the original process is dead
-                                    is_zombie = True
-                                except IOError:
-                                    # Lock is held by another living process
-                                    is_zombie = False
-                                    continue
-                        except ImportError:
-                            # Windows fallback
-                            try:
-                                import portalocker
-                                with open(lock_file, 'r+') as f:
-                                    try:
-                                        portalocker.lock(f, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                                        is_zombie = True
-                                    except portalocker.LockException:
-                                        is_zombie = False
-                                        continue
-                            except (ImportError, Exception):
-                                # No locking available - skip this lock file
-                                continue
-                        
-                        if is_zombie:
-                            # Find corresponding session JSON file
-                            session_hash = lock_file.stem.replace('session_', '')
-                            session_file = self.persistence_dir / f"session_{session_hash}.json"
-                            
-                            if session_file.exists():
-                                with open(session_file, 'r') as f:
-                                    session_data = json.load(f)
-                                
-                                server_pid = session_data.get('server_pid')
-                                kernel_pid = session_data.get('pid')
-                                saved_create_time = session_data.get('pid_create_time')
-                                kernel_uuid = session_data.get('kernel_uuid')  # [FINAL PUNCH LIST #1]
-                                
-                                logger.warning(f"[REAPER] Found orphan session from dead server PID {server_pid} for kernel PID {kernel_pid}.")
-                                
-                                # [FINAL PUNCH LIST #1] Kill zombie kernel using UUID verification (100% reliable)
-                                if kernel_pid and psutil.pid_exists(kernel_pid):
-                                    try:
-                                        proc = psutil.Process(kernel_pid)
-                                        should_kill = False
-                                        
-                                        # Method 1 (preferred): Check MCP_KERNEL_ID environment variable
-                                        if kernel_uuid:
-                                            try:
-                                                proc_env = proc.environ()
-                                                proc_kernel_id = proc_env.get('MCP_KERNEL_ID')
-                                                if proc_kernel_id == kernel_uuid:
-                                                    should_kill = True
-                                                    logger.info(f"[REAPER] UUID match confirmed: {kernel_uuid[:8]}...")
-                                                else:
-                                                    logger.warning(f"[REAPER] UUID mismatch. PID {kernel_pid} was reused. Not killing.")
-                                            except (psutil.AccessDenied, psutil.NoSuchProcess):
-                                                # Fallback to create_time if we can't read environment
-                                                logger.warning(f"[REAPER] Cannot read environment, falling back to create_time check")
-                                                if saved_create_time and proc.create_time() == saved_create_time:
-                                                    should_kill = True
-                                        else:
-                                            # Legacy fallback: use create_time (less reliable)
-                                            if saved_create_time is None or proc.create_time() == saved_create_time:
-                                                should_kill = True
-                                        
-                                        if should_kill:
-                                            proc_name = proc.name()
-                                            proc.kill()
-                                            logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid} ({proc_name}).")
-                                        
-                                    except psutil.NoSuchProcess:
-                                        pass
-                                    except Exception as e:
-                                        logger.error(f"[REAPER] Error killing zombie kernel {kernel_pid}: {e}")
-                                
-                                # Clean up files
-                                session_file.unlink()
-                                logger.info(f"[REAPER] Cleaned up orphan session file: {session_file.name}")
-                            
-                            # Delete the lock file
-                            lock_file.unlink()
-                            logger.info(f"[REAPER] Cleaned up lock file: {lock_file.name}")
-                    
-                    except Exception as e:
-                        logger.warning(f"[REAPER] Error processing lock file {lock_file.name}: {e}")
-                
-                await asyncio.sleep(interval)
-
-            except asyncio.CancelledError:
-                logger.info("Reaper task cancelled.")
-                break
-            except Exception as e:
-                logger.error(f"[REAPER] Unhandled error in reaper loop: {e}")
-                await asyncio.sleep(interval) # Avoid fast crash loop
     
     async def _health_check_loop(self, nb_path: str):
         """
@@ -430,110 +307,6 @@ class SessionManager:
                 logger.error(f"[HEALTH CHECK] Unhandled error: {e}")
                 await asyncio.sleep(check_interval)
     
-    def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None):
-        """
-        Save session info to disk to prevent zombie kernels after server restart.
-        
-        Stores:
-        - Connection file path (for reconnecting to kernel)
-        - Process ID (for checking if kernel still alive)
-        - Kernel UUID (for 100% reliable reaping, FINAL PUNCH LIST #1)
-        - Environment info (for proper cleanup)
-        """
-        try:
-            # Use notebook path hash as filename to handle special chars
-            import hashlib
-            import psutil
-            path_hash = hashlib.md5(nb_path.encode()).hexdigest()
-            session_file = self.persistence_dir / f"session_{path_hash}.json"
-            
-            current_proc = psutil.Process(os.getpid())
-            
-            # [REAPER FIX] Track kernel process creation time to prevent killing recycled PIDs
-            kernel_create_time = None
-            if pid and isinstance(pid, int):
-                try:
-                    kernel_proc = psutil.Process(pid)
-                    kernel_create_time = kernel_proc.create_time()
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-
-            session_data = {
-                "notebook_path": nb_path,
-                "connection_file": connection_file,
-                "pid": pid if isinstance(pid, int) else None,
-                "pid_create_time": kernel_create_time,  # [REAPER FIX] Track kernel process creation time
-                "kernel_uuid": kernel_uuid,  # [FINAL PUNCH LIST #1] 100% reliable process identification
-                "server_pid": os.getpid(),  # [REAPER FIX] Track which server owns this kernel
-                "server_create_time": current_proc.create_time(), # [REAPER FIX] And its start time
-                "env_info": env_info,
-                "created_at": datetime.datetime.now().isoformat()
-            }
-            
-            with open(session_file, 'w') as f:
-                json.dump(session_data, f, indent=2)
-            
-            # [REAPER FIX] Create and hold a lock file for this session
-            # This lock proves the server process is alive
-            lock_file = self.persistence_dir / f"session_{path_hash}.lock"
-            try:
-                # Try to import fcntl (Unix) or use fallback
-                try:
-                    import fcntl
-                    lock_fd = open(lock_file, 'w')
-                    # Acquire non-blocking exclusive lock
-                    fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    self._session_locks[nb_path] = lock_fd
-                    logger.info(f"Acquired file lock for session {nb_path}")
-                except ImportError:
-                    # Windows fallback - use portalocker if available, or just create the file
-                    try:
-                        import portalocker
-                        lock_fd = open(lock_file, 'w')
-                        portalocker.lock(lock_fd, portalocker.LOCK_EX | portalocker.LOCK_NB)
-                        self._session_locks[nb_path] = lock_fd
-                        logger.info(f"Acquired file lock for session {nb_path} (portalocker)")
-                    except (ImportError, Exception):
-                        # Fallback: just create the lock file without locking
-                        # This provides basic protection but not foolproof
-                        lock_fd = open(lock_file, 'w')
-                        lock_fd.write(str(os.getpid()))
-                        lock_fd.flush()
-                        self._session_locks[nb_path] = lock_fd
-                        logger.warning(f"Created lock file without fcntl/portalocker for {nb_path}")
-            except IOError as e:
-                logger.error(f"Could not acquire lock on session file: {e}")
-            
-            logger.info(f"Persisted session info for {nb_path} (PID: {pid})")
-        except Exception as e:
-            logger.warning(f"Failed to persist session info: {e}")
-    
-    def _remove_persisted_session(self, nb_path: str):
-        """Remove persisted session info when kernel is shut down."""
-        try:
-            import hashlib
-            path_hash = hashlib.md5(nb_path.encode()).hexdigest()
-            session_file = self.persistence_dir / f"session_{path_hash}.json"
-            lock_file = self.persistence_dir / f"session_{path_hash}.lock"
-            
-            if session_file.exists():
-                session_file.unlink()
-                logger.info(f"Removed persisted session for {nb_path}")
-            
-            # [REAPER FIX] Close and remove lock file
-            if nb_path in self._session_locks:
-                try:
-                    self._session_locks[nb_path].close()
-                    del self._session_locks[nb_path]
-                except Exception as e:
-                    logger.warning(f"Error closing lock file: {e}")
-            
-            if lock_file.exists():
-                lock_file.unlink()
-                logger.info(f"Removed lock file for {nb_path}")
-        except Exception as e:
-            logger.warning(f"Failed to remove persisted session: {e}")
-    
     async def restore_persisted_sessions(self):
         """
         Attempt to restore sessions from disk on server startup.
@@ -544,7 +317,7 @@ class SessionManager:
         restored_count = 0
         cleaned_count = 0
         
-        for session_file in self.persistence_dir.glob("session_*.json"):
+        for session_file in self.state_manager.get_persisted_sessions():
             try:
                 with open(session_file, 'r') as f:
                     session_data = json.load(f)
@@ -1100,7 +873,7 @@ except ImportError:
         
         # Persist session info to prevent zombie kernels after server restart
         if pid != "unknown" and connection_file != "unknown":
-            self._persist_session_info(abs_path, connection_file, pid, session_data['env_info'], kernel_uuid)
+            self.state_manager.persist_session(abs_path, connection_file, pid, session_data['env_info'], kernel_uuid)
                  
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
@@ -1889,7 +1662,7 @@ print(_inspect_var())
             try:
                 await session['km'].shutdown_kernel(now=True)
                 # Remove persisted session info
-                self._remove_persisted_session(abs_path)
+                self.state_manager.remove_session(abs_path)
             except Exception as e:
                 logging.error(f"Error shutting down kernel for {abs_path}: {e}")
         self.sessions.clear()
@@ -2058,73 +1831,10 @@ print(_inspect_var())
     async def reconcile_zombies(self):
         """
         [CRUCIBLE] Startup Task: Kill orphan kernels from dead server processes.
-        
-        [REAPER FIX] Only kills kernels whose owning server is dead.
-        This prevents fratricide: Server B won't kill Kernel A if Server A is still alive.
-        
-        Scenario that was broken:
-        1. User opens VS Code Window A → Server A starts, Kernel A (PID 1000)
-        2. User opens VS Code Window B → Server B starts
-        3. Server B runs reconcile_zombies, sees Kernel A (PID 1000)
-        4. OLD BUG: Server B kills Kernel A (fratricide)
-        5. NEW FIX: Server B checks if Server A is alive first
         """
-        try:
-            import psutil
-            import json
-        except Exception:
-            logger.warning("reaper_skipped_no_psutil")
-            return
-
-        logger.info("reaper_start: Scanning for zombie kernels...")
-        current_server_pid = os.getpid()
-
-        for session_file in list(self.persistence_dir.glob("session_*.json")):
-            try:
-                with open(session_file, 'r') as f:
-                    data = json.load(f)
-
-                kernel_pid = data.get('pid')
-                server_pid = data.get('server_pid')  # [REAPER FIX] Check server ownership
-                
-                # Skip if this session belongs to us (we'll manage it ourselves)
-                if server_pid == current_server_pid:
-                    continue
-                
-                # Check if the owning server is still alive
-                if server_pid and psutil.pid_exists(server_pid):
-                    # Server is alive → this is NOT a zombie, it's a living kernel from another window
-                    logger.debug(f"reaper_skip: Kernel PID {kernel_pid} belongs to living server PID {server_pid}")
-                    continue
-                
-                # Server is dead → this kernel is an orphan, kill it
-                if kernel_pid and psutil.pid_exists(kernel_pid):
-                    try:
-                        proc = psutil.Process(kernel_pid)
-                        cmdline = " ".join(proc.cmdline())
-                        # Heuristic checks: ipykernel / jupyter / python
-                        if any(x in cmdline for x in ('ipykernel', 'ipython', 'jupyter', 'python')):
-                            logger.warning(f"reaper_kill: Kernel PID {kernel_pid} (dead server PID {server_pid}) notebook={data.get('notebook_path')}")
-                            proc.terminate()
-                            try:
-                                proc.wait(timeout=2)
-                            except psutil.TimeoutExpired:
-                                proc.kill()
-                    except Exception as e:
-                        logger.warning(f"reaper_proc_check_failed pid={kernel_pid} error={str(e)}")
-
-                # Remove persisted session file (best-effort cleanup)
-                try:
-                    session_file.unlink()
-                except Exception:
-                    pass
-
-            except Exception as e:
-                logger.error(f"reaper_error file={str(session_file)} error={str(e)}")
-                try:
-                    session_file.unlink()
-                except Exception:
-                    pass
+        # Delegated to new KernelStateManager
+        if hasattr(self, 'state_manager'):
+            self.state_manager.reconcile_zombies()
 
 
 # --- Compatibility wrapper for finalizing executions synchronously ---
