@@ -22,14 +22,14 @@ An MCP (Model Context Protocol) server that transforms Jupyter notebooks into a 
 
 - **SQL on DataFrames**: Run DuckDB SQL queries on pandas/polars DataFrames in memory—no syntax gymnastics, just `SELECT * FROM df_sales WHERE revenue > 1000`
 - **Auto-EDA in 60 Seconds**: Say "analyze this dataset" → agent generates missing value maps, distributions, correlation matrices, and summary report with zero setup
-- **Time Travel Debugging**: Agent says "I tried X, it crashed. I restored your state from 2 min ago." Automatic rollback on kernel failures
+- **Kernel Auto-Recovery**: Reaper subsystem detects kernel crashes and restarts in <2s, preserving notebook structure
 - **Agent-Ready Tools**: `inspect_variable` (JSON metadata for DataFrames), `search_notebook` (grep for code), `install_package` (smart pip), output truncation (handles 100MB logs)
 - **Consumer-Ready Prompts**: Type `/prompt jupyter-expert` or `/prompt auto-analyst` for instant persona activation (Claude Desktop)
 
 👉 **See [SUPERPOWERS.md](SUPERPOWERS.md) for detailed examples**
 
 ### 🔒 Production-Ready
-- **Security**: Safe variable inspection (no `eval()`), sandboxed execution via Docker, HMAC-signed checkpoints
+- **Security**: Safe variable inspection (no `eval()`), sandboxed execution via Docker, input validation via Pydantic V2
 - **Robustness**: Automatic kernel recovery (Reaper), execution provenance tracking, clear_output handling, **execution timeouts**
 - **Context-Aware**: Smart HTML table preview (reduces API calls by 50%)
 - **Asset Management**: Automatic extraction of plots/PDFs to disk (98% context reduction)
@@ -302,20 +302,18 @@ query_dataframes("analysis.ipynb", """
 
 **Why users love it**: Saves 30 minutes of boilerplate every project. Zero setup required.
 
-### ⏰ Time Travel Debugging
+### 🔄 Kernel Auto-Recovery (Reaper Subsystem)
 ```python
-# Agent workflow:
-save_checkpoint("analysis.ipynb", "before_model_training")
-
-# Try risky code...
+# Before: Manual recovery from kernel crashes
 train_model(df, epochs=100)  # 💥 Kernel crashes (OOM)
+# User: "Oh no, I lost all my work!"
 
-# Agent detects crash and auto-recovers:
-load_checkpoint("analysis.ipynb", "before_model_training")
-
-# Agent: "Training failed due to memory error. 
-#        I've restored your data from 2 minutes ago.
-#        Trying with smaller batch size instead..."
+# After: Automatic recovery
+train_model(df, epochs=100)  # 💥 Kernel crashes
+# Reaper: Detects failure, restarts kernel in <2s
+# Notebook structure preserved (cell IDs are git-safe)
+# Agent: "Training failed due to memory error.
+#        Kernel has been restarted. Try reducing batch size."
 ```
 
 **Why users love it**: "Unbreakable" feeling. Agent can experiment freely, rollback on failure.
@@ -418,10 +416,8 @@ merge_cells("analysis.ipynb", start_index=1, end_index=3)
 
 ## 📚 Tool Categories
 
-### 🔮 Superpower Tools (3 tools) ⭐ VIRAL FEATURES
+### 🔮 Data Analysis Tools (1 tool) ⭐ VIRAL FEATURE
 - `query_dataframes()` - SQL queries on pandas/polars DataFrames via DuckDB (in-memory, zero-copy)
-- `save_checkpoint()` - Snapshot kernel state for rollback (HMAC-signed, tamper-proof)
-- `load_checkpoint()` - Restore kernel state after crashes (time travel debugging)
 
 ### 🛠️ Agent-Ready Tools (4 tools) ⭐ NEW
 - `inspect_variable()` - JSON metadata for DataFrames/arrays (no crashes from massive print)

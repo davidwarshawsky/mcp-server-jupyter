@@ -9,7 +9,7 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![VS Code Extension](https://img.shields.io/visual-studio-marketplace/v/yourpublisher.mcp-agent-kernel)](https://marketplace.visualstudio.com/items?itemName=yourpublisher.mcp-agent-kernel)
 
-**Production-grade Jupyter with Superpowers: SQL queries on DataFrames, Auto-EDA, Time Travel, and AI Agent tools**
+**Production-grade Jupyter with Superpowers: SQL queries on DataFrames, Auto-EDA, Git-Safe Workflows, and AI Agent tools**
 
 [**📖 Documentation**](https://yourusername.github.io/mcp-jupyter-server) | [**🚀 Quick Start**](#quick-start) | [**✨ Superpowers**](#superpowers) | [**🔥 Try in Codespaces**](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
 
@@ -103,15 +103,15 @@ query_dataframes("SELECT city, AVG(income) FROM df WHERE age > 25 GROUP BY city 
 
 **Why**: Eliminates 30 minutes of matplotlib/seaborn boilerplate.
 
-### ⏱️ Time Travel: Rollback Kernel State on Crashes
+### 🔄 Git-Safe Workflows: Stable Cell IDs for Version Control
 
 ```python
-save_checkpoint("before_risky_merge")
-df = df.merge(other_df, on='id')  # Oops, crashes kernel
-load_checkpoint("before_risky_merge")  # Instant rollback
+# Cell IDs persist across sessions (nbformat 4.5)
+get_notebook_outline("analysis.ipynb")  # Returns stable IDs
+edit_cell(id="abc-123", content="...")  # Works after git pull
 ```
 
-**Why**: Kernel crashes don't lose work. HMAC-signed for tamper protection.
+**Why**: Reliable notebook addressing survives server restarts and git operations. Enables team collaboration without merge conflicts.
 
 ---
 
@@ -123,7 +123,7 @@ load_checkpoint("before_risky_merge")  # Instant rollback
 | **100MB Outputs** | ❌ Browser crash | ⚠️ Slow render | ✅ | ✅ **Asset offloading** |
 | **SQL on DataFrames** | ❌ | ❌ | ❌ | ✅ **DuckDB (zero-copy)** |
 | **Auto-EDA** | ❌ 30min manual | ❌ 30min manual | ❌ | ✅ **60-second AI** |
-| **State Rollback** | ❌ | ❌ | ❌ | ✅ **Time Travel** |
+| **Git-Safe Cell IDs** | ❌ | ❌ | ❌ | ✅ **nbformat 4.5** |
 | **Agent Tools** | ⚠️ 5-10 basic | ⚠️ 5-10 basic | ⚠️ 10-15 | ✅ **32 specialized** |
 | **Consumer Prompts** | ❌ | ❌ | ❌ | ✅ **3 pre-built personas** |
 | **Offline Install** | ✅ | ✅ | ❌ Requires cloud | ✅ **Fat VSIX (26MB)** |
@@ -187,7 +187,7 @@ graph TB
     G[Asset Offloading] -->|>100MB outputs| H[Disk Storage]
     
     I[DuckDB SQL] --> E
-    J[Time Travel] --> K[Git Tools]
+    J[Git-Safe IDs] --> K[Cell Addressing]
     
     style F fill:#f96,stroke:#333,stroke-width:2px
     style G fill:#f96,stroke:#333,stroke-width:2px
@@ -214,14 +214,11 @@ graph TB
 # Load 50M row dataset
 df = pd.read_parquet("huge_dataset.parquet")  # Takes 5 minutes
 
-# Save state BEFORE risky operation
-save_checkpoint("loaded_data")
-
-# Try complex analysis (might crash kernel)
+# Try complex analysis (with auto-recovery)
 result = df.merge(other_df).groupby(...).apply(custom_func)
 
-# If crash → instant rollback
-load_checkpoint("loaded_data")  # Back in 2 seconds
+# If kernel crashes → Reaper restarts automatically in <2s
+# Notebook state preserved via atomic writes + git-safe Cell IDs
 ```
 
 ### LLM Agent Development

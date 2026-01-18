@@ -97,7 +97,7 @@ The system is divided into **Two Realms** that communicate via MCP (Model Contex
 
 2. **State is Local to the Kernel**:
    - The kernel's heap is the only source of truth for variable state.
-   - Checkpoints snapshot this state; they don't replace it.
+   - Reaper subsystem automatically recovers crashed kernels, preserving notebook structure.
 
 3. **Edits are Proposals, Not Writes**:
    - `propose_edit()` returns JSON; it does NOT write to `notebook.ipynb`.
@@ -108,7 +108,7 @@ The system is divided into **Two Realms** that communicate via MCP (Model Contex
    - Never rely on disk state for cell indices.
 
 5. **Errors are Diagnostic, Not Opaque**:
-   - When checkpoints fail, report *which variable* failed (not just "Error").
+   - When kernel operations fail, report *which operation* failed with context.
    - When sync is needed, explain *why* (cells without metadata, file modified, etc.).
 
 ---
@@ -196,10 +196,10 @@ SessionManager
   - Routes outputs to execution data
   - Updates execution status
 
-- `save_checkpoint(nb_path, name)`:
-  - Injects dill dump code into kernel
-  - Includes granular error diagnosis
-  - Saves to `.mcp/{name}.pkl`
+- `execute_cell_async(nb_path, cell_index, code_override)`:
+  - Executes code in kernel with buffer override support
+  - Streams outputs via polling (no SSE)
+  - Persists cell IDs atomically for git-safe workflows
 
 **Testing Patterns**:
 ```python
@@ -411,58 +411,52 @@ it('should inject env_info into start_kernel call', async () => {
 });
 ```
 
-### Feature Type 3: New Checkpoint Variant
+### Feature Type 3: New Kernel Inspection Tool
 
-**Example**: Add `save_checkpoint_selective(notebook_path, variables)` to save only specific variables.
+**Example**: Add `get_memory_usage(notebook_path)` to report kernel memory consumption.
 
 **Steps**:
 
 1. **Add to `session.py`**:
 ```python
-async def save_checkpoint_selective(self, notebook_path: str, variables: List[str], name: str = "selective"):
-    """Save only specified variables to checkpoint."""
+async def get_memory_usage(self, notebook_path: str) -> Dict[str, Any]:
+    """Get memory usage of kernel variables."""
     session = self.sessions.get(str(Path(notebook_path).resolve()))
     if not session:
-        return "No session"
+        return {"error": "No session"}
     
-    var_list = json.dumps(variables)
-    code = f"""
-import dill
-import os
-ckpt_path = r'{ckpt_path}'
-os.makedirs(os.path.dirname(ckpt_path), exist_ok=True)
-vars_to_save = {var_list}
-state = {{k: v for k, v in globals().items() if k in vars_to_save}}
-with open(ckpt_path, 'wb') as f:
-    dill.dump(state, f)
-print(f"Saved {{len(state)}} variables")
+    code = """
+import sys
+import gc
+gc.collect()
+vars_memory = {k: sys.getsizeof(v) for k, v in globals().items() if not k.startswith('_')}
+total_mb = sum(vars_memory.values()) / (1024**2)
+print(f"Total memory: {total_mb:.2f} MB")
+print(f"Top variables: {sorted(vars_memory.items(), key=lambda x: -x[1])[:5]}")
 """
-    await self.execute_cell_async(notebook_path, -1, code)
-    return f"Selective checkpoint saved"
+    result = await self.execute_cell_async(notebook_path, -1, code)
+    return result
 ```
 
 2. **Add to `main.py`**:
 ```python
 @mcp.tool()
-async def save_checkpoint_selective(notebook_path: str, variables: List[str], name: str = "selective"):
-    """Save only specified variables to checkpoint."""
-    return await session_manager.save_checkpoint_selective(notebook_path, variables, name)
+async def get_memory_usage(notebook_path: str):
+    """Get memory usage of kernel variables."""
+    return await session_manager.get_memory_usage(notebook_path)
 ```
 
 3. **Add tests**:
 ```python
 @pytest.mark.asyncio
-async def test_save_checkpoint_selective():
-    # Set up kernel state
-    await session.execute_cell_async(path, 0, "x = 1; y = 2; z = 3")
+async def test_get_memory_usage():
+    # Set up kernel state with large data
+    await session.execute_cell_async(path, 0, "import numpy as np; x = np.zeros((1000, 1000))")
     
-    # Save only x and y
-    result = await session.save_checkpoint_selective(path, ["x", "y"], "selective")
-    assert "2 variables" in result
-    
-    # Verify checkpoint file exists
-    ckpt_path = Path(path).parent / ".mcp" / "selective.pkl"
-    assert ckpt_path.exists()
+    # Get memory usage
+    result = await session.get_memory_usage(path)
+    assert "Total memory" in result["output"]
+    assert "x" in result["output"]  # Should show x as top variable
 ```
 
 ---
@@ -595,18 +589,16 @@ dill.dump_session(f)
 # RIGHT: Diagnoses the problem
 code = """
 try:
-    import dill
-    dill.dump_session(f)
-except ImportError:
-    print("ERROR: dill not installed. Run: pip install dill")
+    import pandas as pd
+    result = df.merge(other_df)
+    print(f"Merged {len(result)} rows")
+except NameError as e:
+    print(f"ERROR: Variable not defined: {e}")
+    print(f"Available variables: {[k for k in dir() if not k.startswith('_')]}")
 except Exception as e:
-    print(f"CHECKPOINT FAILED: {e}")
-    # Try to diagnose which variable is unpicklable
-    for k, v in list(globals().items()):
-        try:
-            dill.dumps(v)
-        except:
-            print(f"  Unpicklable: {k} ({type(v).__name__})")
+    print(f"EXECUTION FAILED: {e}")
+    import traceback
+    traceback.print_exc()
 """
 await session.execute_cell_async(path, -1, code)
 ```
@@ -656,7 +648,7 @@ private handleStdout(data: Buffer) {
 |-------|---------|-----------|-----|
 | Agent executes wrong cell | Agent runs Cell 0 but it's actually Cell 1 | Structure not injected | Check `mcpClient.ts` interception in `callTool` |
 | Edit doesn't appear | `propose_edit` tool returns OK but code doesn't change | Client not intercepting `_mcp_action` | Check `handleResponse` in `mcpClient.ts` |
-| Checkpoint fails silently | `save_checkpoint` runs but variable state isn't saved | Unpicklable object in globals | Run checkpoint diagnostic code in kernel |
+| Cell execution hangs | `execute_cell` never returns | Kernel deadlock or infinite loop | Check kernel logs: `~/.jupyter/jupyter_kernel_*.log`, Reaper will auto-restart after timeout |
 | Kernel exits unexpectedly | Execution stops, kernel process gone | Process crash or OOM | Check kernel logs: `~/.jupyter/jupyter_kernel_*.log` |
 | Polling lags | Outputs appear slowly | Polling interval too long | Reduce `pollingInterval` in config |
 
@@ -702,11 +694,12 @@ elapsed = time.time() - start
 print(f"Polling latency: {elapsed*1000:.1f}ms")
 ```
 
-### 2. Checkpoint Size
+### 2. Large Output Handling
 
-**Problem**: Large checkpoints are slow to save/restore.  
+**Problem**: Large outputs (>100MB) cause memory pressure.  
 **Solution**:
-- Use `save_checkpoint_selective()` to save only needed variables
+- Outputs >10MB are automatically offloaded to `/assets` directory
+- Truncation applied at 100MB
 - Delete unused dataframes: `del df_old`
 - Profile with: `import sys; sys.getsizeof(my_var)`
 
@@ -726,7 +719,7 @@ print(f"Polling latency: {elapsed*1000:.1f}ms")
 - [ ] **No Disk Reads During Execution**: Code comes from buffer, not disk
 - [ ] **No `eval()` or `exec()` on User Input**: Use `code_override` only for buffer content
 - [ ] **Safe Variable Inspection**: `inspect_variable` avoids `str(obj)` on unknown types
-- [ ] **Checkpoint Source Validation**: Only load `.pkl` from trusted locations
+- [ ] **Path Traversal Protection**: Validate `MCP_ALLOWED_ROOT` restrictions
 - [ ] **Error Messages are Safe**: Don't leak secrets in tracebacks
 - [ ] **Test with Malicious Input**: Try SQLi, path traversal, etc.
 
@@ -757,9 +750,9 @@ b = Bomb()
 Follow [Conventional Commits](https://www.conventionalcommits.org/):
 
 ```
-feat(session): add save_checkpoint_selective tool
-- Allows agents to save only specific variables
-- Includes granular error reporting
+feat(session): add get_memory_usage tool
+- Allows agents to inspect kernel memory consumption
+- Includes variable-level breakdown
 - Fixes #42
 
 fix(mcpClient): correct structure_override injection logic
@@ -768,7 +761,7 @@ fix(mcpClient): correct structure_override injection logic
 
 test(notebook_ops): increase coverage to 95%
 
-docs(README): add checkpoint troubleshooting section
+docs(README): add kernel recovery troubleshooting section
 ```
 
 ---
