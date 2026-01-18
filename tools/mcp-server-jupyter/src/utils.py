@@ -252,8 +252,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
         'image/jpeg': (1, 'jpeg', True),
     }
 
-    # [SECRET REDACTION] Regex to catch common API keys
-    # Catches sk-..., AWS, Google keys.
+    # [SECRET REDACTION] Regex patterns (kept for backward compatibility)
+    # Phase 3.3: Enhanced with entropy-based detection
     SECRET_PATTERNS = [
         r'sk-[a-zA-Z0-9]{20,}',  # OpenAI looking keys
         r'AKIA[0-9A-Z]{16}',     # AWS Access Key
@@ -261,8 +261,24 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
     ]
 
     def _redact_text(text: str) -> str:
+        """
+        Redact secrets using both regex patterns and entropy-based detection.
+        
+        Phase 3.3: Enhanced with Shannon entropy analysis to catch untagged secrets.
+        Falls back to regex-only if entropy scanner fails.
+        """
+        # Step 1: Legacy regex-based redaction (fast path)
         for pattern in SECRET_PATTERNS:
             text = re.sub(pattern, '[REDACTED_SECRET]', text)
+        
+        # Step 2: Entropy-based detection (Phase 3.3)
+        try:
+            from .secret_scanner import redact_secrets
+            text = redact_secrets(text, min_confidence=0.6)
+        except Exception as e:
+            # Fallback to regex-only if entropy scanner fails
+            logger.warning(f"Entropy scanner failed, using regex-only: {e}")
+        
         return text
     
     def _make_preview(text: str, max_lines: int) -> str:

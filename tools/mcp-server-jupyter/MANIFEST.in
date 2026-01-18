@@ -3,6 +3,9 @@ include README.md
 include LICENSE
 include CONTRIBUTING.md
 
+# Include critical source modules for kernel injection
+include src/kernel_startup.py
+
 # Include prompt files for agent personas
 recursive-include src/prompts *.md
 

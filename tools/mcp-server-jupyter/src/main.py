@@ -42,7 +42,15 @@ import websockets
 import mcp.types as types
 
 # Pydantic models and decorator for strict validation
-from src.models import StartKernelArgs, RunCellArgs
+from src.models import (
+    StartKernelArgs, RunCellArgs, StopKernelArgs, InterruptKernelArgs,
+    RestartKernelArgs, GetKernelInfoArgs, RunAllCellsArgs, CancelExecutionArgs,
+    InstallPackageArgs, ListKernelPackagesArgs, GetVariableInfoArgs,
+    ListVariablesArgs, InspectVariableArgs, GetVariableManifestArgs,
+    CheckWorkingDirectoryArgs, SetWorkingDirectoryArgs, DetectSyncNeededArgs,
+    SyncStateFromDiskArgs, SubmitInputArgs, QueryDataframesArgs,
+    SaveCheckpointArgs, LoadCheckpointArgs, SwitchKernelEnvironmentArgs
+)
 from src.validation import validated_tool
 
 # Initialize structured logging via structlog (observability)
@@ -378,6 +386,7 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
         )
 
 @mcp.tool()
+@validated_tool(StopKernelArgs)
 async def stop_kernel(notebook_path: str):
     """
     Kill the process to free RAM and clean up assets.
@@ -419,6 +428,7 @@ def list_kernels():
     return json.dumps(result, indent=2)
 
 @mcp.tool()
+@validated_tool(DetectSyncNeededArgs)
 async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[int, str]] = None):
     """
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk or VS Code buffer.
@@ -666,6 +676,7 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     return notebook.search_notebook(notebook_path, query, regex)
 
 @mcp.tool()
+@validated_tool(SubmitInputArgs)
 async def submit_input(notebook_path: str, text: str):
     """
     [Interact] Submit text to a pending input() request.
@@ -678,6 +689,7 @@ async def submit_input(notebook_path: str, text: str):
         return json.dumps({"status": "error", "message": str(e)})
 
 @mcp.tool()
+@validated_tool(GetKernelInfoArgs)
 async def get_kernel_info(notebook_path: str):
     """
     Check active variables without printing them.
@@ -866,6 +878,7 @@ def check_kernel_resources(notebook_path: str):
     return json.dumps(result, indent=2)
 
 @mcp.tool()
+@validated_tool(RunAllCellsArgs)
 async def run_all_cells(notebook_path: str):
     """
     Execute all code cells in the notebook sequentially.
@@ -913,6 +926,7 @@ async def run_all_cells(notebook_path: str):
     }, indent=2)
 
 @mcp.tool()
+@validated_tool(SyncStateFromDiskArgs)
 async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     """
     [HANDOFF PROTOCOL] Synchronize kernel state with disk after human intervention.
@@ -1125,6 +1139,7 @@ async def get_version():
     })
 
 @mcp.tool()
+@validated_tool(CancelExecutionArgs)
 async def cancel_execution(notebook_path: str, task_id: str):
     """
     Interrupts the kernel to stop the running task.
@@ -1134,6 +1149,7 @@ async def cancel_execution(notebook_path: str, task_id: str):
     return await session_manager.cancel_execution(notebook_path, task_id)
 
 @mcp.tool()
+@validated_tool(GetVariableInfoArgs)
 async def get_variable_info(notebook_path: str, var_name: str):
     """
     Inspect a specific variable in the kernel without dumping all globals.
@@ -1143,6 +1159,7 @@ async def get_variable_info(notebook_path: str, var_name: str):
     return await session_manager.get_variable_info(notebook_path, var_name)
 
 @mcp.tool()
+@validated_tool(ListVariablesArgs)
 async def list_variables(notebook_path: str):
     """
     List all variables in the kernel (names and types only, no values).
@@ -1162,6 +1179,7 @@ print(json.dumps(result))
     return await session_manager.run_simple_code(notebook_path, code)
 
 @mcp.tool()
+@validated_tool(GetVariableManifestArgs)
 async def get_variable_manifest(notebook_path: str):
     """
     [VARIABLE DASHBOARD] Lightweight manifest of all kernel variables.
@@ -1238,6 +1256,7 @@ print(json.dumps(manifest))
     return await session_manager.run_simple_code(notebook_path, code)
 
 @mcp.tool()
+@validated_tool(InspectVariableArgs)
 async def inspect_variable(notebook_path: str, variable_name: str):
     """
     Surgical Inspection: Returns a human-readable markdown summary of a variable.
@@ -1404,22 +1423,26 @@ def read_asset(
 # -----------------------
 
 @mcp.tool()
+@validated_tool(InterruptKernelArgs)
 async def interrupt_kernel(notebook_path: str):
     """Stops the currently running cell immediately."""
     return await session_manager.interrupt_kernel(notebook_path)
 
 @mcp.tool()
+@validated_tool(RestartKernelArgs)
 async def restart_kernel(notebook_path: str):
     """Restarts the kernel, clearing all variables but keeping outputs."""
     return await session_manager.restart_kernel(notebook_path)
 
 @mcp.tool()
+@validated_tool(CheckWorkingDirectoryArgs)
 async def check_working_directory(notebook_path: str):
     """Checks the current working directory (CWD) of the active kernel."""
     code = "import os; print(os.getcwd())"
     return await session_manager.run_simple_code(notebook_path, code)
 
 @mcp.tool()
+@validated_tool(SetWorkingDirectoryArgs)
 async def set_working_directory(notebook_path: str, path: str):
     """Changes the CWD of the kernel."""
     # Escape backslashes for Windows
@@ -1431,6 +1454,7 @@ async def set_working_directory(notebook_path: str, path: str):
     return f"Working directory changed to: {result}"
 
 @mcp.tool()
+@validated_tool(ListKernelPackagesArgs)
 async def list_kernel_packages(notebook_path: str):
     """Lists packages installed in the active kernel's environment."""
     # We run this inside python to avoid OS shell syntax differences
@@ -1449,6 +1473,7 @@ def list_available_environments():
     return json.dumps(envs, indent=2)
 
 @mcp.tool()
+@validated_tool(SwitchKernelEnvironmentArgs)
 async def switch_kernel_environment(notebook_path: str, venv_path: str):
     """
     Stops the current kernel and restarts it using the specified environment path.
@@ -1973,6 +1998,7 @@ def get_assets_summary(notebook_path: str):
     return json.dumps(result, indent=2)
 
 @mcp.tool()
+@validated_tool(InspectVariableArgs)
 async def inspect_variable(notebook_path: str, variable_name: str):
     """
     [DATA SCIENCE] Inspect a variable in the kernel without printing it.
@@ -2194,6 +2220,7 @@ def search_notebook(notebook_path: str, pattern: str, case_sensitive: bool = Fal
         ).to_json()
 
 @mcp.tool()
+@validated_tool(InstallPackageArgs)
 async def install_package(notebook_path: str, package: str):
     """
     [ENVIRONMENT] Install a Python package in the kernel's environment.
@@ -2302,6 +2329,7 @@ print("RETURNCODE:", result.returncode)
 # --- SUPERPOWER TOOLS: SQL Queries, Auto-EDA, Time Travel ---
 
 @mcp.tool()
+@validated_tool(QueryDataframesArgs)
 async def query_dataframes(notebook_path: str, sql_query: str):
     """
     [SUPERPOWER] Run SQL directly on active DataFrames using DuckDB.
@@ -2328,6 +2356,7 @@ async def query_dataframes(notebook_path: str, sql_query: str):
     return await _query_df(session_manager, notebook_path, sql_query)
 
 @mcp.tool()
+@validated_tool(SaveCheckpointArgs)
 async def save_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
     """
     [TIME TRAVEL] Save current kernel state for rollback.
@@ -2362,6 +2391,7 @@ async def save_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
     return json.dumps(result, indent=2)
 
 @mcp.tool()
+@validated_tool(LoadCheckpointArgs)
 async def load_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
     """
     [TIME TRAVEL] Restore kernel state from checkpoint.
