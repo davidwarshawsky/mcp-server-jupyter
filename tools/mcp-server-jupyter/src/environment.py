@@ -462,19 +462,29 @@ def create_venv(path: str, python_executable: str = None) -> Dict[str, Any]:
             'error': str(e)
         }
 
-# [SECURITY] Package Allowlist for Healthcare Organizations
-# Restrict to vetted, audited packages to prevent supply chain attacks
+# [SECURITY] Package Allowlist for Enterprise Organizations
+# Prevents arbitrary code execution via malicious package installation.
+# Organizations can override via MCP_PACKAGE_ALLOWLIST environment variable.
+# To disable allowlist (NOT RECOMMENDED), set MCP_PACKAGE_ALLOWLIST="*"
 PACKAGE_ALLOWLIST = {
-    # Data Science
-    'pandas', 'numpy', 'scipy', 'scikit-learn',
-    'matplotlib', 'seaborn', 'plotly', 'polars',
+    # Data Science Core
+    'numpy', 'pandas', 'scipy', 'scikit-learn', 'statsmodels',
+    'matplotlib', 'seaborn', 'plotly', 'polars', 'dask',
     
-    # ML/DL
-    'torch', 'tensorflow', 'keras', 'xgboost', 'lightgbm',
+    # ML/DL Frameworks
+    'torch', 'tensorflow', 'keras', 'xgboost', 'lightgbm', 'catboost',
+    'jax', 'jaxlib', 'transformers', 'accelerate',
     
-    # Utilities
+    # Data Processing & Storage
     'requests', 'beautifulsoup4', 'sqlalchemy', 'duckdb',
-    'openpyxl', 'pyarrow', 'pillow', 'jupyter',
+    'openpyxl', 'pyarrow', 'pillow', 'jupyter', 'jupyterlab',
+    'lxml', 'html5lib', 'urllib3', 'httpx',
+    
+    # Visualization
+    'bokeh', 'altair', 'holoviews', 'hvplot', 'ipywidgets',
+    
+    # Development Tools  
+    'pytest', 'ipython', 'black', 'mypy', 'pylint', 'flake8',
 }
 
 def install_package(package_name: str, python_path: str = None, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
@@ -498,12 +508,17 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     # [SECURITY] Extract base package name (remove version specifiers)
     base_package = package_name.split('==')[0].split('>=')[0].split('<=')[0].split('>')[0].split('<')[0].split('[')[0].strip()
     
-    # Check allowlist
-    allowlist = os.environ.get('MCP_PACKAGE_ALLOWLIST', ','.join(PACKAGE_ALLOWLIST))
-    allowed_packages = set(p.strip().lower() for p in allowlist.split(','))
+    # Check allowlist (can be disabled with MCP_PACKAGE_ALLOWLIST="*")
+    allowlist_str = os.environ.get('MCP_PACKAGE_ALLOWLIST', ','.join(PACKAGE_ALLOWLIST))
     
-    if base_package.lower() not in allowed_packages:
-        return False, f"Package '{base_package}' is not in the allowlist. Contact IT to add it."
+    # Allow wildcard to disable allowlist (enterprise environments may have other controls)
+    if allowlist_str.strip() == '*':
+        # Allowlist disabled - install any package
+        pass
+    else:
+        allowed_packages = set(p.strip().lower() for p in allowlist_str.split(','))
+        if base_package.lower() not in allowed_packages:
+            return False, f"Package '{base_package}' is not in the allowlist. Contact IT to add it or set MCP_PACKAGE_ALLOWLIST=* to disable."
     
     # Use provided env vars or current environment
     run_env = env_vars if env_vars else os.environ.copy()

@@ -48,19 +48,17 @@ async def query_dataframes(session_manager: SessionManager, notebook_path: str, 
     code = f'''
 import sys
 import base64
-import duckdb
 
-# [STEP 1] Ensure DuckDB is available (already handled by your logic, but good practice)
 try:
     import duckdb
 except ImportError:
-    # This part of your code is fine, but we'll simplify for the example
-    print("ERROR: duckdb not found. Please install it.", file=sys.stderr)
-    sys.exit(1)
+    import subprocess
+    print("Installing duckdb...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "duckdb"])
+    import duckdb
 
-# [STEP 2] Decode and Execute SQL query
+# Decode the query from Base64 (prevents SQL injection via string breakout)
 try:
-    # Decode the query from Base64
     decoded_query = base64.b64decode("{encoded_query}").decode()
     
     # DuckDB can query pandas DataFrames in the current scope
