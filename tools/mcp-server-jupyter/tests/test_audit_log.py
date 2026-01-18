@@ -126,6 +126,78 @@ class TestAuditLogger:
                         if "Log volume exceeded" in str(c) or "Sampling" in str(c)]
         assert len(warning_calls) > 0, f"Expected volume warning, got calls: {mock_logger.warning.call_args_list}"
     
+    @patch('src.audit_log.logger')
+    def test_error_logs_never_dropped(self, mock_logger):
+        """[IIRB P0 FIX #2] Test that error logs are NEVER dropped, even when over volume limit."""
+        # Small limit for testing
+        logger = AuditLogger(log_volume_limit_mb=0.001)  # 1KB
+        
+        # Exceed the volume limit with success logs
+        for i in range(100):
+            logger.log_tool_execution(
+                tool="test_tool",
+                status="success",
+                duration_ms=1.0,
+                metadata={"data": "x" * 100}
+            )
+        
+        # Now we're over limit. Count initial error calls
+        initial_error_count = len([c for c in mock_logger.error.call_args_list if "AUDIT:" in str(c)])
+        
+        # Log error events - these should NEVER be dropped
+        for i in range(10):
+            logger.log_tool_execution(
+                tool="critical_tool",
+                status="error",
+                duration_ms=1.0,
+                metadata={"error": f"Critical error {i}"}
+            )
+        
+        # All 10 error logs should be present
+        error_calls = [c for c in mock_logger.error.call_args_list if "AUDIT:" in str(c)]
+        new_error_count = len(error_calls) - initial_error_count
+        
+        assert new_error_count == 10, (
+            f"Expected all 10 error logs to be written, but got {new_error_count}. "
+            f"Error logs must NEVER be dropped for compliance."
+        )
+        
+        # Verify the error logs contain expected data
+        for i in range(10):
+            error_log = error_calls[initial_error_count + i][0][0]
+            assert f"Critical error {i}" in error_log or "critical_tool" in error_log
+    
+    @patch('src.audit_log.logger')
+    def test_kernel_error_events_never_dropped(self, mock_logger):
+        """[IIRB P0 FIX #2] Test that kernel error events are NEVER dropped."""
+        logger = AuditLogger(log_volume_limit_mb=0.001)  # 1KB
+        
+        # Exceed limit with success logs
+        for i in range(100):
+            logger.log_kernel_event(
+                event_type="heartbeat",
+                kernel_id="kernel-1",
+                status="success"
+            )
+        
+        initial_error_count = len([c for c in mock_logger.error.call_args_list if "AUDIT:" in str(c)])
+        
+        # Log error events - should never be dropped
+        for i in range(5):
+            logger.log_kernel_event(
+                event_type="crash",
+                kernel_id="kernel-1",
+                status="error",
+                metadata={"crash_reason": f"OOM {i}"}
+            )
+        
+        error_calls = [c for c in mock_logger.error.call_args_list if "AUDIT:" in str(c)]
+        new_error_count = len(error_calls) - initial_error_count
+        
+        assert new_error_count == 5, (
+            f"Expected all 5 kernel error events to be logged, got {new_error_count}"
+        )
+    
     def test_volume_counter_resets_hourly(self):
         """Test that volume counter resets after an hour."""
         logger = AuditLogger()

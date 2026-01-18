@@ -19,6 +19,7 @@ export class McpClient {
   private isStarting = false;
   private isShuttingDown = false;
   private sessionToken: string | null = null; // Add this line
+  private parsedHost: string | null = null; // [IIRB P0 FIX #4]
   private _onNotification = new vscode.EventEmitter<{ method: string, params: any }>();
   public readonly onNotification = this._onNotification.event;
   private _onConnectionStateChange = new vscode.EventEmitter<'connected' | 'disconnected' | 'connecting'>();
@@ -136,6 +137,13 @@ export class McpClient {
                     resolve(p);
                 }
 
+                // [IIRB P0 FIX #4] Look for host (for remote dev environments)
+                const hostMatch = txt.match(/\[MCP_HOST\]:\s*([\w\.\-]+)/);
+                if (hostMatch) {
+                    this.parsedHost = hostMatch[1].trim();
+                    this.outputChannel.appendLine(`Detected server host: ${this.parsedHost}`);
+                }
+
                 // Look for auth token via environment variable
                 const tokenMatch = txt.match(/\[MCP_SESSION_TOKEN\]:\s*(.*)/);
                 if (tokenMatch) {
@@ -169,7 +177,16 @@ export class McpClient {
 
         // Wait for server to report its bound port, then connect
         const assignedPort = await portPromise;
-        wsUrl = `ws://127.0.0.1:${assignedPort}/ws`;
+        // [IIRB P0 FIX #4] Parse host from server logs instead of hardcoding 127.0.0.1
+        // OLD BEHAVIOR: Hardcoded 127.0.0.1 fails in:
+        // - GitHub Codespaces (bridged network)
+        // - Remote SSH (forwarded ports)
+        // - Docker containers (bridge mode)
+        //
+        // NEW BEHAVIOR: Parse host from [MCP_HOST]: ... log output
+        // Falls back to 127.0.0.1 if not found (local dev)
+        const parsedHost = this.parsedHost || '127.0.0.1';
+        wsUrl = `ws://${parsedHost}:${assignedPort}/ws`;
 
         // Connect WebSocket with retry (wait for spawn)
         await this.connectWebSocket(wsUrl);

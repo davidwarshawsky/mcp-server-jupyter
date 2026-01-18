@@ -53,7 +53,7 @@ df = pd.DataFrame({'id': [1, 2, 3], 'value': [10, 20, 30]})
     # 1. System command should not execute
     assert not Path("/tmp/hacked.txt").exists(), "CRITICAL: Code injection executed!"
     
-    # 2. Query should fail with DuckDB syntax error (because """ is sanitized)
+    # 2. Query should fail with DuckDB syntax error (because triple-quotes are sanitized)
     assert not result.get('success', True), "Query should fail"
     assert 'error' in result_json.lower() or 'failed' in result_json.lower()
     

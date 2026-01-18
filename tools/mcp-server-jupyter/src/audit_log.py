@@ -126,9 +126,15 @@ class AuditLogger:
         log_json = json.dumps(event)
         log_size = len(log_json.encode('utf-8'))
         
-        # Check volume limit (may drop log if over limit)
-        if not self._check_volume_limit(log_size):
-            return  # Log dropped due to volume limit
+        # [IIRB P0 FIX #2] NEVER drop error logs (compliance requirement)
+        # Check volume limit only for success logs
+        is_error = status in ["error", "timeout"]
+        if not is_error and not self._check_volume_limit(log_size):
+            return  # Log dropped due to volume limit (success logs only)
+        
+        # Always count error logs toward volume limit (but never drop them)
+        if is_error:
+            self.bytes_logged += log_size
         
         # Log with appropriate level
         if status == "error":
@@ -171,9 +177,14 @@ class AuditLogger:
         log_json = json.dumps(event)
         log_size = len(log_json.encode('utf-8'))
         
-        # Check volume limit (may drop log if over limit)
-        if not self._check_volume_limit(log_size):
-            return  # Log dropped due to volume limit
+        # [IIRB P0 FIX #2] NEVER drop error logs (compliance requirement)
+        is_error = status == "error"
+        if not is_error and not self._check_volume_limit(log_size):
+            return  # Log dropped due to volume limit (success logs only)
+        
+        # Always count error logs toward volume limit (but never drop them)
+        if is_error:
+            self.bytes_logged += log_size
         
         if status == "error":
             logger.error(f"AUDIT: {log_json}")

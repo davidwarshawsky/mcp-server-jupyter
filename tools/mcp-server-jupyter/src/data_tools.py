@@ -75,10 +75,26 @@ try:
     # Disable filesystem access and external extensions
     con.execute("SET enable_external_access=false;")
     con.execute("SET lock_configuration=true;")
-    # Register all available DataFrames
-    for var_name, var_obj in list(globals().items()):
-        if 'DataFrame' in type(var_obj).__name__:
-            con.register(var_name, var_obj)
+    # [IIRB P0 FIX #5] REMOVED: Auto-registration of all DataFrames
+    # OLD BEHAVIOR: Auto-registered ALL DataFrames in globals(), including:
+    # - df_public (intended for query)
+    # - df_confidential_salaries (private, not intended for query)
+    # - Any other DataFrames in kernel namespace
+    #
+    # SECURITY RISK: Violates Principle of Least Privilege
+    # - Agent could access sensitive data via prompt injection
+    # - Example: "JOIN df_public WITH df_confidential_salaries"
+    #
+    # NEW BEHAVIOR: Query MUST explicitly reference table names
+    # - DuckDB can access DataFrames by name without explicit registration
+    # - Example: SELECT * FROM df_public (works if df_public exists in globals())
+    # - But agent cannot discover table names via auto-registration
+    #
+    # FUTURE: Add explicit register_table() tool if needed:
+    # register_table("sales_data", "df_sales") -> Allow query access
+    
+    # DuckDB automatically discovers DataFrames in scope when referenced by name
+    # No explicit registration needed - query must know table name
     result_df = con.execute(decoded_query).df()
     
     # Convert to markdown for clean display

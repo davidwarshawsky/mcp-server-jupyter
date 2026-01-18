@@ -294,17 +294,26 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
     with open(path, 'r', encoding='utf-8') as f:
         nb = nbformat.read(f, as_version=4)
     
-    # Ensure all cells have IDs (auto-migration)
-    # CRITICAL FIX: Do NOT write changes back to disk silently.
-    # We perform migration in-memory only for the purpose of the outline.
-    # If the user wants to migrate the file, they should use a dedicated tool or save/edit.
+    # [IIRB P0 FIX #3] Persist Cell IDs for git-safety
+    # OLD BEHAVIOR: Generated IDs in-memory only, causing Heisenbug:
+    # - Agent calls get_notebook_outline, gets ID "abc123"
+    # - Agent tries edit_cell(id="abc123")
+    # - Server restarts or user reloads
+    # - ID "abc123" no longer exists (regenerated as "xyz789")
+    # - Edit fails with "Cell ID not found"
+    #
+    # NEW BEHAVIOR: Write Cell IDs back to disk immediately
+    # - Ensures stable IDs across server restarts
+    # - Migrates notebooks to nbformat 4.5 for ID support
+    # - Complies with git-safe cell addressing promise
     was_modified, cells_updated = ensure_cell_ids(nb)
-    # if was_modified:
-    #    # Upgrade nbformat version if needed
-    #    if nb.nbformat_minor < 5:
-    #        nb.nbformat_minor = 5
-    #    # Save with atomic write - DISABLED to prevent side effects
-    #    _atomic_write_notebook(nb, path)
+    if was_modified:
+        # Upgrade nbformat version if needed
+        if nb.nbformat_minor < 5:
+            nb.nbformat_minor = 5
+        # Save with atomic write to persist IDs
+        _atomic_write_notebook(nb, path)
+        logger.info(f"Migrated {notebook_path} to nbformat 4.5 with {cells_updated} Cell IDs")
 
     # Build outline
     outline = []

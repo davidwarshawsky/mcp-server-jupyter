@@ -2355,75 +2355,21 @@ async def query_dataframes(notebook_path: str, sql_query: str):
     from src.data_tools import query_dataframes as _query_df
     return await _query_df(session_manager, notebook_path, sql_query)
 
-@mcp.tool()
-@validated_tool(SaveCheckpointArgs)
-async def save_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
-    """
-    [TIME TRAVEL] Save current kernel state for rollback.
-    
-    Creates a snapshot of all variables in the kernel's namespace.
-    Use before running risky code that might crash the kernel.
-    
-    Args:
-        notebook_path: Path to notebook
-        checkpoint_name: Name for this checkpoint (default: "auto")
-    
-    Returns:
-        JSON with checkpoint info (size, variable count, timestamp)
-        
-    Example:
-        save_checkpoint("analysis.ipynb", "before_model_training")
-        # Later: load_checkpoint("analysis.ipynb", "before_model_training")
-        
-    Wow Factor:
-        Agent can say "I tried X, it crashed. I restored your state from 2 min ago."
-    """
-    # Reuse existing checkpoint logic from SessionManager
-    session = session_manager.get_session(notebook_path)
-    if not session:
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg="No running kernel. Call start_kernel first."
-        ).to_json()
-    
-    result = await session_manager.save_checkpoint(notebook_path, checkpoint_name)
-    return json.dumps(result, indent=2)
-
-@mcp.tool()
-@validated_tool(LoadCheckpointArgs)
-async def load_checkpoint(notebook_path: str, checkpoint_name: str = "auto"):
-    """
-    [TIME TRAVEL] Restore kernel state from checkpoint.
-    
-    Rolls back all variables to a previous saved state.
-    Use when code execution fails and you need to recover.
-    
-    Args:
-        notebook_path: Path to notebook
-        checkpoint_name: Name of checkpoint to restore (default: "auto")
-    
-    Returns:
-        JSON with restoration status
-        
-    Example:
-        load_checkpoint("analysis.ipynb", "before_model_training")
-        # Kernel state restored to checkpoint time
-        
-    Safety:
-        Uses HMAC signing to prevent checkpoint tampering.
-    """
-    # Reuse existing checkpoint logic from SessionManager
-    session = session_manager.get_session(notebook_path)
-    if not session:
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg="No running kernel. Call start_kernel first."
-        ).to_json()
-    
-    result = await session_manager.load_checkpoint(notebook_path, checkpoint_name)
-    return json.dumps(result, indent=2)
+# [IIRB P0 FIX #1] REMOVED: save_checkpoint and load_checkpoint tools
+# These tools called non-existent SessionManager.save_checkpoint/load_checkpoint methods.
+# The checkpoint methods were removed during refactoring but tools remained in the API.
+# CRITICAL RUNTIME CRASH: Advertising features that don't exist is a logic bomb.
+#
+# Remediation Options:
+# 1. Implement checkpoint methods in SessionManager (using dill or git-based state)
+# 2. Remove the tools entirely (current approach)
+#
+# Decision: REMOVED. Checkpoint feature requires careful design:
+# - dill serialization has security risks (arbitrary code execution)
+# - Re-execution from history is safer but requires kernel state tracking
+# - Git-based checkpoints require integration with version control
+#
+# If checkpoint feature is needed, implement properly in Phase 6.
 
 # --- PROMPTS: Consumer-Ready Personas for Claude Desktop ---
 
