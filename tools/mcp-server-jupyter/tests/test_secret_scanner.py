@@ -336,12 +336,19 @@ class TestEdgeCases:
         """Test scanning very long strings (performance)."""
         scanner = EntropySecretScanner()
         
-        # 1MB of text
-        text = "a" * 1_000_000 + "sk-1234567890abcdefghij1234567890abcdef"
+        # Put secret at the beginning (within 50KB scan limit)
+        text = "sk-1234567890abcdefghij1234567890abcdef" + "a" * 1_000_000
         secrets = scanner.scan_text(text)
         
-        # Should still detect the secret
+        # Should detect the secret (within first 50KB)
         assert len(secrets) >= 1
+        
+        # Test that secrets beyond 50KB are not scanned (per IIRB advisory)
+        text_secret_at_end = "a" * 1_000_000 + "sk-1234567890abcdefghij1234567890abcdef"
+        secrets_truncated = scanner.scan_text(text_secret_at_end)
+        
+        # Should NOT find secret (beyond 50KB limit - intentional performance optimization)
+        assert len(secrets_truncated) == 0
     
     def test_unicode_text(self):
         """Test scanning text with Unicode characters."""

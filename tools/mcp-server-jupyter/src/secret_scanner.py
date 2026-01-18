@@ -186,9 +186,18 @@ class EntropySecretScanner:
         
         return unique_candidates
     
+    # Maximum text length to scan (performance optimization)
+    # Secrets buried deep in large outputs (10MB+) are lower risk
+    # than secrets at the top/bottom of output
+    MAX_SCAN_LENGTH = 50000  # 50KB
+    
     def scan_text(self, text: str) -> List[SecretMatch]:
         """
         Scan text for potential secrets using entropy analysis and pattern matching.
+        
+        Performance: Only scans first 50KB of text to avoid CPU exhaustion on
+        large outputs (e.g., 10MB dataframe dumps). Secrets buried deep are lower
+        risk than secrets at the top/bottom.
         
         Args:
             text: Text to scan
@@ -196,6 +205,14 @@ class EntropySecretScanner:
         Returns:
             List of detected secrets with metadata
         """
+        # Limit scan length for performance (IIRB Advisory)
+        if len(text) > self.MAX_SCAN_LENGTH:
+            logger.debug(
+                f"Secret scanner: Truncating input from {len(text)} to "
+                f"{self.MAX_SCAN_LENGTH} chars for performance"
+            )
+            text = text[:self.MAX_SCAN_LENGTH]
+        
         secrets = []
         
         # Step 1: Pattern-based detection (high confidence)

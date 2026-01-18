@@ -51,24 +51,41 @@ class AuditLogger:
         self.log_volume_limit_mb = log_volume_limit_mb
         self.bytes_logged = 0
         self.hour_start = time.time()
+        self.sample_counter = 0  # For sampling when over limit
     
-    def _check_volume_limit(self, log_size: int):
-        """Check if we're within volume limits."""
+    def _check_volume_limit(self, log_size: int) -> bool:
+        """
+        Check if we're within volume limits.
+        
+        Returns:
+            True if log should be written, False if it should be dropped (over limit)
+        """
         current_time = time.time()
         
         # Reset counter every hour
         if current_time - self.hour_start > 3600:
             self.bytes_logged = 0
             self.hour_start = current_time
+            self.sample_counter = 0
+        
+        limit_bytes = self.log_volume_limit_mb * 1024 * 1024
+        
+        # Hard cap: Drop logs when limit exceeded (IIRB Advisory)
+        if self.bytes_logged > limit_bytes:
+            # Sample 1 in 100 logs when over limit
+            self.sample_counter += 1
+            if self.sample_counter % 100 != 0:
+                return False  # Drop this log
+            
+            # Log warning on first sample
+            if self.sample_counter == 100:
+                logger.warning(
+                    f"Log volume exceeded {self.log_volume_limit_mb}MB/hour limit. "
+                    f"Sampling 1 in 100 logs. Current: {self.bytes_logged / 1024 / 1024:.2f}MB"
+                )
         
         self.bytes_logged += log_size
-        
-        # Warn if exceeding limit
-        if self.bytes_logged > self.log_volume_limit_mb * 1024 * 1024:
-            logger.warning(
-                f"Log volume exceeded {self.log_volume_limit_mb}MB/hour limit. "
-                f"Current: {self.bytes_logged / 1024 / 1024:.2f}MB"
-            )
+        return True  # Write this log
     
     def log_tool_execution(
         self,
@@ -109,8 +126,9 @@ class AuditLogger:
         log_json = json.dumps(event)
         log_size = len(log_json.encode('utf-8'))
         
-        # Check volume limit
-        self._check_volume_limit(log_size)
+        # Check volume limit (may drop log if over limit)
+        if not self._check_volume_limit(log_size):
+            return  # Log dropped due to volume limit
         
         # Log with appropriate level
         if status == "error":
@@ -152,7 +170,10 @@ class AuditLogger:
         
         log_json = json.dumps(event)
         log_size = len(log_json.encode('utf-8'))
-        self._check_volume_limit(log_size)
+        
+        # Check volume limit (may drop log if over limit)
+        if not self._check_volume_limit(log_size):
+            return  # Log dropped due to volume limit
         
         if status == "error":
             logger.error(f"AUDIT: {log_json}")

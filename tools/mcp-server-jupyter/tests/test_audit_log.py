@@ -108,12 +108,12 @@ class TestAuditLogger:
     
     @patch('src.audit_log.logger')
     def test_volume_limit_warning(self, mock_logger):
-        """Test that exceeding volume limit triggers warning."""
+        """Test that exceeding volume limit triggers warning and drops logs."""
         # Small limit for testing
         logger = AuditLogger(log_volume_limit_mb=0.001)  # 1KB
         
-        # Log many events to exceed limit
-        for i in range(100):
+        # Log many events to exceed limit (need to hit 100 to see warning)
+        for i in range(200):
             logger.log_tool_execution(
                 tool="test_tool",
                 status="success",
@@ -121,10 +121,10 @@ class TestAuditLogger:
                 metadata={"data": "x" * 100}  # Add bulk
             )
         
-        # Should have warning about volume
+        # Should have warning about volume (triggered on 100th log after limit)
         warning_calls = [c for c in mock_logger.warning.call_args_list 
-                        if "Log volume exceeded" in str(c)]
-        assert len(warning_calls) > 0
+                        if "Log volume exceeded" in str(c) or "Sampling" in str(c)]
+        assert len(warning_calls) > 0, f"Expected volume warning, got calls: {mock_logger.warning.call_args_list}"
     
     def test_volume_counter_resets_hourly(self):
         """Test that volume counter resets after an hour."""
