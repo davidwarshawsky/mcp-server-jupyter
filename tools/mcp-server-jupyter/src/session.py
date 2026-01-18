@@ -219,6 +219,8 @@ class SessionManager:
         """
         [PHASE 2.3] Periodically cleans up old asset files to prevent disk space exhaustion.
         Runs every hour by default and deletes files older than 24 hours.
+        
+        [ROUND 2 AUDIT] Also cleanup old proposals.json entries.
         """
         logger.info(f"Starting Asset Cleanup task (scan interval: {interval}s)")
         max_age_hours = int(os.environ.get('MCP_ASSET_MAX_AGE_HOURS', '24'))
@@ -1298,6 +1300,20 @@ except ImportError:
                     session_data['execution_counter'] += 1
                     expected_count = session_data['execution_counter']
                     
+                    # [ROUND 2 AUDIT] Audit logging for code execution
+                    import hashlib
+                    code_hash = hashlib.sha256(code.encode('utf-8')).hexdigest()[:16]
+                    logger.info(
+                        "[AUDIT] Code execution",
+                        notebook_path=abs_path,
+                        cell_index=cell_index,
+                        exec_id=exec_id,
+                        code_hash=code_hash,
+                        code_length=len(code),
+                        execution_count=expected_count,
+                        # DO NOT LOG RAW CODE - may contain secrets
+                    )
+                    
                     # Execute the cell
                     kc = session_data['kc']
                     msg_id = kc.execute(code)
@@ -1553,81 +1569,10 @@ print(_get_var_info())
 """
         return await self._run_and_wait_internal(nb_path, code)
 
-    async def save_checkpoint(self, notebook_path: str, checkpoint_name: str):
-        """[RECIPE REPLAY] Save the execution history, not the heap."""
-        session = self.sessions.get(str(Path(notebook_path).resolve()))
-        if not session: return "No session"
+    # [ROUND 2 AUDIT: REMOVED] Checkpoint features using dill/pickle
+    # Recommendation: Use re-execution from history instead of state serialization
 
-        # Get the history of executed cell indices
-        executed_indices = sorted(list(session.get('executed_indices', set())))
-        if not executed_indices:
-            return "No cells have been executed; nothing to save."
-
-        # Read the notebook to get the source of executed cells
-        try:
-            nb = nbformat.read(notebook_path, as_version=4)
-        except Exception as e:
-            return f"Error reading notebook: {e}"
-
-        # Create the recipe
-        recipe = []
-        for index in executed_indices:
-            if 0 <= index < len(nb.cells):
-                cell = nb.cells[index]
-                if cell.cell_type == 'code':
-                    recipe.append({
-                        "index": index,
-                        "source": cell.source
-                    })
-        
-        # Save the recipe to disk
-        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.json"
-        ckpt_path.parent.mkdir(exist_ok=True, parents=True)
-        
-        manifest = {
-            "version": "2.0",
-            "type": "recipe_replay",
-            "timestamp": datetime.datetime.now().isoformat(),
-            "notebook_path": notebook_path,
-            "recipe": recipe
-        }
-        
-        try:
-            with open(ckpt_path, 'w') as f:
-                json.dump(manifest, f, indent=2)
-            return f"Checkpoint recipe saved. Contains {len(recipe)} executed cells."
-        except Exception as e:
-            return f"Failed to save checkpoint recipe: {e}"
-
-    async def load_checkpoint(self, notebook_path: str, checkpoint_name: str):
-        """[RECIPE REPLAY] Restore state by re-executing from a recipe."""
-        ckpt_path = Path(notebook_path).parent / ".mcp" / f"{checkpoint_name}.json"
-        if not ckpt_path.exists():
-            return f"Checkpoint recipe not found: {ckpt_path}"
-
-        try:
-            with open(ckpt_path, 'r') as f:
-                manifest = json.load(f)
-        except Exception as e:
-            return f"Failed to read checkpoint recipe: {e}"
-
-        # 1. Restart the kernel for a clean slate
-        await self.restart_kernel(notebook_path)
-        await asyncio.sleep(2) # Give kernel time to be ready
-
-        # 2. Concatenate all code into a single block for fast replay
-        full_code = "\n\n# --- Recipe Replay ---\n\n".join(
-            [cell['source'] for cell in manifest.get('recipe', [])]
-        )
-        
-        if not full_code:
-            return "Checkpoint recipe is empty; nothing to replay."
-
-        # 3. Execute the combined code block
-        # We use a special index -2 to signify a replay operation
-        exec_id = await self.execute_cell_async(notebook_path, -2, full_code)
-        
-        return f"State restoration started by replaying {len(manifest.get('recipe', []))} cells. Task ID: {exec_id}"
+    # [ROUND 2 AUDIT: REMOVED] Load checkpoint removed (see save_checkpoint comment above)
 
     async def get_variable_info(self, nb_path: str, var_name: str):
         """
@@ -1847,17 +1792,8 @@ print(_inspect_var())
             await self.start_kernel(nb_path)
             
             # Try to restore from checkpoint if available
-            checkpoint_dir = Path(nb_path).parent / ".mcp"
-            if checkpoint_dir.exists():
-                checkpoints = list(checkpoint_dir.glob("*.json"))
-                if checkpoints:
-                    latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
-                    logger.info(f"[CANCEL] Restoring from checkpoint: {latest.name}")
-                    # Note: load_checkpoint is async, but we don't await to avoid blocking
-                    asyncio.create_task(self.load_checkpoint(nb_path, latest.stem))
-                    return "Killed and restarted (state restored from checkpoint)"
-            
-            return "Killed and restarted (state lost - no checkpoint available)"
+            # [ROUND 2 AUDIT] Checkpoint auto-restore removed for security compliance
+            return "Killed and restarted (state lost - re-execute cells to restore)"
             
         except Exception as e:
             logger.error(f"[CANCEL] Stage 3 failed: {e}")

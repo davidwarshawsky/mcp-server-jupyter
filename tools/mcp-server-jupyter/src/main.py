@@ -164,15 +164,54 @@ session_manager.set_mcp_server(mcp)
 connection_manager = ConnectionManager()
 session_manager.connection_manager = connection_manager
 
+# [ROUND 2 AUDIT] Start proposal cleanup background task
+async def _proposal_cleanup_loop():
+    """Cleanup old proposals every hour to prevent unbounded growth."""
+    await asyncio.sleep(3600)  # Initial delay
+    while True:
+        try:
+            cleanup_old_proposals()
+            await asyncio.sleep(3600)  # Every hour
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"[PROPOSALS CLEANUP] Error: {e}")
+            await asyncio.sleep(3600)
+
+asyncio.create_task(_proposal_cleanup_loop())
+
 # Health endpoint used by external orchestrators (module-level so tests can import it)
 from starlette.responses import JSONResponse
 async def health_check(request=None):
+    """
+    [ROUND 2 AUDIT] Improved health check that validates kernel liveness.
+    Returns HTTP 200 if all kernels are responsive, 503 otherwise.
+    """
     active_sessions = len(session_manager.sessions)
+    healthy_kernels = 0
+    unhealthy_kernels = 0
+    
+    # Sample check: verify a few kernels are actually responsive
+    for nb_path, session in list(session_manager.sessions.items())[:3]:  # Check up to 3 kernels
+        try:
+            kc = session.get('kc')
+            km = session.get('km')
+            if kc and km and km.is_alive():
+                healthy_kernels += 1
+            else:
+                unhealthy_kernels += 1
+        except Exception:
+            unhealthy_kernels += 1
+    
+    is_healthy = unhealthy_kernels == 0 or (healthy_kernels > 0 and healthy_kernels >= unhealthy_kernels)
+    
     return JSONResponse({
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "degraded",
         "active_kernels": active_sessions,
+        "sampled_healthy": healthy_kernels,
+        "sampled_unhealthy": unhealthy_kernels,
         "version": "0.1.0"
-    })
+    }, status_code=200 if is_healthy else 503)
 
 @mcp.tool()
 def get_server_status():
@@ -214,6 +253,30 @@ def save_proposals():
             json.dump({'store': PROPOSAL_STORE, '_history': list(PROPOSAL_HISTORY)}, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save proposals: {e}")
+
+
+def cleanup_old_proposals(max_age_hours: int = 24):
+    """[ROUND 2 AUDIT] Remove proposals older than max_age_hours to prevent unbounded disk growth."""
+    import time
+    now = time.time()
+    removed = []
+    
+    for proposal_id in list(PROPOSAL_STORE.keys()):
+        proposal = PROPOSAL_STORE[proposal_id]
+        timestamp = proposal.get('timestamp', 0)
+        if now - timestamp > max_age_hours * 3600:
+            PROPOSAL_STORE.pop(proposal_id)
+            try:
+                PROPOSAL_HISTORY.remove(proposal_id)
+            except ValueError:
+                pass
+            removed.append(proposal_id)
+    
+    if removed:
+        logger.info(f"[CLEANUP] Removed {len(removed)} old proposals")
+        save_proposals()
+    
+    return len(removed)
 
 
 # Store for agent proposals to support feedback loop
@@ -438,21 +501,17 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     """
     return notebook.append_cell(notebook_path, content, cell_type)
 
-@mcp.tool()
-async def save_checkpoint(notebook_path: str, name: str = "checkpoint"):
-    """
-    Snapshot the current kernel variables (memory heap) to disk.
-    Use this to prevent "Data Gravity" issues.
-    """
-    return await session_manager.save_checkpoint(notebook_path, name)
-
-@mcp.tool()
-async def load_checkpoint(notebook_path: str, name: str = "checkpoint"):
-    """
-    Restore variables from a disk snapshot.
-    Replaces "Re-run all cells" strategy.
-    """
-    return await session_manager.load_checkpoint(notebook_path, name)
+# [ROUND 2 AUDIT: REMOVED] Checkpoint features using dill/pickle are fundamentally insecure
+# Enterprise compliance bans pickle deserialization. Use replay-from-history instead.
+# @mcp.tool()
+# async def save_checkpoint(notebook_path: str, name: str = "checkpoint"):
+#     """REMOVED: Pickle-based checkpointing is a security liability"""
+#     pass
+#
+# @mcp.tool()
+# async def load_checkpoint(notebook_path: str, name: str = "checkpoint"):
+#     """REMOVED: Use re-execute cells instead of deserializing pickled state"""
+#     pass
 
 @mcp.tool()
 def propose_edit(notebook_path: str, index: int, new_content: str):
@@ -2643,6 +2702,7 @@ def main():
 
             from src.security import TokenAuthMiddleware
             from starlette.middleware import Middleware
+            from src.observability import trace_middleware
 
             app = Starlette(
                 routes=[
@@ -2655,6 +2715,9 @@ def main():
                     Middleware(TokenAuthMiddleware)
                 ]
             )
+            
+            # [ROUND 2 AUDIT] Add trace_id propagation middleware
+            app.middleware("http")(trace_middleware)
             
             # [FIX] Bind a socket and hand the FD to Uvicorn to avoid TOCTOU races
             import socket
