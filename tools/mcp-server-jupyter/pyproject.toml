@@ -4,7 +4,7 @@ build-backend = "poetry.core.masonry.api"
 
 [project]
 name = "mcp-server-jupyter"
-version = "0.2.0"
+version = "0.2.1"
 description = "Production-ready MCP server for executing Jupyter Notebooks with AI agent support. Features DAG-based smart sync, SQL superpowers, auto-EDA, and time-travel debugging."
 authors = [
     {name = "MCP Jupyter Contributors", email = "contact@example.com"}

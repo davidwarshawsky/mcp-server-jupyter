@@ -60,9 +60,6 @@ import traceback
 logger = configure_logging()
 tracer = get_tracer(__name__)
 
-# Server version for compatibility checking
-__version__ = "0.2.0"
-
 # [HEARTBEAT] Auto-shutdown configuration
 HEARTBEAT_INTERVAL = 60  # Check every minute
 IDLE_TIMEOUT = 600       # Shutdown after 10 minutes of no connections
