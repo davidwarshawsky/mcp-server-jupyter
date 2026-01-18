@@ -200,13 +200,24 @@ class SessionManager:
         try:
             # Use notebook path hash as filename to handle special chars
             import hashlib
+            import psutil
             path_hash = hashlib.md5(nb_path.encode()).hexdigest()
             session_file = self.persistence_dir / f"session_{path_hash}.json"
+            
+            # [REAPER FIX] Track kernel process creation time to prevent killing recycled PIDs
+            kernel_create_time = None
+            if pid and isinstance(pid, int):
+                try:
+                    kernel_proc = psutil.Process(pid)
+                    kernel_create_time = kernel_proc.create_time()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
             
             session_data = {
                 "notebook_path": nb_path,
                 "connection_file": connection_file,
                 "pid": pid if isinstance(pid, int) else None,
+                "pid_create_time": kernel_create_time,  # [REAPER FIX] Track kernel process creation time
                 "env_info": env_info,
                 "created_at": datetime.datetime.now().isoformat()
             }
@@ -249,12 +260,26 @@ class SessionManager:
                 nb_path = session_data['notebook_path']
                 pid = session_data['pid']
                 connection_file = session_data['connection_file']
+                saved_create_time = session_data.get('pid_create_time')
                 
                 # Check if kernel process is still alive
                 try:
                     # Lazy import to avoid startup crashes
                     import psutil
-                    if psutil.pid_exists(pid) and Path(connection_file).exists():
+                    # [REAPER FIX] Validate create_time to ensure PID wasn't recycled
+                    pid_valid = False
+                    if psutil.pid_exists(pid):
+                        try:
+                            proc = psutil.Process(pid)
+                            # If we have saved create_time, verify it matches
+                            if saved_create_time is None or proc.create_time() == saved_create_time:
+                                pid_valid = True
+                            else:
+                                logger.warning(f"PID {pid} was reused. Skipping restoration.")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    
+                    if pid_valid and Path(connection_file).exists():
                         # Try to reconnect to existing kernel
                         logger.info(f"Attempting to restore session for {nb_path} (PID: {pid})")
                         
@@ -396,6 +421,16 @@ class SessionManager:
 
         if abs_path in self.sessions: 
             return f"Kernel already running for {abs_path}"
+        
+        # [PHASE 3.2] Check kernel limit
+        if len(self.sessions) >= self.max_concurrent_kernels:
+            oldest_session = min(self.sessions.items(), key=lambda x: x[1].get('start_time', 0))
+            logger.warning(f"Kernel limit ({self.max_concurrent_kernels}) reached. Consider stopping {oldest_session[0]}")
+            return json.dumps({
+                "error": f"Maximum concurrent kernels ({self.max_concurrent_kernels}) reached",
+                "suggestion": f"Stop an existing kernel first. Oldest: {oldest_session[0]}",
+                "active_kernels": list(self.sessions.keys())
+            })
         
         km = AsyncKernelManager()
         
@@ -658,6 +693,7 @@ except ImportError:
             logger.info(f"Non-Python kernel detected ({kernel_name}). Skipping Python startup injection.")
             
         # Create session dictionary structure
+        import time
         execution_queue = asyncio.Queue()
         session_data = {
             'km': km,
@@ -671,6 +707,7 @@ except ImportError:
             'execution_counter': 0,
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
             'execution_timeout': execution_timeout,  # Per-session timeout
+            'start_time': time.time(),  # [PHASE 3.2] Track kernel start time for resource management
             'env_info': {  # NEW: Environment provenance tracking
                 'python_path': py_exe,
                 'env_name': env_name,

@@ -148,6 +148,10 @@ class SessionManager:
         # Timeout for interactive input requests (seconds)
         self.input_request_timeout = input_request_timeout
         
+        # [PHASE 3.2] Resource Limits
+        self.max_concurrent_kernels = int(os.environ.get('MCP_MAX_KERNELS', '10'))
+        logger.info(f"Max concurrent kernels: {self.max_concurrent_kernels}")
+        
         # Reference to MCP server for notifications
         self.mcp_server = None
         self.server_session = None
@@ -161,6 +165,9 @@ class SessionManager:
 
         # [REAPER] Start the background reaper task
         self._reaper_task = asyncio.create_task(self._reaper_loop())
+        
+        # [PHASE 2.3] Start asset cleanup task
+        self._asset_cleanup_task = asyncio.create_task(self._asset_cleanup_loop())
         
     def set_mcp_server(self, mcp_server):
         """Set the MCP server instance to enable notifications."""
@@ -208,6 +215,49 @@ class SessionManager:
              # Fallback to server level if no sessions registered (e.g. stdio)
             await self.mcp_server.send_notification(notification)
 
+    async def _asset_cleanup_loop(self, interval: int = 3600):
+        """
+        [PHASE 2.3] Periodically cleans up old asset files to prevent disk space exhaustion.
+        Runs every hour by default and deletes files older than 24 hours.
+        """
+        logger.info(f"Starting Asset Cleanup task (scan interval: {interval}s)")
+        max_age_hours = int(os.environ.get('MCP_ASSET_MAX_AGE_HOURS', '24'))
+        await asyncio.sleep(interval)  # Initial delay
+        
+        while True:
+            try:
+                assets_dir = Path("assets")
+                if not assets_dir.exists():
+                    await asyncio.sleep(interval)
+                    continue
+                
+                import time
+                now = time.time()
+                max_age_seconds = max_age_hours * 3600
+                deleted_count = 0
+                
+                for asset_file in assets_dir.glob("*"):
+                    if asset_file.is_file():
+                        try:
+                            file_age = now - asset_file.stat().st_mtime
+                            if file_age > max_age_seconds:
+                                asset_file.unlink()
+                                deleted_count += 1
+                                logger.debug(f"[ASSET CLEANUP] Deleted old asset: {asset_file.name} (age: {file_age/3600:.1f}h)")
+                        except Exception as e:
+                            logger.warning(f"[ASSET CLEANUP] Failed to delete {asset_file.name}: {e}")
+                
+                if deleted_count > 0:
+                    logger.info(f"[ASSET CLEANUP] Deleted {deleted_count} old assets (>{max_age_hours}h)")
+                
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                logger.info("Asset cleanup task cancelled.")
+                break
+            except Exception as e:
+                logger.error(f"[ASSET CLEANUP] Unhandled error: {e}")
+                await asyncio.sleep(interval)
+    
     async def _reaper_loop(self, interval: int = 60):
         """
         [REAPER] Periodically scans for and cleans up zombie kernels from dead server processes.
@@ -269,15 +319,21 @@ class SessionManager:
                                 
                                 server_pid = session_data.get('server_pid')
                                 kernel_pid = session_data.get('pid')
+                                saved_create_time = session_data.get('pid_create_time')
                                 
                                 logger.warning(f"[REAPER] Found orphan session from dead server PID {server_pid} for kernel PID {kernel_pid}.")
                                 
-                                # Kill the zombie kernel
+                                # Kill the zombie kernel - BUT ONLY if create_time matches
                                 if kernel_pid and psutil.pid_exists(kernel_pid):
                                     try:
                                         proc = psutil.Process(kernel_pid)
-                                        proc.kill()
-                                        logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid}.")
+                                        # [REAPER FIX] Verify it's actually our process by checking creation time
+                                        if saved_create_time is None or proc.create_time() == saved_create_time:
+                                            proc_name = proc.name()
+                                            proc.kill()
+                                            logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid} ({proc_name}).")
+                                        else:
+                                            logger.warning(f"[REAPER] PID {kernel_pid} was reused by OS. Not killing (create_time mismatch).")
                                     except psutil.NoSuchProcess:
                                         pass
                                     except Exception as e:
@@ -367,11 +423,21 @@ class SessionManager:
             session_file = self.persistence_dir / f"session_{path_hash}.json"
             
             current_proc = psutil.Process(os.getpid())
+            
+            # [REAPER FIX] Track kernel process creation time to prevent killing recycled PIDs
+            kernel_create_time = None
+            if pid and isinstance(pid, int):
+                try:
+                    kernel_proc = psutil.Process(pid)
+                    kernel_create_time = kernel_proc.create_time()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
 
             session_data = {
                 "notebook_path": nb_path,
                 "connection_file": connection_file,
                 "pid": pid if isinstance(pid, int) else None,
+                "pid_create_time": kernel_create_time,  # [REAPER FIX] Track kernel process creation time
                 "server_pid": os.getpid(),  # [REAPER FIX] Track which server owns this kernel
                 "server_create_time": current_proc.create_time(), # [REAPER FIX] And its start time
                 "env_info": env_info,
@@ -460,12 +526,26 @@ class SessionManager:
                 nb_path = session_data['notebook_path']
                 pid = session_data['pid']
                 connection_file = session_data['connection_file']
+                saved_create_time = session_data.get('pid_create_time')
                 
                 # Check if kernel process is still alive
                 try:
                     # Lazy import to avoid startup crashes
                     import psutil
-                    if psutil.pid_exists(pid) and Path(connection_file).exists():
+                    # [REAPER FIX] Validate create_time to ensure PID wasn't recycled
+                    pid_valid = False
+                    if psutil.pid_exists(pid):
+                        try:
+                            proc = psutil.Process(pid)
+                            # If we have saved create_time, verify it matches
+                            if saved_create_time is None or proc.create_time() == saved_create_time:
+                                pid_valid = True
+                            else:
+                                logger.warning(f"PID {pid} was reused. Skipping restoration.")
+                        except (psutil.NoSuchProcess, psutil.AccessDenied):
+                            pass
+                    
+                    if pid_valid and Path(connection_file).exists():
                         # Try to reconnect to existing kernel
                         logger.info(f"Attempting to restore session for {nb_path} (PID: {pid})")
                         
@@ -632,6 +712,16 @@ class SessionManager:
 
         if abs_path in self.sessions: 
             return f"Kernel already running for {abs_path}"
+        
+        # [PHASE 3.2] Check kernel limit
+        if len(self.sessions) >= self.max_concurrent_kernels:
+            oldest_session = min(self.sessions.items(), key=lambda x: x[1].get('start_time', 0))
+            logger.warning(f"Kernel limit ({self.max_concurrent_kernels}) reached. Consider stopping {oldest_session[0]}")
+            return json.dumps({
+                "error": f"Maximum concurrent kernels ({self.max_concurrent_kernels}) reached",
+                "suggestion": f"Stop an existing kernel first. Oldest: {oldest_session[0]}",
+                "active_kernels": list(self.sessions.keys())
+            })
         
         km = AsyncKernelManager()
         
@@ -896,6 +986,7 @@ except ImportError:
             logger.info(f"Non-Python kernel detected ({kernel_name}). Skipping Python startup injection.")
             
         # Create session dictionary structure
+        import time
         execution_queue = asyncio.Queue()
         session_data = {
             'km': km,
@@ -910,6 +1001,7 @@ except ImportError:
             'max_executed_index': -1,  # [SCIENTIFIC INTEGRITY] Track execution wavefront
             'stop_on_error': False,  # NEW: Default to False for backward compatibility
             'execution_timeout': execution_timeout,  # Per-session timeout
+            'start_time': time.time(),  # [PHASE 3.2] Track kernel start time for resource management
             'env_info': {  # NEW: Environment provenance tracking
                 'python_path': py_exe,
                 'env_name': env_name,

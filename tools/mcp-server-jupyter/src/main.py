@@ -1604,6 +1604,7 @@ def get_asset_content(asset_path: str) -> str:
     """
     import base64
     from pathlib import Path
+    from src.security import validate_path
     
     # Normalize path separators
     asset_path = asset_path.replace("\\", "/")
@@ -1618,21 +1619,16 @@ def get_asset_content(asset_path: str) -> str:
     
     # Build full path relative to current working directory
     # Assets are always stored in assets/ subdirectory
-    full_path = Path("assets") / filename
+    assets_dir = Path("assets").resolve()
     
-    # Security check: Verify resolved path is still within assets directory
+    # Security check: Use validate_path to prevent path traversal
     try:
-        resolved = full_path.resolve()
-        assets_dir = Path("assets").resolve()
-        if not str(resolved).startswith(str(assets_dir)):
-            return json.dumps({
-                "error": "Security violation: Path traversal attempt blocked",
-                "requested_path": asset_path
-            })
-    except Exception as e:
+        full_path = validate_path(filename, assets_dir)
+    except PermissionError as e:
         return json.dumps({
-            "error": f"Invalid path: {str(e)}",
-            "requested_path": asset_path
+            "error": "Security violation: Path traversal attempt blocked",
+            "requested_path": asset_path,
+            "details": str(e)
         })
     
     # Check if file exists
@@ -1808,85 +1804,23 @@ def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
     from src.git_tools import save_notebook_clean as _save_clean
     return _save_clean(notebook_path, strip_outputs)
 
-@mcp.tool()
-def setup_git_filters(repo_path: str = "."):
-    """
-    [GIT-SAFE] Configure Git filters for automatic notebook cleaning.
-    
-    One-time setup per repository. Installs nbstripout filter that:
-    - Auto-strips execution_count on commit
-    - Auto-strips volatile metadata
-    - Keeps outputs in working tree (for local viewing)
-    
-    **When to use**: Run once when starting work on a new repo with notebooks.
-    
-    Args:
-        repo_path: Path to Git repository root (default: current directory)
-    
-    Returns:
-        Success message or error with installation instructions
-    
-    Example:
-        setup_git_filters(".")
-        # Now all git commits will auto-clean notebooks
-    """
-    from src.git_tools import setup_git_filters as _setup_filters
-    return _setup_filters(repo_path)
+# [PHASE 4: DESCOPED] Git filter setup removed
+# @mcp.tool()
+# def setup_git_filters(repo_path: str = "."):
+#     """REMOVED: Use VS Code Git integration or manual git config"""
+#     pass
 
-@mcp.tool()
-def create_agent_branch(repo_path: str = ".", branch_name: str = ""):
-    """
-    [GIT-SAFE] Create defensive Git branch for agent work.
-    
-    Safety checks:
-    - Fails if uncommitted changes exist
-    - Fails if in detached HEAD state
-    - Creates and checks out new branch
-    
-    **Critical for safety**: Agent should ALWAYS work on a separate branch.
-    Human can review and squash-merge when done.
-    
-    Args:
-        repo_path: Path to Git repository
-        branch_name: Branch name (default: agent/task-{timestamp})
-    
-    Returns:
-        Success message with branch name and merge instructions
-    
-    Example:
-        create_agent_branch(".", "agent/add-features")
-        # Now safely work on this branch
-        # Human will review and merge later
-    """
-    from src.git_tools import create_agent_branch as _create_branch
-    return _create_branch(repo_path, branch_name)
+# [PHASE 4: DESCOPED] Branch creation removed
+# @mcp.tool()
+# def create_agent_branch(repo_path: str = ".", branch_name: str = ""):
+#     """REMOVED: Use VS Code Git integration for branch management"""
+#     pass
 
-@mcp.tool()
-def commit_agent_work(repo_path: str = ".", message: str = "", files: Optional[List[str]] = None):
-    """
-    [GIT-SAFE] Commit agent changes to current branch.
-    
-    Safety checks:
-    - Only commits specified files (no 'git add .')
-    - Refuses to commit to main/master
-    - Runs pre-commit hooks
-    
-    **Optional helper**: Agent can also just tell human to review and commit.
-    
-    Args:
-        repo_path: Path to Git repository
-        message: Commit message (required)
-        files: List of file paths to commit (required)
-    
-    Returns:
-        Success message with commit hash, or error
-    
-    Example:
-        save_notebook_clean("analysis.ipynb")
-        commit_agent_work(".", "Add data analysis", ["analysis.ipynb"])
-    """
-    from src.git_tools import commit_agent_work as _commit_work
-    return _commit_work(repo_path, message, files)
+# [PHASE 4: DESCOPED] Agent commit tool removed
+# @mcp.tool()
+# def commit_agent_work(repo_path: str = ".", message: str = "", files: Optional[List[str]] = None):
+#     """REMOVED: Agent should not commit code. Human reviews and commits."""
+#     pass
 
 @mcp.tool()
 def prune_unused_assets(notebook_path: str, dry_run: bool = False):
@@ -2619,15 +2553,9 @@ def main():
     try:
         # [SECURITY] Generate and communicate auth token
         import secrets
-        import tempfile
         token = secrets.token_urlsafe(32)
         os.environ["MCP_SESSION_TOKEN"] = token
-        
-        # Use a secure temporary file to pass the token
-        fd, key_path = tempfile.mkstemp(prefix="mcp-key-")
-        with os.fdopen(fd, 'w') as f:
-            f.write(token)
-        print(f"[AUTH_TOKEN_FILE]: {key_path}", file=sys.stderr)
+        print(f"[MCP_SESSION_TOKEN]: {token}", file=sys.stderr)
 
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
         if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:

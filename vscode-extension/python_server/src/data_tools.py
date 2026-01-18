@@ -65,9 +65,17 @@ except ImportError:
 # [STEP 2] Execute SQL query
 try:
     # DuckDB can query pandas DataFrames in the current scope
+    con = duckdb.connect(database=':memory:')
+    # Disable filesystem access and external extensions
+    con.execute("SET enable_external_access=false;")
+    con.execute("SET lock_configuration=true;")
+    # Register all available DataFrames
+    for var_name, var_obj in list(globals().items()):
+        if 'DataFrame' in type(var_obj).__name__:
+            con.register(var_name, var_obj)
     # Use triple-quoted string to safely pass the SQL query
     query_str = """{sql_query}"""
-    result_df = duckdb.query(query_str).df()
+    result_df = con.execute(query_str).df()
     
     # Convert to markdown for clean display
     if len(result_df) == 0:

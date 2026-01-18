@@ -136,18 +136,11 @@ export class McpClient {
                     resolve(p);
                 }
 
-                // Look for auth token file
-                const tokenFileMatch = txt.match(/\[AUTH_TOKEN_FILE\]:\s*(.*)/);
-                if (tokenFileMatch) {
-                    const tokenPath = tokenFileMatch[1].trim();
-                    try {
-                        this.sessionToken = fs.readFileSync(tokenPath, 'utf8').trim();
-                        // SECURITY: Delete file immediately after read
-                        fs.unlinkSync(tokenPath); 
-                        this.outputChannel.appendLine('Successfully read and deleted auth token file.');
-                    } catch (e) {
-                        this.outputChannel.appendLine(`Failed to read auth token: ${e}`);
-                    }
+                // Look for auth token via environment variable
+                const tokenMatch = txt.match(/\[MCP_SESSION_TOKEN\]:\s*(.*)/);
+                if (tokenMatch) {
+                    this.sessionToken = tokenMatch[1].trim();
+                    this.outputChannel.appendLine('Successfully received auth token.');
                 }
             };
 

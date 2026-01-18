@@ -62,7 +62,15 @@ try:
     decoded_query = base64.b64decode("{encoded_query}").decode()
     
     # DuckDB can query pandas DataFrames in the current scope
-    result_df = duckdb.query(decoded_query).df()
+    con = duckdb.connect(database=':memory:')
+    # Disable filesystem access and external extensions
+    con.execute("SET enable_external_access=false;")
+    con.execute("SET lock_configuration=true;")
+    # Register all available DataFrames
+    for var_name, var_obj in list(globals().items()):
+        if 'DataFrame' in type(var_obj).__name__:
+            con.register(var_name, var_obj)
+    result_df = con.execute(decoded_query).df()
     
     # Convert to markdown for clean display
     if len(result_df) == 0:

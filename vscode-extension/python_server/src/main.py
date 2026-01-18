@@ -593,64 +593,6 @@ def _derive_env_vars(python_path: str) -> Optional[dict]:
         return None
 
 @mcp.tool()
-async def run_shell_command(command: str, notebook_path: Optional[str] = None):
-    """
-    [System Diagnostic] Run a safe, non-interactive system command.
-    Use this to debug system dependencies (e.g. 'ldd', 'which', 'uname', 'ls -l /usr/lib').
-    Restricted to non-interactive commands.
-    """
-    import shlex
-    import subprocess
-    
-    # 1. Validation: Block dangerous or interactive commands
-    forbidden_starters = ['vim', 'nano', 'tmux', 'top', 'htop', 'less', 'more', 'ssh', 'git push']
-    cmd_parts = shlex.split(command)
-    if not cmd_parts or cmd_parts[0] in forbidden_starters:
-        return ToolResult(success=False, data={}, error_msg="Command forbidden or interactive.").to_json()
-    
-    # DETERMINE ENVIRONMENT
-    # If notebook_path provided, we try to run in that environment context
-    env = None
-    cwd = None
-    
-    if notebook_path:
-        session = session_manager.get_session(notebook_path)
-        if session:
-            cwd = session.get('cwd')
-            
-            # [CRITICAL] Inject the kernel's environment variables
-            # This ensures 'pip list' or 'python --version' matches the kernel
-            if 'env_info' in session:
-                python_path = session['env_info'].get('python_path')
-                env = _derive_env_vars(python_path)
-
-    try:
-        # Run with timeout to prevent hangs
-        # stdin=subprocess.DEVNULL prevents hanging on prompts like 'sudo password:' or 'apt-get [Y/n]'
-        result = subprocess.run(
-            cmd_parts, 
-            capture_output=True, 
-            text=True, 
-            timeout=10,
-            cwd=cwd,
-            env=env if env else os.environ.copy(),
-            stdin=subprocess.DEVNULL
-        )
-        
-        output = f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}"
-        return ToolResult(
-            success=result.returncode == 0,
-            data={"stdout": result.stdout, "stderr": result.stderr},
-            error_msg=None if result.returncode == 0 : f"Command failed with code {result.returncode}",
-            user_suggestion=output
-        ).to_json()
-        
-    except subprocess.TimeoutExpired:
-        return ToolResult(success=False, data={}, error_msg="Command timed out (limit: 10s)").to_json()
-    except Exception as e:
-         return ToolResult(success=False, data={}, error_msg=str(e)).to_json()
-
-@mcp.tool()
 def check_code_syntax(code: str):
     """
     [LSP] Check Python code for syntax errors. 
@@ -1552,6 +1494,7 @@ def get_asset_content(asset_path: str) -> str:
     """
     import base64
     from pathlib import Path
+    from src.security import validate_path
     
     # Normalize path separators
     asset_path = asset_path.replace("\\", "/")
@@ -1566,21 +1509,16 @@ def get_asset_content(asset_path: str) -> str:
     
     # Build full path relative to current working directory
     # Assets are always stored in assets/ subdirectory
-    full_path = Path("assets") / filename
+    assets_dir = Path("assets").resolve()
     
-    # Security check: Verify resolved path is still within assets directory
+    # Security check: Use validate_path to prevent path traversal
     try:
-        resolved = full_path.resolve()
-        assets_dir = Path("assets").resolve()
-        if not str(resolved).startswith(str(assets_dir)):
-            return json.dumps({
-                "error": "Security violation: Path traversal attempt blocked",
-                "requested_path": asset_path
-            })
-    except Exception as e:
+        full_path = validate_path(filename, assets_dir)
+    except PermissionError as e:
         return json.dumps({
-            "error": f"Invalid path: {str(e)}",
-            "requested_path": asset_path
+            "error": "Security violation: Path traversal attempt blocked",
+            "requested_path": asset_path,
+            "details": str(e)
         })
     
     # Check if file exists
