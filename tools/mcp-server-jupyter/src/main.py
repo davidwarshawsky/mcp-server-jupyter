@@ -18,6 +18,9 @@ See LICENSE file for complete terms.
 [INTERNAL USE] For authorized organizational use only.
 """
 
+# [FINAL PUNCH LIST #5] Version for capability negotiation
+__version__ = "0.2.1"
+
 from mcp.server.fastmcp import FastMCP
 import asyncio
 import time
@@ -210,8 +213,40 @@ async def health_check(request=None):
         "active_kernels": active_sessions,
         "sampled_healthy": healthy_kernels,
         "sampled_unhealthy": unhealthy_kernels,
-        "version": "0.1.0"
+        "version": __version__
     }, status_code=200 if is_healthy else 503)
+
+@mcp.tool()
+def get_server_info():
+    """
+    [FINAL PUNCH LIST #5] Get server version and capabilities for handshake.
+    
+    Client should call this on connection to verify compatibility.
+    Warns user if server version < client minimum required version.
+    
+    Returns:
+        JSON with version, capabilities, and feature flags
+    """
+    return json.dumps({
+        "version": __version__,
+        "capabilities": [
+            "audit_logs",         # Code execution audit trail
+            "sandbox",            # DuckDB sandboxing
+            "uuid_reaper",        # UUID-based zombie reaping
+            "trace_id",           # Request tracing support
+            "resource_limits",    # Kernel resource limits
+            "asset_cleanup",      # Automatic asset TTL
+        ],
+        "features": {
+            "checkpoint": False,  # Removed for security (ROUND 2)
+            "git_integration": False,  # Removed for maintenance burden
+            "docker_kernels": True,
+            "conda_kernels": True,
+            "multiuser": True,
+        },
+        "protocol_version": "1.0",
+        "min_client_version": "0.2.0"  # Minimum compatible client version
+    }, indent=2)
 
 @mcp.tool()
 def get_server_status():
@@ -2563,6 +2598,9 @@ def export_diagnostic_bundle():
 def main():
     import argparse
     
+    # [LAST MILE #1] Log startup configuration banner
+    log_startup_configuration()
+    
     parser = argparse.ArgumentParser(description="MCP Jupyter Server")
     
     # Mode selection
@@ -2738,7 +2776,18 @@ def main():
             print(f"  Url: ws://{host}:{actual_port}/ws\n")
 
             # Configure Uvicorn to use existing socket FD (prevents TOCTOU)
-            config = uvicorn.Config(app=app, fd=sock.fileno(), log_level="error", loop="asyncio")
+            # [FINAL PUNCH LIST #4] Add WebSocket message size limits (DoS prevention)
+            config = uvicorn.Config(
+                app=app,
+                fd=sock.fileno(),
+                log_level="error",
+                loop="asyncio",
+                limit_concurrency=100,  # Max concurrent connections
+                limit_max_requests=10000,  # Restart worker after N requests
+                ws_max_size=10 * 1024 * 1024,  # 10MB WebSocket message limit
+                ws_ping_interval=20.0,  # Send ping every 20s
+                ws_ping_timeout=20.0,  # Close connection if no pong within 20s
+            )
             server = uvicorn.Server(config)
 
             try:

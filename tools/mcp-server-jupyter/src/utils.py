@@ -3,6 +3,7 @@ import hashlib
 import re
 import json
 import asyncio
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -19,6 +20,62 @@ io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 
 # Output truncation to prevent crashes from massive outputs
 MAX_OUTPUT_LENGTH = 3000
+
+
+def check_asset_limits(asset_dir: Path, max_size_bytes: int = 1024 * 1024 * 1024):
+    """
+    [LAST MILE #2] Reactive asset pruning - prevent disk exhaustion.
+    Stakeholder: QA & Edge Case Hunter
+    
+    Called after every asset write. If directory exceeds limit,
+    immediately prune oldest files (LRU strategy).
+    
+    Args:
+        asset_dir: Path to assets directory
+        max_size_bytes: Maximum directory size (default: 1GB)
+    """
+    try:
+        if not asset_dir.exists():
+            return
+        
+        # Calculate total size
+        files = list(asset_dir.glob('*'))
+        total_size = sum(f.stat().st_size for f in files if f.is_file())
+        
+        if total_size > max_size_bytes:
+            # Target 80% of limit to avoid thrashing
+            target_size = int(max_size_bytes * 0.8)
+            
+            # Sort by modification time (oldest first)
+            files_sorted = sorted(
+                [f for f in files if f.is_file()],
+                key=lambda f: f.stat().st_mtime
+            )
+            
+            deleted_count = 0
+            deleted_bytes = 0
+            
+            for f in files_sorted:
+                if total_size <= target_size:
+                    break
+                try:
+                    size = f.stat().st_size
+                    f.unlink()
+                    total_size -= size
+                    deleted_bytes += size
+                    deleted_count += 1
+                except Exception:
+                    pass
+            
+            if deleted_count > 0:
+                print(
+                    f"[ASSET GC] Reactive prune: deleted {deleted_count} files "
+                    f"({deleted_bytes / (1024**2):.1f} MB) to free space",
+                    file=sys.stderr
+                )
+                
+    except Exception as e:
+        print(f"[ASSET GC] Error during check: {e}", file=sys.stderr)
 
 
 def compress_traceback(traceback_lines: List[str]) -> List[str]:
@@ -476,6 +533,9 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
         "llm_summary": "\n".join(llm_summary),
         "raw_outputs": raw_outputs
     }
+
+    # [LAST MILE #2] Reactive asset pruning after writing
+    check_asset_limits(Path(asset_dir))
 
     # Offload JSON serialization to prevent blocking the event loop for large payloads
     return await offload_json_dumps(result)

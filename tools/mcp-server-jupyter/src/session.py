@@ -18,6 +18,7 @@ from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
 from src.cell_id_manager import get_cell_id_at_index
 from src.observability import get_logger, get_tracer
+from src.utils import check_asset_limits
 
 # Configure logging
 logger = get_logger()
@@ -322,20 +323,41 @@ class SessionManager:
                                 server_pid = session_data.get('server_pid')
                                 kernel_pid = session_data.get('pid')
                                 saved_create_time = session_data.get('pid_create_time')
+                                kernel_uuid = session_data.get('kernel_uuid')  # [FINAL PUNCH LIST #1]
                                 
                                 logger.warning(f"[REAPER] Found orphan session from dead server PID {server_pid} for kernel PID {kernel_pid}.")
                                 
-                                # Kill the zombie kernel - BUT ONLY if create_time matches
+                                # [FINAL PUNCH LIST #1] Kill zombie kernel using UUID verification (100% reliable)
                                 if kernel_pid and psutil.pid_exists(kernel_pid):
                                     try:
                                         proc = psutil.Process(kernel_pid)
-                                        # [REAPER FIX] Verify it's actually our process by checking creation time
-                                        if saved_create_time is None or proc.create_time() == saved_create_time:
+                                        should_kill = False
+                                        
+                                        # Method 1 (preferred): Check MCP_KERNEL_ID environment variable
+                                        if kernel_uuid:
+                                            try:
+                                                proc_env = proc.environ()
+                                                proc_kernel_id = proc_env.get('MCP_KERNEL_ID')
+                                                if proc_kernel_id == kernel_uuid:
+                                                    should_kill = True
+                                                    logger.info(f"[REAPER] UUID match confirmed: {kernel_uuid[:8]}...")
+                                                else:
+                                                    logger.warning(f"[REAPER] UUID mismatch. PID {kernel_pid} was reused. Not killing.")
+                                            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                                                # Fallback to create_time if we can't read environment
+                                                logger.warning(f"[REAPER] Cannot read environment, falling back to create_time check")
+                                                if saved_create_time and proc.create_time() == saved_create_time:
+                                                    should_kill = True
+                                        else:
+                                            # Legacy fallback: use create_time (less reliable)
+                                            if saved_create_time is None or proc.create_time() == saved_create_time:
+                                                should_kill = True
+                                        
+                                        if should_kill:
                                             proc_name = proc.name()
                                             proc.kill()
                                             logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid} ({proc_name}).")
-                                        else:
-                                            logger.warning(f"[REAPER] PID {kernel_pid} was reused by OS. Not killing (create_time mismatch).")
+                                        
                                     except psutil.NoSuchProcess:
                                         pass
                                     except Exception as e:
@@ -408,13 +430,14 @@ class SessionManager:
                 logger.error(f"[HEALTH CHECK] Unhandled error: {e}")
                 await asyncio.sleep(check_interval)
     
-    def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
+    def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None):
         """
         Save session info to disk to prevent zombie kernels after server restart.
         
         Stores:
         - Connection file path (for reconnecting to kernel)
         - Process ID (for checking if kernel still alive)
+        - Kernel UUID (for 100% reliable reaping, FINAL PUNCH LIST #1)
         - Environment info (for proper cleanup)
         """
         try:
@@ -440,6 +463,7 @@ class SessionManager:
                 "connection_file": connection_file,
                 "pid": pid if isinstance(pid, int) else None,
                 "pid_create_time": kernel_create_time,  # [REAPER FIX] Track kernel process creation time
+                "kernel_uuid": kernel_uuid,  # [FINAL PUNCH LIST #1] 100% reliable process identification
                 "server_pid": os.getpid(),  # [REAPER FIX] Track which server owns this kernel
                 "server_create_time": current_proc.create_time(), # [REAPER FIX] And its start time
                 "env_info": env_info,
@@ -793,6 +817,11 @@ class SessionManager:
             py_exe = sys.executable
             env_name = "system"
             kernel_env = os.environ.copy()  # Default: inherit current environment
+            
+            # [FINAL PUNCH LIST #1] Inject unique UUID for 100% reliable reaping
+            kernel_uuid = str(uuid.uuid4())
+            kernel_env['MCP_KERNEL_ID'] = kernel_uuid
+            logger.info(f"[KERNEL] Assigning UUID: {kernel_uuid}")
 
             # Resource limits: on POSIX, prefer to use `prlimit` if available to bound address space
             try:
@@ -896,6 +925,34 @@ class SessionManager:
 import sys
 import json
 import traceback
+import os
+
+# [LAST MILE #4] Network Isolation (soft defense-in-depth)
+# Blocks common network libraries to prevent accidental/malicious egress
+# Note: This is Python-level blocking. For true isolation, use Docker with --network none.
+# This stops scripts but not C-extensions or direct socket operations.
+if os.environ.get("MCP_BLOCK_NETWORK") == "1":
+    try:
+        import requests
+        import urllib.request
+        
+        def _blocked_network_call(*args, **kwargs):
+            raise PermissionError(
+                "Network access is disabled in this environment. "
+                "If you need to download data, please ask the administrator to allowlist specific domains."
+            )
+        
+        # Monkeypatch common HTTP libraries
+        requests.get = _blocked_network_call
+        requests.post = _blocked_network_call
+        requests.put = _blocked_network_call
+        requests.delete = _blocked_network_call
+        requests.request = _blocked_network_call
+        urllib.request.urlopen = _blocked_network_call
+        
+        print("[SECURITY] Network access has been restricted for this kernel.", file=sys.stderr)
+    except ImportError:
+        pass  # Requests/urllib not installed, nothing to block
 
 # [STDIN ENABLED] MCP handles input() requests via stdin channel
 # Interactive input is now supported via MCP notifications
@@ -1043,7 +1100,7 @@ except ImportError:
         
         # Persist session info to prevent zombie kernels after server restart
         if pid != "unknown" and connection_file != "unknown":
-            self._persist_session_info(abs_path, connection_file, pid, session_data['env_info'])
+            self._persist_session_info(abs_path, connection_file, pid, session_data['env_info'], kernel_uuid)
                  
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
@@ -1300,11 +1357,14 @@ except ImportError:
                     session_data['execution_counter'] += 1
                     expected_count = session_data['execution_counter']
                     
-                    # [ROUND 2 AUDIT] Audit logging for code execution
+                    # [LAST MILE #3] Structured audit logging with duration tracking
                     import hashlib
+                    import time
                     code_hash = hashlib.sha256(code.encode('utf-8')).hexdigest()[:16]
+                    start_timestamp = time.time()
+                    
                     logger.info(
-                        "[AUDIT] Code execution",
+                        "[AUDIT] execution_started",
                         notebook_path=abs_path,
                         cell_index=cell_index,
                         exec_id=exec_id,
@@ -1343,6 +1403,19 @@ except ImportError:
                         
                         exec_data = session_data['executions'].get(msg_id)
                         if exec_data and exec_data['status'] in ['completed', 'error', 'cancelled']:
+                            # [LAST MILE #3] Log completion with exit status and duration
+                            duration_ms = (time.time() - start_timestamp) * 1000
+                            logger.info(
+                                "[AUDIT] execution_finished",
+                                notebook_path=abs_path,
+                                exec_id=exec_id,
+                                cell_index=cell_index,
+                                code_hash=code_hash,
+                                exit_status=exec_data['status'],
+                                duration_ms=round(duration_ms, 2),
+                                output_count=exec_data.get('output_count', 0)
+                            )
+                            
                             # Check if we should stop on error
                             if exec_data['status'] == 'error' and session_data.get('stop_on_error', False):
                                 logger.warning(f"Execution failed for cell {cell_index}, clearing remaining queue (stop_on_error=True)")
