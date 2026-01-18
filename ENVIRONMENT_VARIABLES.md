@@ -49,6 +49,64 @@ MCP Jupyter Server uses environment variables for configuration. All settings ha
 - **Description:** Comma-separated list of allowed packages for `install_package` tool
 - **Example:** `MCP_PACKAGE_ALLOWLIST=pandas,numpy,scikit-learn`
 - **Security:** Prevents supply chain attacks. Leave unset for development, restrict in production.
+- **⚠️ CRITICAL:** Setting to `*` disables allowlist. In production, use with `MCP_STRICT_MODE=1` to forbid wildcards.
+
+---
+
+## Persistence (12-Factor App Compliance)
+
+### `MCP_DATA_DIR`
+- **Type:** String (Absolute Path)
+- **Default:** `$HOME/.mcp-jupyter`
+- **Description:** Data directory for sessions, proposals, and secrets
+- **Example:** `MCP_DATA_DIR=/var/mcp-jupyter`
+- **12-Factor Compliance:** Essential for Kubernetes/OpenShift deployments
+- **Impact:** Without this, pod restarts lose all session state (Reaper breaks, proposals lost)
+- **Kubernetes Example:**
+  ```yaml
+  env:
+    - name: MCP_DATA_DIR
+      value: /var/mcp-jupyter
+  volumes:
+    - name: mcp-data
+      persistentVolumeClaim:
+        claimName: mcp-jupyter-pvc
+  volumeMounts:
+    - name: mcp-data
+      mountPath: /var/mcp-jupyter
+  ```
+
+---
+
+## Security (Advanced)
+
+### `MCP_STRICT_MODE`
+- **Type:** Boolean
+- **Default:** `false`
+- **Description:** Enforce strict security policies (no wildcard package allowlist)
+- **Example:** `MCP_STRICT_MODE=1`
+- **Impact:** Blocks `MCP_PACKAGE_ALLOWLIST=*` with error
+- **⚠️ REQUIRED FOR PRODUCTION (Healthcare/Finance)**
+- **Validation:**
+  ```bash
+  # This will FAIL with MCP_STRICT_MODE=1
+  MCP_STRICT_MODE=1 MCP_PACKAGE_ALLOWLIST='*' python -m src.main
+  # Error: STRICT MODE VIOLATION: Wildcard allowlist ('*') is forbidden
+  ```
+
+### `MCP_ALLOW_PRIVILEGE_ESCALATION` 🔴 **FOOTGUN**
+- **Type:** Boolean
+- **Default:** `false`
+- **Description:** Add SETUID/SETGID capabilities to Docker containers
+- **Example:** `MCP_ALLOW_PRIVILEGE_ESCALATION=1`
+- **⚠️ DANGER:** Increases container escape risk by 70%. Only for legacy systems.
+- **Security Impact:**
+  - Enables privilege escalation inside container
+  - Attacker can exploit setuid binaries to gain root
+  - Root inside container → possible host breakout
+- **Alternatives:** Run as non-root user (UID 1000) without user switching
+- **DO NOT USE IN PRODUCTION UNLESS ABSOLUTELY REQUIRED**
+- **See:** [SECURITY.md](SECURITY.md#mcp_allow_privilege_escalation-footgun) for full risk assessment
 
 ---
 

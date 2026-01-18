@@ -15,6 +15,22 @@ This extension acts as a "Proxy Kernel" for Jupyter notebooks in VSCode. Instead
 
 ## 🚀 Features
 
+### ⚡ Connection Resilience (Week 1 - NEW)
+- **Automatic Reconnection**: Exponential backoff (1s → 32s) with up to 10 retry attempts
+- **Heartbeat Monitoring**: Detects connection issues after 3 missed pings (90 seconds)
+- **Connection Health Indicator**: Status bar shows `⚠️ MCP (2 missed)` when connection degrades
+- **Execution State Persistence**: Saves completed cell IDs to `.vscode/mcp-state.json`
+- **Seamless VPN/Sleep Recovery**: Reconnects automatically after laptop sleep or network switch
+- **Pending Request Preservation**: In-flight requests survive reconnections
+
+### 🚀 One-Click Setup (Week 2 - NEW)
+- **Quick Start Command**: `MCP Jupyter: Quick Start` - automated setup in <5 minutes
+- **Three Setup Modes**: Managed environment (automatic), existing Python, or remote server
+- **Guided Wizard**: Step-by-step progress with clear error messages
+- **Health Dashboard**: Real-time server status monitoring with connection metrics
+- **Example Notebook**: Automatically opens quickstart guide after setup
+- **Smart Detection**: Skips setup if server is already running
+
 ### ✅ Core Functionality
 - **Jupyter Notebook Support**: Execute Python code in `.ipynb` files
 - **Incremental Output Streaming**: See print statements and outputs as they happen

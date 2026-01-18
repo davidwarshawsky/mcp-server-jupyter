@@ -2,6 +2,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field, ConfigDict, field_validator
 from typing import Optional
+from pathlib import Path
 import sys
 
 class Settings(BaseSettings):

@@ -10,6 +10,7 @@ Phase: 3.2 - Docker Security Profiles
 """
 
 import json
+import os
 from typing import Dict, List, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field

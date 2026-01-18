@@ -24,6 +24,8 @@ export class McpClient {
   public readonly onNotification = this._onNotification.event;
   private _onConnectionStateChange = new vscode.EventEmitter<'connected' | 'disconnected' | 'connecting'>();
   public readonly onConnectionStateChange = this._onConnectionStateChange.event;
+  private _onConnectionHealthChange = new vscode.EventEmitter<{ missedHeartbeats: number; reconnectAttempt: number }>();
+  public readonly onConnectionHealthChange = this._onConnectionHealthChange.event;
   private connectionState: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
   
   // [PHASE 3 UX POLISH] Notification throttling to prevent spam
@@ -31,6 +33,19 @@ export class McpClient {
   private lastNotificationSent = 0;
   private notificationThrottleMs = 100; // Max 10 notifications per second (100ms)
   private notificationFlushTimer: NodeJS.Timeout | null = null;
+  
+  // [WEEK 1] Connection resilience
+  private reconnectAttempt = 0;
+  private maxReconnectAttempts = 10;
+  private baseReconnectDelay = 1000; // 1 second
+  private maxReconnectDelay = 32000; // 32 seconds
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  private lastWsUrl: string | null = null;
+  private heartbeatInterval: NodeJS.Timeout | null = null;
+  private heartbeatTimeoutMs = 30000; // Send ping every 30s
+  private lastPongReceived = Date.now();
+  private missedHeartbeats = 0;
+  private maxMissedHeartbeats = 3;
 
   constructor() {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
@@ -250,6 +265,9 @@ export class McpClient {
   }
 
   private async connectWebSocket(url: string, retries = 20, delay = 500): Promise<void> {
+    // [WEEK 1] Store URL for automatic reconnection
+    this.lastWsUrl = url;
+    
     for (let i = 0; i < retries; i++) {
         try {
             await new Promise<void>((resolve, reject) => {
@@ -281,6 +299,14 @@ export class McpClient {
                 this.ws.on('open', async () => {
                     this.outputChannel.appendLine('WebSocket connected');
                     this.setConnectionState('connected');
+                    
+                    // [WEEK 1] Reset reconnection state on successful connection
+                    this.reconnectAttempt = 0;
+                    this.lastPongReceived = Date.now();
+                    this.missedHeartbeats = 0;
+                    
+                    // [WEEK 1] Start heartbeat monitoring
+                    this.startHeartbeat();
                     
                     // Check version compatibility
                     try {
@@ -315,12 +341,32 @@ export class McpClient {
                     }
                 });
 
+                // [WEEK 1] Handle pong for heartbeat monitoring
+                this.ws.on('pong', () => {
+                    this.lastPongReceived = Date.now();
+                    this.missedHeartbeats = 0;
+                    // Emit health change to update status bar
+                    this._onConnectionHealthChange.fire({ 
+                      missedHeartbeats: 0, 
+                      reconnectAttempt: this.reconnectAttempt 
+                    });
+                });
+                
                 this.ws.on('close', (code, reason) => {
                      this.outputChannel.appendLine(`WebSocket closed: ${code} ${reason}`);
+                     
+                     // [WEEK 1] Stop heartbeat monitoring
+                     this.stopHeartbeat();
+                     
                      this.ws = undefined;
                      this.setConnectionState('disconnected');
-                     // Show notification for unexpected disconnects
-                     if (!this.isShuttingDown) {
+                     
+                     // [WEEK 1] Attempt automatic reconnection for unexpected disconnects
+                     if (!this.isShuttingDown && this.lastWsUrl) {
+                       this.outputChannel.appendLine('Connection lost. Attempting automatic reconnection...');
+                       this.attemptReconnection();
+                     } else if (!this.isShuttingDown) {
+                       // Only show notification if not auto-reconnecting
                        vscode.window.showWarningMessage(
                          'MCP server disconnected',
                          'Show Logs',
@@ -1010,6 +1056,188 @@ export class McpClient {
 
 
   /**
+   * [WEEK 1] Start heartbeat monitoring
+   * Sends ping every 30s, tracks missed pongs
+   */
+  private startHeartbeat(): void {
+    this.stopHeartbeat(); // Clear any existing interval
+    
+    this.heartbeatInterval = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      
+      // Check if we've missed too many heartbeats
+      const timeSinceLastPong = Date.now() - this.lastPongReceived;
+      if (timeSinceLastPong > this.heartbeatTimeoutMs * this.maxMissedHeartbeats) {
+        this.missedHeartbeats++;
+        this.outputChannel.appendLine(`⚠️ Connection unstable (${this.missedHeartbeats} missed heartbeats)`);
+        
+        // [WEEK 1] Emit health change for status bar update
+        this._onConnectionHealthChange.fire({ 
+          missedHeartbeats: this.missedHeartbeats, 
+          reconnectAttempt: this.reconnectAttempt 
+        });
+        
+        if (this.missedHeartbeats >= this.maxMissedHeartbeats) {
+          this.outputChannel.appendLine('❌ Too many missed heartbeats. Closing connection.');
+          this.ws.close(1000, 'Heartbeat timeout');
+          return;
+        }
+      }
+      
+      // Send ping
+      try {
+        this.ws.ping();
+      } catch (error) {
+        this.outputChannel.appendLine(`Failed to send ping: ${error}`);
+      }
+    }, this.heartbeatTimeoutMs);
+  }
+  
+  /**
+   * [WEEK 1] Stop heartbeat monitoring
+   */
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+  
+  /**
+   * [WEEK 1] Attempt automatic reconnection with exponential backoff
+   */
+  private async attemptReconnection(): Promise<void> {
+    // Clear any pending reconnection timer
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    
+    this.reconnectAttempt++;
+    
+    if (this.reconnectAttempt > this.maxReconnectAttempts) {
+      this.outputChannel.appendLine(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached`);
+      vscode.window.showErrorMessage(
+        'Failed to reconnect to MCP server after multiple attempts',
+        'Show Logs',
+        'Restart Server'
+      ).then(choice => {
+        if (choice === 'Show Logs') {
+          this.outputChannel.show();
+        } else if (choice === 'Restart Server') {
+          this.reconnectAttempt = 0; // Reset for manual restart
+          vscode.commands.executeCommand('mcp-jupyter.restartServer');
+        }
+      });
+      return;
+    }
+    
+    // Calculate exponential backoff delay with jitter
+    const baseDelay = Math.min(
+      this.baseReconnectDelay * Math.pow(2, this.reconnectAttempt - 1),
+      this.maxReconnectDelay
+    );
+    const jitter = Math.random() * 0.3 * baseDelay; // ±30% jitter
+    const delay = baseDelay + jitter;
+    
+    this.outputChannel.appendLine(
+      `🔄 Reconnection attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts} in ${Math.round(delay)}ms...`
+    );
+    
+    // [WEEK 1] Emit health change for status bar update
+    this._onConnectionHealthChange.fire({ 
+      missedHeartbeats: this.missedHeartbeats, 
+      reconnectAttempt: this.reconnectAttempt 
+    });
+    
+    this.reconnectTimer = setTimeout(async () => {
+      if (this.isShuttingDown || !this.lastWsUrl) {
+        return;
+      }
+      
+      try {
+        this.setConnectionState('connecting');
+        await this.connectWebSocket(this.lastWsUrl, 1, 0); // Single attempt per reconnection cycle
+        this.outputChannel.appendLine('✅ Reconnection successful');
+      } catch (error) {
+        this.outputChannel.appendLine(`Reconnection attempt failed: ${error}`);
+        // Try again with next backoff
+        this.attemptReconnection();
+      }
+    }, delay);
+  }
+  
+  /**
+   * [WEEK 1] Get persisted execution state from workspace
+   */
+  private async loadExecutionState(): Promise<Record<string, string[]>> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      return {};
+    }
+    
+    const stateFilePath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'mcp-state.json');
+    
+    try {
+      if (fs.existsSync(stateFilePath)) {
+        const stateData = fs.readFileSync(stateFilePath, 'utf-8');
+        return JSON.parse(stateData);
+      }
+    } catch (error) {
+      this.outputChannel.appendLine(`Failed to load execution state: ${error}`);
+    }
+    
+    return {};
+  }
+  
+  /**
+   * [WEEK 1] Save execution state to workspace
+   */
+  private async saveExecutionState(notebookPath: string, completedCellIds: string[]): Promise<void> {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      return;
+    }
+    
+    const vscodeDir = path.join(workspaceFolder.uri.fsPath, '.vscode');
+    const stateFilePath = path.join(vscodeDir, 'mcp-state.json');
+    
+    try {
+      // Ensure .vscode directory exists
+      if (!fs.existsSync(vscodeDir)) {
+        fs.mkdirSync(vscodeDir, { recursive: true });
+      }
+      
+      // Load existing state
+      const state = await this.loadExecutionState();
+      
+      // Update with new completed cells
+      state[notebookPath] = completedCellIds;
+      
+      // Save to file
+      fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2), 'utf-8');
+    } catch (error) {
+      this.outputChannel.appendLine(`Failed to save execution state: ${error}`);
+    }
+  }
+  
+  /**
+   * [WEEK 1] Public method to save execution state (called by kernel provider)
+   */
+  public async persistExecutionState(notebookPath: string, completedCellIds: string[]): Promise<void> {
+    return this.saveExecutionState(notebookPath, completedCellIds);
+  }
+  
+  /**
+   * [WEEK 1] Public method to load execution state (called by kernel provider)
+   */
+  public async restoreExecutionState(): Promise<Record<string, string[]>> {
+    return this.loadExecutionState();
+  }
+
+  /**
    * Handle process exit
    */
   private handleProcessExit(code: number | null, signal: NodeJS.Signals | null): void {
@@ -1200,6 +1428,13 @@ export class McpClient {
    * Dispose resources
    */
   dispose(): void {
+    // [WEEK 1] Clean up reconnection timer and heartbeat
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    this.stopHeartbeat();
+    
     this.outputChannel.dispose();
   }
 }

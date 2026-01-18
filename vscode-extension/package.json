@@ -95,6 +95,18 @@
     ],
     "commands": [
       {
+        "command": "mcp-jupyter.quickStart",
+        "title": "MCP Jupyter: Quick Start",
+        "category": "MCP Jupyter",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "mcp-jupyter.showHealthCheck",
+        "title": "MCP Jupyter: Show Health Dashboard",
+        "category": "MCP Jupyter",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "mcp-jupyter.openWalkthrough",
         "title": "MCP Jupyter: Open Setup Wizard",
         "category": "MCP Jupyter"

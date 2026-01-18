@@ -6,6 +6,8 @@ import { VariableDashboardProvider } from './variableDashboard';
 import { checkPythonDependencies, promptInstallDependencies } from './dependencies';
 import { SetupManager } from './setupManager';
 import { SyncCodeLensProvider } from './syncCodeLensProvider';
+import { QuickStartWizard } from './quickStartWizard';
+import { HealthCheckDashboard } from './healthCheckDashboard';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
@@ -14,6 +16,8 @@ let syncStatusBar: vscode.StatusBarItem;
 let connectionStatusBar: vscode.StatusBarItem;
 let setupManager: SetupManager;
 let syncCodeLensProvider: SyncCodeLensProvider;
+let quickStartWizard: QuickStartWizard;
+let healthCheckDashboard: HealthCheckDashboard;
 const notebooksNeedingSync = new Set<string>();
 
 export interface ExtensionApi {
@@ -41,21 +45,52 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         case 'connected':
           connectionStatusBar.text = '$(circle-filled) MCP';
           connectionStatusBar.backgroundColor = undefined;
+          connectionStatusBar.tooltip = 'MCP Server: Connected';
           break;
         case 'connecting':
           connectionStatusBar.text = '$(sync~spin) MCP';
           connectionStatusBar.backgroundColor = undefined;
+          connectionStatusBar.tooltip = 'MCP Server: Connecting...';
           break;
         case 'disconnected':
           connectionStatusBar.text = '$(circle-outline) MCP';
           connectionStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
+          connectionStatusBar.tooltip = 'MCP Server: Disconnected';
           break;
+      }
+      connectionStatusBar.show();
+    });
+    
+    // [WEEK 1] Subscribe to connection health changes (heartbeat & reconnection)
+    mcpClient.onConnectionHealthChange((health) => {
+      if (health.missedHeartbeats > 0) {
+        connectionStatusBar.text = `$(warning) MCP (${health.missedHeartbeats} missed)`;
+        connectionStatusBar.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+        connectionStatusBar.tooltip = `MCP Server: Connection unstable (${health.missedHeartbeats} missed heartbeats)`;
+      } else if (health.reconnectAttempt > 0) {
+        connectionStatusBar.text = `$(sync~spin) MCP (retry ${health.reconnectAttempt}/10)`;
+        connectionStatusBar.backgroundColor = undefined;
+        connectionStatusBar.tooltip = `MCP Server: Reconnecting (attempt ${health.reconnectAttempt}/10)`;
+      } else {
+        // Healthy connection - restore normal display
+        connectionStatusBar.text = '$(circle-filled) MCP';
+        connectionStatusBar.backgroundColor = undefined;
+        connectionStatusBar.tooltip = 'MCP Server: Connected';
       }
       connectionStatusBar.show();
     });
     
     // Setup manager for managed environment (First-Run flow)
     setupManager = new SetupManager(context);
+    
+    // [WEEK 2] Quick Start wizard for one-click setup
+    quickStartWizard = new QuickStartWizard(context, setupManager, mcpClient);
+    quickStartWizard.showIfNeeded();
+    context.subscriptions.push(quickStartWizard);
+    
+    // [WEEK 2] Health check dashboard
+    healthCheckDashboard = new HealthCheckDashboard(mcpClient);
+    context.subscriptions.push(healthCheckDashboard);
 
     // Open the walkthrough on first activation (idempotent)
     const isInstalled = context.globalState.get('mcp.hasCompletedSetup', false);
@@ -209,6 +244,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(notebookWatcher);
 
     // Register commands
+    // [WEEK 2] Quick Start command - one-click setup
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.quickStart', async () => {
+        await quickStartWizard.run();
+      })
+    );
+    
+    // [WEEK 2] Health check dashboard command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.showHealthCheck', () => {
+        healthCheckDashboard.show();
+      })
+    );
+    
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.openWalkthrough', async () => {
         await vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');

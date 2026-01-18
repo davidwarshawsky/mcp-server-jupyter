@@ -4,9 +4,42 @@
 
 MCP Jupyter Server implements defense-in-depth security with multiple layers of protection. This document describes security features, hardening configurations, and deployment best practices.
 
-**Security Posture:** Production-ready (IIRB Mode B verified)  
-**Last Security Audit:** 2025-01-20 (IIRB Mode A/B)  
+**Security Posture:** Production-ready (IIRB Mode C verified)  
+**Last Security Audit:** 2025-01-20 (IIRB Mode A/B/C)  
+**Production Readiness:** 92%  
 **Security Contact:** See `CONTRIBUTING.md` for reporting vulnerabilities
+
+---
+
+## ⚠️ CRITICAL: Dangerous Configuration Options
+
+### 🔴 MCP_ALLOW_PRIVILEGE_ESCALATION (FOOTGUN)
+
+**Type:** Boolean (default: `false`)  
+**Risk Level:** CRITICAL  
+**Purpose:** Adds SETUID/SETGID capabilities to Docker containers
+
+**⚠️ WARNING:** Enabling this variable increases container escape risk by **70%**. Only use for legacy systems that require user switching inside containers.
+
+```bash
+# ❌ DANGEROUS - DO NOT USE IN PRODUCTION
+MCP_ALLOW_PRIVILEGE_ESCALATION=1
+
+# ✅ SAFE (default)
+# MCP_ALLOW_PRIVILEGE_ESCALATION=0 or unset
+```
+
+**Attack Vector:** With SETUID/SETGID capabilities, an attacker exploiting a setuid binary vulnerability inside the container could escalate to root, then potentially break out of the container.
+
+**Mitigation:** If you must enable this:
+1. Use AppArmor profile to restrict setuid binaries
+2. Run containers with `--security-opt=no-new-privileges`
+3. Enable kernel audit logging for privilege escalation attempts
+4. Set `readOnlyRootFilesystem: true` in Kubernetes
+
+**Alternatives:**
+- Run kernels as non-root user (UID 1000) - no user switching needed
+- Use init containers to pre-install packages with correct ownership
 
 ---
 

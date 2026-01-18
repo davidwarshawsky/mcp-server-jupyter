@@ -18,6 +18,9 @@ export class McpNotebookController {
   private activeExecutions = new Map<string, vscode.NotebookCellExecution>(); // taskId -> execution
   private statusBar: vscode.StatusBarItem;
   private currentEnvironment?: { name: string; path: string; type: 'venv' | 'conda' | 'global' };
+  
+  // [WEEK 1] Track completed cells per notebook for state persistence
+  private completedCells = new Map<string, Set<string>>();
 
   constructor(mcpClient: McpClient) {
     this.mcpClient = mcpClient;
@@ -35,6 +38,9 @@ export class McpNotebookController {
     this.controller.supportsExecutionOrder = true;
     this.controller.executeHandler = this.executeHandler.bind(this);
     this.controller.interruptHandler = this.interruptHandler.bind(this);
+
+    // [WEEK 1] Restore execution state on startup
+    this.restoreExecutionState();
 
     // Create status bar item
     this.statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -199,6 +205,19 @@ export class McpNotebookController {
     
           if (success) {
              await this.addExecutionMetadata(cell, 'human', Date.now());
+             
+             // [WEEK 1] Track completed cell and persist state
+             const notebookPath = notebook.uri.fsPath;
+             if (!this.completedCells.has(notebookPath)) {
+               this.completedCells.set(notebookPath, new Set());
+             }
+             this.completedCells.get(notebookPath)!.add(`cell-${cell.index}`);
+             
+             // Persist to disk (fire-and-forget)
+             const completedCellIds = Array.from(this.completedCells.get(notebookPath)!);
+             this.mcpClient.persistExecutionState(notebookPath, completedCellIds)
+               .catch(err => console.error('Failed to persist execution state:', err));
+             
              execution.end(true, Date.now());
           } else {
              execution.end(false, Date.now());
@@ -593,21 +612,6 @@ export class McpNotebookController {
   }
 
   /**
-   * [UX] Request confirmation before loading a checkpoint
-   */
-  async confirmAndLoadCheckpoint(notebookPath: string, checkpointName: string): Promise<any> {
-    const choice = await vscode.window.showWarningMessage(
-      "Loading a checkpoint will re-execute the code history. This may have unintended side-effects (e.g., re-running API calls). Are you sure you want to proceed?",
-      { modal: true },
-      "Proceed"
-    );
-
-    if (choice === "Proceed") {
-      return this.mcpClient.loadCheckpoint(notebookPath, checkpointName);
-    }
-  }
-
-  /**
    * Update environment (called from extension.ts)
    */
   updateEnvironment(env: { name: string; path: string; type: string }): void {
@@ -655,6 +659,26 @@ export class McpNotebookController {
       await vscode.workspace.applyEdit(edit);
     } catch (error) {
       console.error('Failed to add execution metadata:', error);
+    }
+  }
+  
+  /**
+   * [WEEK 1] Restore execution state from persisted storage
+   */
+  private async restoreExecutionState(): Promise<void> {
+    try {
+      const state = await this.mcpClient.restoreExecutionState();
+      
+      // Load completed cells into memory
+      for (const [notebookPath, cellIds] of Object.entries(state)) {
+        this.completedCells.set(notebookPath, new Set(cellIds));
+      }
+      
+      if (Object.keys(state).length > 0) {
+        console.log(`Restored execution state for ${Object.keys(state).length} notebook(s)`);
+      }
+    } catch (error) {
+      console.error('Failed to restore execution state:', error);
     }
   }
 
