@@ -4,11 +4,26 @@ import sys
 import tempfile
 import logging
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Thread pool for blocking I/O operations
+_notebook_io_pool = ThreadPoolExecutor(max_workers=2)
+
+async def read_notebook_async(path: str):
+    """
+    [FIX #1] Async wrapper for nbformat.read to prevent event loop blocking.
+    
+    Large notebooks (>1MB) can block the asyncio loop for 100ms+,
+    causing heartbeat timeouts and agent disconnects.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_notebook_io_pool, lambda: nbformat.read(path, as_version=4))
 
 
 def _slice_text(text: str, line_range: Optional[List[int]] = None) -> str:

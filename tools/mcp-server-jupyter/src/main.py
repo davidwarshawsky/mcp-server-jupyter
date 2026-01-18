@@ -23,7 +23,7 @@ import asyncio
 import time
 import os
 from pathlib import Path
-from typing import List, Optional, Any
+from typing import List, Optional, Any, Dict
 import nbformat
 import json
 import sys
@@ -48,6 +48,9 @@ import traceback
 
 logger = configure_logging()
 tracer = get_tracer(__name__)
+
+# Server version for compatibility checking
+__version__ = "0.2.0"
 
 # [HEARTBEAT] Auto-shutdown configuration
 HEARTBEAT_INTERVAL = 60  # Check every minute
@@ -318,18 +321,23 @@ def list_kernels():
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-async def detect_sync_needed(notebook_path: str):
+async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[int, str]] = None):
     """
-    [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk.
+    [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk or VS Code buffer.
     
     **Purpose**: Before the agent starts work, check if a human has modified the notebook
     since the last agent execution.
     
     **How It Works**:
-    1. Reads notebook from disk.
-    2. Calculates SHA-256 hash of each cell's content.
-    3. Compares with 'execution_hash' stored in cell metadata.
-    4. If hashes mismatch, sync is required.
+    1. If buffer_hashes provided (from VS Code client), use those as source of truth.
+    2. Otherwise, reads notebook from disk.
+    3. Calculates SHA-256 hash of each cell's content.
+    4. Compares with 'execution_hash' stored in cell metadata.
+    5. If hashes mismatch, sync is required.
+    
+    Args:
+        notebook_path: Path to notebook
+        buffer_hashes: Optional dict of {cell_index: hash} from VS Code buffer (source of truth)
     
     Returns:
         JSON with:
@@ -350,26 +358,38 @@ async def detect_sync_needed(notebook_path: str):
             "recommendation": "Call start_kernel() first"
         })
     
-    # Read notebook from disk
-    try:
-        nb = nbformat.read(notebook_path, as_version=4)
-    except Exception as e:
-        return json.dumps({
-            "error": f"Failed to read notebook: {e}"
-        })
-    
+    # If buffer_hashes provided by client, use those as source of truth
+    # Otherwise, read from disk (legacy behavior)
     changed_cells = []
     
-    for idx, cell in enumerate(nb.cells):
-        if cell.cell_type == 'code':
-            current_hash = utils.get_cell_hash(cell.source)
-            # Check both new 'mcp' and legacy 'mcp_trace' metadata locations
-            mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
-            last_hash = mcp_meta.get('execution_hash')
+    if buffer_hashes is not None:
+        # Client-provided hashes (VS Code buffer state) - this is the source of truth
+        for idx, buffer_hash in buffer_hashes.items():
+            # Compare against kernel execution history
+            exec_history = session.get('execution_history', {})
+            kernel_hash = exec_history.get(idx)
             
-            # If no hash exists (never executed by agent) or hash mismatch (content changed)
-            if not last_hash or current_hash != last_hash:
+            if not kernel_hash or buffer_hash != kernel_hash:
                 changed_cells.append(idx)
+    else:
+        # Legacy: Read notebook from disk
+        try:
+            nb = nbformat.read(notebook_path, as_version=4)
+        except Exception as e:
+            return json.dumps({
+                "error": f"Failed to read notebook: {e}"
+            })
+        
+        for idx, cell in enumerate(nb.cells):
+            if cell.cell_type == 'code':
+                current_hash = utils.get_cell_hash(cell.source)
+                # Check both new 'mcp' and legacy 'mcp_trace' metadata locations
+                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+                last_hash = mcp_meta.get('execution_hash')
+                
+                # If no hash exists (never executed by agent) or hash mismatch (content changed)
+                if not last_hash or current_hash != last_hash:
+                    changed_cells.append(idx)
     
     sync_needed = len(changed_cells) > 0
     
@@ -800,7 +820,7 @@ async def run_all_cells(notebook_path: str):
     }, indent=2)
 
 @mcp.tool()
-async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
+async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     """
     [HANDOFF PROTOCOL] Synchronize kernel state with disk after human intervention.
     
@@ -814,27 +834,28 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
     - After switching from "Human Mode" to "Agent Mode" in VS Code extension
     
     **Strategy**:
-    - Always uses "full" sync: Re-executes ALL code cells from disk
-    - Previous "smart" strategy removed due to false positive risk
-      (Example: cell with plt.figure() + data = calc() would skip calc() causing undefined variable errors)
+    - "smart" (default): DAG-based minimal re-execution. Only reruns changed cells and their dependents.
+    - "incremental": Re-executes from first changed cell to end (linear forward sync)
+    - "full": Re-executes ALL code cells from scratch (safest but slowest)
     
     Args:
         notebook_path: Path to the notebook file
-        strategy: DEPRECATED - now always uses "full" for correctness
+        strategy: "smart" | "incremental" | "full"
     
     Returns:
         JSON with:
         - cells_synced: Number of cells re-executed
         - execution_ids: List of execution IDs for tracking
         - sync_duration_estimate: Estimated time to complete (based on queue size)
+        - rerun_reason: Explanation of why each cell was rerun
     
     Agent Workflow Example:
         # 1. Agent detects notebook changed on disk
         outline = get_notebook_outline(path)
         if len(outline['cells']) > session.last_known_cell_count:
-            # 2. Sync state before continuing
-            result = sync_state_from_disk(path)
-            print(f"Synced {result['cells_synced']} cells to rebuild state")
+            # 2. Smart sync only reruns affected cells
+            result = sync_state_from_disk(path, strategy="smart")
+            print(f"Synced {result['cells_synced']} cells (skipped {result['cells_skipped']} clean cells)")
         
         # 3. Now safe to continue work
         append_cell(path, "# Agent's new analysis")
@@ -856,62 +877,116 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
         })
     
     exec_ids = []
-    
-    # [Sync Strategy 2.0: Cut-Point incremental Sync]
-    # We find the first cell that is either changed OR not executed in this session.
-    # We execute that cell and ALL subsequent cells to ensure consistent state.
-    # This avoids re-running expensive early cells (Model Training, ETL) if they are unchanged.
-    
-    start_index = 0
-    strategy_used = "incremental"
+    strategy_used = strategy
+    rerun_reasons = {}
     
     if strategy == "full":
-        # User requested full re-run
-        start_index = 0
-        strategy_used = "full"
-    else:
-        # Determine Cut Point
+        # Full sync: rerun everything
+        cells_to_run = list(range(len(nb.cells)))
+        for idx in cells_to_run:
+            if nb.cells[idx].cell_type == 'code':
+                rerun_reasons[idx] = "full_sync_requested"
+    
+    elif strategy == "smart":
+        # DAG-based minimal sync
+        from . import dag_executor
+        
+        # Find changed cells
+        changed_cells = set()
+        executed_indices = session.get('executed_indices', set())
+        
+        for idx, cell in enumerate(nb.cells):
+            if cell.cell_type == 'code':
+                # Check if never executed OR content changed
+                if idx not in executed_indices:
+                    changed_cells.add(idx)
+                    rerun_reasons[idx] = "never_executed"
+                    continue
+                
+                current_hash = utils.get_cell_hash(cell.source)
+                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
+                last_hash = mcp_meta.get('execution_hash')
+                
+                if not last_hash or current_hash != last_hash:
+                    changed_cells.add(idx)
+                    rerun_reasons[idx] = "content_modified"
+        
+        if changed_cells:
+            # Build dependency graph and compute affected cells
+            cells_source = [cell.source if cell.cell_type == 'code' else '' for cell in nb.cells]
+            try:
+                cells_to_run = dag_executor.get_minimal_rerun_set(cells_source, changed_cells)
+                # Mark dependent cells
+                for idx in cells_to_run:
+                    if idx not in rerun_reasons:
+                        rerun_reasons[idx] = "dependent_on_changed_cell"
+            except Exception as e:
+                logger.warning(f"DAG analysis failed, falling back to incremental sync: {e}")
+                # Fallback to incremental
+                first_changed = min(changed_cells)
+                cells_to_run = list(range(first_changed, len(nb.cells)))
+                strategy_used = "incremental_fallback"
+                for idx in cells_to_run:
+                    if idx not in rerun_reasons:
+                        rerun_reasons[idx] = "incremental_fallback"
+        else:
+            cells_to_run = []
+            strategy_used = "smart_skipped_all"
+    
+    else:  # "incremental"
+        # Incremental sync: find first dirty cell, rerun from there
         first_dirty_idx = -1
         executed_indices = session.get('executed_indices', set())
         
         for idx, cell in enumerate(nb.cells):
             if cell.cell_type == 'code':
-                # Condition 1: Not executed in this session (State missing)
                 if idx not in executed_indices:
                     first_dirty_idx = idx
+                    rerun_reasons[idx] = "never_executed"
                     break 
                 
-                # Condition 2: Content Changed vs Disk
                 current_hash = utils.get_cell_hash(cell.source)
-                # Check both new 'mcp' and legacy 'mcp_trace'
                 mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
                 last_hash = mcp_meta.get('execution_hash')
                 
                 if not last_hash or current_hash != last_hash:
                     first_dirty_idx = idx
+                    rerun_reasons[idx] = "content_modified"
                     break
         
         if first_dirty_idx != -1:
-            start_index = first_dirty_idx
+            cells_to_run = list(range(first_dirty_idx, len(nb.cells)))
+            for idx in cells_to_run:
+                if idx not in rerun_reasons:
+                    rerun_reasons[idx] = "incremental_cascade"
         else:
-            # All cells clean and executed
-            start_index = len(nb.cells) # Nothing to run
-            strategy_used = "incremental (skipped_all)"
+            cells_to_run = []
+            strategy_used = "incremental_skipped_all"
 
-    for idx, cell in enumerate(nb.cells):
-        if cell.cell_type == 'code' and idx >= start_index:
+    # Execute determined cells
+    for idx in cells_to_run:
+        if idx < len(nb.cells) and nb.cells[idx].cell_type == 'code':
+            cell = nb.cells[idx]
             exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
             if exec_id:
-                exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
+                exec_ids.append({
+                    'cell_index': idx,
+                    'exec_id': exec_id,
+                    'reason': rerun_reasons.get(idx, 'unknown')
+                })
     
-    # Calculate estimated sync duration
+    # Calculate metrics
     queue_size = session['execution_queue'].qsize() if 'execution_queue' in session else 0
-    estimate_seconds = len(exec_ids) * 2  # Rough estimate: 2s per cell
+    estimate_seconds = len(exec_ids) * 2
+    total_code_cells = sum(1 for c in nb.cells if c.cell_type == 'code')
+    skipped_cells = total_code_cells - len(exec_ids)
     
     return json.dumps({
         'status': 'syncing',
-        'message': f'Queued {len(exec_ids)} cells for state synchronization (starting from cell {start_index})',
+        'message': f'Queued {len(exec_ids)} cells for state synchronization',
         'cells_synced': len(exec_ids),
+        'cells_skipped': skipped_cells,
+        'total_code_cells': total_code_cells,
         'execution_ids': exec_ids,
         'queue_size': queue_size + len(exec_ids),
         'estimated_duration_seconds': estimate_seconds,
@@ -920,9 +995,35 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "full"):
     }, indent=2)
 
 @mcp.tool()
+async def get_version():
+    """
+    Get MCP server version for compatibility checking.
+    
+    Returns:
+        JSON with version, protocol_version, and capabilities
+    """
+    return json.dumps({
+        'version': __version__,
+        'protocol_version': '1.0',
+        'capabilities': [
+            'execute_cells',
+            'async_execution',
+            'websocket_streaming',
+            'health_monitoring',
+            'interrupt_escalation',
+            'checkpoint_recovery',
+            'docker_isolation',
+            'sql_superpowers'
+        ],
+        'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    })
+
+@mcp.tool()
 async def cancel_execution(notebook_path: str, task_id: str):
     """
     Interrupts the kernel to stop the running task.
+    
+    Uses multi-stage escalation: SIGINT → SIGTERM → SIGKILL
     """
     return await session_manager.cancel_execution(notebook_path, task_id)
 

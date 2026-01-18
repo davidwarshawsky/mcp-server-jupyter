@@ -83,3 +83,54 @@ def generate_request_id():
     req_id = str(uuid.uuid4())
     request_id_ctx.set(req_id)
     return req_id
+
+def set_request_id(req_id: str):
+    """
+    [FIX #7] Set request ID in context for tracing.
+    
+    This allows correlation of client requests with server logs.
+    Client should send trace_id in request metadata.
+    """
+    request_id_ctx.set(req_id)
+    return req_id
+
+def get_request_id() -> str:
+    """Get current request ID from context."""
+    return request_id_ctx.get()
+
+async def trace_middleware(request, call_next):
+    """
+    [FIX #7] FastAPI/Starlette middleware to extract trace ID from requests.
+    
+    Extracts trace_id from JSON-RPC request metadata and sets it in context.
+    This enables end-to-end tracing from VS Code to server logs.
+    
+    Usage in main.py:
+        from src.observability import trace_middleware
+        app.middleware("http")(trace_middleware)
+    """
+    trace_id = "unknown"
+    
+    # Try to extract from JSON body
+    try:
+        if request.method == "POST":
+            body = await request.body()
+            import json as json_lib
+            data = json_lib.loads(body)
+            trace_id = data.get('_meta', {}).get('trace_id', 'unknown')
+            
+            # Restore body for downstream handlers
+            async def receive():
+                return {"type": "http.request", "body": body}
+            request._receive = receive
+    except Exception:
+        pass
+    
+    # Set in context
+    token = request_id_ctx.set(trace_id)
+    
+    try:
+        response = await call_next(request)
+        return response
+    finally:
+        request_id_ctx.reset(token)

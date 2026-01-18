@@ -1,66 +1,88 @@
-[tool.poetry]
-name = "mcp-server-jupyter"
-version = "0.1.0"
-description = "A MCP server for executing Jupyter Notebooks"
-authors = ["Antigravity <antigravity@example.com>"]
-readme = "README.md"
-packages = [{include = "src"}]
-# [CRITICAL] Ensure non-python files in src are included
-include = ["src/prompts/*.md"]
-
-[tool.poetry.dependencies]
-python = "^3.10"
-mcp = "^1.0.0"
-jupyter_client = "^8.0.0"
-nbformat = "^5.0.0"
-ipykernel = "^6.0.0"
-psutil = "^5.9.0"
-GitPython = "^3.1.0"
-uvicorn = {version = "^0.40.0", extras = ["standard"]}
-starlette = "^0.51.0"
-websockets = "^14.0"
-structlog = "^24.1.0"
-pydantic = "^2.0.0"
-aiofiles = "^23.2.0"  # Required by Starlette StaticFiles for async file serving
-opentelemetry-api = "^1.22.0"
-opentelemetry-sdk = "^1.22.0"
-opentelemetry-exporter-otlp = "^1.22.0"
-
-[tool.poetry.extras]
-superpowers = ["duckdb"]
-
-[tool.poetry.group.superpowers]
-optional = true
-
-[tool.poetry.group.superpowers.dependencies]
-duckdb = "^1.1.0"
-
-[tool.poetry.scripts]
-mcp-jupyter = "src.main:main"
-
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.0.0"
-pytest-asyncio = "^0.23.0"
-pytest-xdist = "^3.5.0"
-pytest-cov = "^4.1.0"
-pytest-timeout = "^2.2.0"
-hypothesis = "^6.92.0"
-black = "^24.0.0"
-pyinstaller = "^6.0.0"
-
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[project]
+name = "mcp-server-jupyter"
+version = "0.2.0"
+description = "Production-ready MCP server for executing Jupyter Notebooks with AI agent support. Features DAG-based smart sync, SQL superpowers, auto-EDA, and time-travel debugging."
+authors = [
+    {name = "MCP Jupyter Contributors", email = "contact@example.com"}
+]
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.10,<4.0"
+keywords = [
+    "jupyter",
+    "mcp",
+    "model-context-protocol",
+    "ai-agent",
+    "notebook",
+    "automation",
+    "data-science",
+    "machine-learning",
+    "llm",
+    "claude"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Framework :: Jupyter",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "mcp>=1.0.0,<2.0.0",
+    "jupyter_client>=8.0.0,<9.0.0",
+    "nbformat>=5.0.0,<6.0.0",
+    "ipykernel>=6.0.0,<7.0.0",
+    "psutil>=5.9.0,<6.0.0",
+    "GitPython>=3.1.0,<4.0.0",
+    "uvicorn[standard]>=0.40.0,<1.0.0",
+    "starlette>=0.51.0,<1.0.0",
+    "websockets>=14.0,<15.0",
+    "structlog>=24.1.0,<25.0.0",
+    "pydantic>=2.0.0,<3.0.0",
+    "aiofiles>=23.2.0,<24.0.0",
+    "opentelemetry-api>=1.22.0,<2.0.0",
+    "opentelemetry-sdk>=1.22.0,<2.0.0",
+    "opentelemetry-exporter-otlp>=1.22.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+superpowers = ["duckdb>=1.1.0,<2.0.0"]
+dev = [
+    "pytest>=8.0.0,<9.0.0",
+    "pytest-asyncio>=0.23.0,<1.0.0",
+    "pytest-xdist>=3.5.0,<4.0.0",
+    "pytest-cov>=4.1.0,<5.0.0",
+    "pytest-timeout>=2.2.0,<3.0.0",
+    "hypothesis>=6.92.0,<7.0.0",
+    "black>=24.0.0,<25.0.0",
+]
+
+[project.scripts]
+mcp-jupyter = "src.main:main"
+
+[project.urls]
+Homepage = "https://github.com/modelcontextprotocol/servers"
+Repository = "https://github.com/modelcontextprotocol/servers"
+Documentation = "https://github.com/modelcontextprotocol/servers/tree/main/src/jupyter"
+
+[tool.poetry]
+packages = [{include = "src"}]
+include = ["src/prompts/*.md", "LICENSE", "README.md"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 asyncio_mode = "auto"
 timeout = 120
-# Silence known environment-specific warnings:
-# - PytestConfigWarning: Unknown config option: timeout
-#   (occurs when pytest-timeout plugin isn't installed in a local env)
-# - MissingIDFieldWarning: emitted by nbformat when tests intentionally create
-#   notebooks without 'id' fields (we test heal-on-write behavior)
 filterwarnings = [
     "ignore::pytest.PytestConfigWarning",
     "ignore::nbformat.validator.MissingIDFieldWarning"
@@ -92,7 +114,6 @@ target-version = ["py310", "py311", "py312"]
 include = '\.pyi?$'
 extend-exclude = '''
 /(
-  # directories
   \.eggs
   | \.git
   | \.hg
@@ -103,4 +124,3 @@ extend-exclude = '''
   | dist
 )/
 '''
-

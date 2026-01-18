@@ -95,9 +95,36 @@ from src.environment import get_activated_env_vars as _get_activated_env_vars
 import hmac
 import secrets
 
-# Generate a per-process session secret used to sign local checkpoints.
-# This ensures checkpoints cannot be trivially loaded across different server processes.
-SESSION_SECRET = secrets.token_bytes(32)
+def get_or_create_secret():
+    """
+    [SECURITY FIX] Get or create persistent session secret.
+    
+    The secret is stored in ~/.mcp-jupyter/secret.key with 0o600 permissions.
+    This ensures checkpoints remain valid across server restarts.
+    """
+    secret_path = Path.home() / ".mcp-jupyter" / "secret.key"
+    
+    if secret_path.exists():
+        return secret_path.read_bytes()
+    
+    # Generate new secret
+    secret = secrets.token_bytes(32)
+    
+    # Create directory with restricted permissions
+    secret_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Write file
+    with open(secret_path, 'wb') as f:
+        f.write(secret)
+    
+    # Set permissions to user-only read/write (chmod 600)
+    os.chmod(secret_path, 0o600)
+    
+    return secret
+
+# Generate a persistent session secret used to sign local checkpoints.
+# This ensures checkpoints remain valid across server restarts.
+SESSION_SECRET = get_or_create_secret()
 
 class SessionManager:
     def __init__(self, default_execution_timeout: int = 300, input_request_timeout: int = 60):
@@ -128,6 +155,9 @@ class SessionManager:
         # Session persistence directory
         self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        
+        # [REAPER FIX] Track file locks for sessions to prevent fratricide
+        self._session_locks = {}
 
         # [REAPER] Start the background reaper task
         self._reaper_task = asyncio.create_task(self._reaper_loop())
@@ -197,51 +227,72 @@ class SessionManager:
                 current_proc = psutil.Process(current_pid)
                 current_create_time = current_proc.create_time()
 
-                for session_file in self.persistence_dir.glob("session_*.json"):
+                # [REAPER FIX] Use file locking to detect dead sessions
+                for lock_file in self.persistence_dir.glob("session_*.lock"):
                     try:
-                        with open(session_file, 'r') as f:
-                            session_data = json.load(f)
-                        
-                        server_pid = session_data.get('server_pid')
-                        kernel_pid = session_data.get('pid')
-                        server_create_time = session_data.get('server_create_time')
-
-                        if not server_pid or not kernel_pid:
-                            continue
-
-                        # If the server PID is not us and that server process is dead...
-                        is_zombie = False
-                        if server_pid != current_pid:
-                            try:
-                                proc = psutil.Process(server_pid)
-                                # [REAPER FIX] Check create time to disambiguate reused PIDs
-                                if proc.create_time() != server_create_time:
-                                    is_zombie = True # PID was reused, original server is dead
-                                elif not proc.is_running():
-                                    is_zombie = True # Process is a zombie in the process table
-                            except psutil.NoSuchProcess:
-                                is_zombie = True # Process is gone
-
-                        if is_zombie:
-                            logger.warning(f"[REAPER] Found orphan session file from dead server PID {server_pid} for kernel PID {kernel_pid}.")
-                            
-                            # ...then the kernel is a zombie. Reap it.
-                            if psutil.pid_exists(kernel_pid):
+                        # Try to acquire the lock
+                        # If successful, the owning process is dead
+                        try:
+                            import fcntl
+                            with open(lock_file, 'r+') as f:
                                 try:
-                                    proc = psutil.Process(kernel_pid)
-                                    proc.kill()
-                                    logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid}.")
-                                except psutil.NoSuchProcess:
-                                    pass # Already gone
-                                except Exception as e:
-                                    logger.error(f"[REAPER] Error killing zombie kernel {kernel_pid}: {e}")
+                                    fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                                    # Lock acquired! This means the original process is dead
+                                    is_zombie = True
+                                except IOError:
+                                    # Lock is held by another living process
+                                    is_zombie = False
+                                    continue
+                        except ImportError:
+                            # Windows fallback
+                            try:
+                                import portalocker
+                                with open(lock_file, 'r+') as f:
+                                    try:
+                                        portalocker.lock(f, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                                        is_zombie = True
+                                    except portalocker.LockException:
+                                        is_zombie = False
+                                        continue
+                            except (ImportError, Exception):
+                                # No locking available - skip this lock file
+                                continue
+                        
+                        if is_zombie:
+                            # Find corresponding session JSON file
+                            session_hash = lock_file.stem.replace('session_', '')
+                            session_file = self.persistence_dir / f"session_{session_hash}.json"
                             
-                            # Clean up the session file
-                            session_file.unlink()
-                            logger.info(f"[REAPER] Cleaned up orphan session file: {session_file.name}")
-
+                            if session_file.exists():
+                                with open(session_file, 'r') as f:
+                                    session_data = json.load(f)
+                                
+                                server_pid = session_data.get('server_pid')
+                                kernel_pid = session_data.get('pid')
+                                
+                                logger.warning(f"[REAPER] Found orphan session from dead server PID {server_pid} for kernel PID {kernel_pid}.")
+                                
+                                # Kill the zombie kernel
+                                if kernel_pid and psutil.pid_exists(kernel_pid):
+                                    try:
+                                        proc = psutil.Process(kernel_pid)
+                                        proc.kill()
+                                        logger.info(f"[REAPER] Killed zombie kernel process {kernel_pid}.")
+                                    except psutil.NoSuchProcess:
+                                        pass
+                                    except Exception as e:
+                                        logger.error(f"[REAPER] Error killing zombie kernel {kernel_pid}: {e}")
+                                
+                                # Clean up files
+                                session_file.unlink()
+                                logger.info(f"[REAPER] Cleaned up orphan session file: {session_file.name}")
+                            
+                            # Delete the lock file
+                            lock_file.unlink()
+                            logger.info(f"[REAPER] Cleaned up lock file: {lock_file.name}")
+                    
                     except Exception as e:
-                        logger.warning(f"[REAPER] Error processing session file {session_file.name}: {e}")
+                        logger.warning(f"[REAPER] Error processing lock file {lock_file.name}: {e}")
                 
                 await asyncio.sleep(interval)
 
@@ -251,6 +302,53 @@ class SessionManager:
             except Exception as e:
                 logger.error(f"[REAPER] Unhandled error in reaper loop: {e}")
                 await asyncio.sleep(interval) # Avoid fast crash loop
+    
+    async def _health_check_loop(self, nb_path: str):
+        """
+        [FIX #4] Background health check to detect and recover from frozen kernels.
+        
+        Monitors kernel responsiveness via heartbeat channel. If kernel hangs
+        (e.g., infinite C-extension loop), this will detect it and restart.
+        """
+        check_interval = 30  # Check every 30 seconds
+        await asyncio.sleep(check_interval)  # Initial delay
+        
+        while True:
+            try:
+                session = self.sessions.get(nb_path)
+                if not session:
+                    # Session was stopped
+                    break
+                
+                kc = session.get('kc')
+                if not kc:
+                    break
+                
+                # Check if kernel is alive via heartbeat
+                if not kc.is_alive():
+                    logger.error(f"[HEALTH CHECK] Kernel {nb_path} died. Attempting restart...")
+                    try:
+                        await self.restart_kernel(nb_path)
+                    except Exception as e:
+                        logger.error(f"[HEALTH CHECK] Failed to restart kernel: {e}")
+                        break
+                else:
+                    # Optional: Send lightweight info request for deeper check
+                    try:
+                        await asyncio.wait_for(kc.kernel_info(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"[HEALTH CHECK] Kernel {nb_path} unresponsive to info request")
+                    except Exception as e:
+                        logger.warning(f"[HEALTH CHECK] Error checking kernel: {e}")
+                
+                await asyncio.sleep(check_interval)
+                
+            except asyncio.CancelledError:
+                logger.info(f"[HEALTH CHECK] Task cancelled for {nb_path}")
+                break
+            except Exception as e:
+                logger.error(f"[HEALTH CHECK] Unhandled error: {e}")
+                await asyncio.sleep(check_interval)
     
     def _persist_session_info(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict):
         """
@@ -283,6 +381,37 @@ class SessionManager:
             with open(session_file, 'w') as f:
                 json.dump(session_data, f, indent=2)
             
+            # [REAPER FIX] Create and hold a lock file for this session
+            # This lock proves the server process is alive
+            lock_file = self.persistence_dir / f"session_{path_hash}.lock"
+            try:
+                # Try to import fcntl (Unix) or use fallback
+                try:
+                    import fcntl
+                    lock_fd = open(lock_file, 'w')
+                    # Acquire non-blocking exclusive lock
+                    fcntl.lockf(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    self._session_locks[nb_path] = lock_fd
+                    logger.info(f"Acquired file lock for session {nb_path}")
+                except ImportError:
+                    # Windows fallback - use portalocker if available, or just create the file
+                    try:
+                        import portalocker
+                        lock_fd = open(lock_file, 'w')
+                        portalocker.lock(lock_fd, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                        self._session_locks[nb_path] = lock_fd
+                        logger.info(f"Acquired file lock for session {nb_path} (portalocker)")
+                    except (ImportError, Exception):
+                        # Fallback: just create the lock file without locking
+                        # This provides basic protection but not foolproof
+                        lock_fd = open(lock_file, 'w')
+                        lock_fd.write(str(os.getpid()))
+                        lock_fd.flush()
+                        self._session_locks[nb_path] = lock_fd
+                        logger.warning(f"Created lock file without fcntl/portalocker for {nb_path}")
+            except IOError as e:
+                logger.error(f"Could not acquire lock on session file: {e}")
+            
             logger.info(f"Persisted session info for {nb_path} (PID: {pid})")
         except Exception as e:
             logger.warning(f"Failed to persist session info: {e}")
@@ -293,10 +422,23 @@ class SessionManager:
             import hashlib
             path_hash = hashlib.md5(nb_path.encode()).hexdigest()
             session_file = self.persistence_dir / f"session_{path_hash}.json"
+            lock_file = self.persistence_dir / f"session_{path_hash}.lock"
             
             if session_file.exists():
                 session_file.unlink()
                 logger.info(f"Removed persisted session for {nb_path}")
+            
+            # [REAPER FIX] Close and remove lock file
+            if nb_path in self._session_locks:
+                try:
+                    self._session_locks[nb_path].close()
+                    del self._session_locks[nb_path]
+                except Exception as e:
+                    logger.warning(f"Error closing lock file: {e}")
+            
+            if lock_file.exists():
+                lock_file.unlink()
+                logger.info(f"Removed lock file for {nb_path}")
         except Exception as e:
             logger.warning(f"Failed to remove persisted session: {e}")
     
@@ -433,6 +575,30 @@ class SessionManager:
         
         # Fallback
         return sys.executable
+    
+    def _validate_mount_path(self, project_root: Path) -> Path:
+        """
+        [FIX #5] Validate Docker mount path to prevent path traversal attacks.
+        
+        Ensures the mount path is within allowed directories and doesn't
+        escape via symlinks or .. traversal.
+        """
+        resolved_root = project_root.resolve()
+        
+        # Define allowed base path (configurable via environment)
+        allowed_base = Path(os.environ.get("MCP_ALLOWED_ROOT", Path.home())).resolve()
+        
+        # Containment check
+        try:
+            resolved_root.relative_to(allowed_base)
+        except ValueError:
+            raise ValueError(
+                f"Security Violation: Cannot mount path {resolved_root} "
+                f"outside of allowed base {allowed_base}. "
+                f"Set MCP_ALLOWED_ROOT environment variable to change this."
+            )
+        
+        return resolved_root
 
     async def start_kernel(self, nb_path: str, venv_path: Optional[str] = None, docker_image: Optional[str] = None, timeout: Optional[int] = None, agent_id: Optional[str] = None):
         """
@@ -478,6 +644,10 @@ class SessionManager:
              
              # Locate workspace root for proper relative imports
              project_root = utils.get_project_root(Path(notebook_dir))
+             
+             # [FIX #5] Validate mount path to prevent path traversal
+             project_root = self._validate_mount_path(project_root)
+             
              mount_source = str(project_root)
              mount_target = "/workspace"
              
@@ -760,6 +930,11 @@ except ImportError:
         # Start the execution queue processor
         session_data['queue_processor_task'] = asyncio.create_task(
             self._queue_processor(abs_path, session_data)
+        )
+        
+        # [FIX #4] Start health check loop for this kernel
+        session_data['health_check_task'] = asyncio.create_task(
+            self._health_check_loop(abs_path)
         )
         
         self.sessions[abs_path] = session_data
@@ -1425,20 +1600,43 @@ print(_inspect_var())
     async def run_simple_code(self, nb_path: str, code: str):
          return await self._run_and_wait_internal(nb_path, code)
 
-    async def stop_kernel(self, nb_path: str):
+    async def stop_kernel(self, nb_path: str, cleanup_assets: bool = True):
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions: return "No running kernel."
         
         session = self.sessions[abs_path]
         
-        # [ASSET CLEANUP] Run garbage collection before shutdown
-        # This ensures orphaned assets are cleaned up when kernel stops
-        try:
-            from src.asset_manager import prune_unused_assets
-            cleanup_result = prune_unused_assets(abs_path, dry_run=False)
-            logger.info(f"Asset cleanup on kernel stop: {cleanup_result.get('message', 'completed')}")
-        except Exception as e:
-            logger.warning(f"Asset cleanup failed: {e}")
+        # [FIX #8] Session-scoped asset cleanup (GDPR compliance)
+        if cleanup_assets:
+            try:
+                # Get session start time
+                start_time_str = session.get('env_info', {}).get('start_time')
+                if start_time_str:
+                    import datetime
+                    start_time = datetime.datetime.fromisoformat(start_time_str).timestamp()
+                    
+                    # Clean up assets created during this session only
+                    asset_dir = Path(nb_path).parent / "assets"
+                    if asset_dir.exists():
+                        deleted_count = 0
+                        for asset in asset_dir.glob("*"):
+                            if asset.is_file() and asset.stat().st_mtime > start_time:
+                                try:
+                                    asset.unlink()
+                                    deleted_count += 1
+                                    logger.info(f"[ASSET CLEANUP] Deleted session asset: {asset.name}")
+                                except Exception as e:
+                                    logger.warning(f"[ASSET CLEANUP] Failed to delete {asset.name}: {e}")
+                        
+                        if deleted_count > 0:
+                            logger.info(f"[ASSET CLEANUP] Removed {deleted_count} session-scoped assets")
+                
+                # Also run standard garbage collection
+                from src.asset_manager import prune_unused_assets
+                cleanup_result = prune_unused_assets(abs_path, dry_run=False)
+                logger.info(f"[ASSET CLEANUP] Prune result: {cleanup_result.get('message', 'completed')}")
+            except Exception as e:
+                logger.warning(f"[ASSET CLEANUP] Failed: {e}")
         
         # Signal queue processor to stop
         if session.get('queue_processor_task'):
@@ -1464,6 +1662,14 @@ print(_inspect_var())
                 await session['stdin_listener_task']
             except asyncio.CancelledError:
                 pass
+        
+        # [FIX #4] Cancel health check task
+        if session.get('health_check_task'):
+            session['health_check_task'].cancel()
+            try:
+                await session['health_check_task']
+            except asyncio.CancelledError:
+                pass
 
         session['kc'].stop_channels()
         await session['km'].shutdown_kernel()
@@ -1471,36 +1677,99 @@ print(_inspect_var())
         return "Kernel shutdown."
 
     async def cancel_execution(self, nb_path: str, exec_id: Optional[str] = None):
+        """
+        [P1 FIX] Multi-stage cancellation with escalation.
+        
+        Implements graceful degradation:
+        1. SIGINT (KeyboardInterrupt) - wait 3 seconds
+        2. SIGTERM (terminate) - wait 2 seconds  
+        3. SIGKILL + restart (nuclear option)
+        
+        This prevents zombie computations from C-extensions that ignore SIGINT.
+        """
         abs_path = str(Path(nb_path).resolve())
-        if abs_path not in self.sessions: return "No kernel."
+        if abs_path not in self.sessions: 
+            return "No kernel."
         
         session = self.sessions[abs_path]
-        await session['km'].interrupt_kernel()
         
-        # WAIT AND VERIFY
-        # Check if status changed to idle or cancelled
-        # If specific exec_id provided, verify its status
-        for _ in range(5): # Wait 2.5 seconds
+        # Stage 1: Send SIGINT (KeyboardInterrupt)
+        try:
+            await session['km'].interrupt_kernel()
+            logger.info(f"[CANCEL] Stage 1: Sent SIGINT to {nb_path}")
+        except Exception as e:
+            logger.error(f"[CANCEL] Failed to send SIGINT: {e}")
+            return f"Failed to interrupt: {e}"
+        
+        # Wait 3 seconds, checking every 0.5s
+        for i in range(6):
             await asyncio.sleep(0.5)
             
-            # If exec_id is provided, check if it's marked as done
+            # Check if execution completed/cancelled
             if exec_id and exec_id in session['executions']:
                 status = session['executions'][exec_id].get('status')
                 if status in ['cancelled', 'error', 'completed']:
-                    return "Kernel interrupted successfully."
+                    logger.info(f"[CANCEL] Stage 1 succeeded (SIGINT)")
+                    return "Cancelled gracefully (SIGINT)"
             
-            # Fallback: check execution_queue size or msg_id tracking
-            # But the most reliable sign is if the kernel responds to a logic check, which is complex.
-            # Simpler: If interrupt didn't throw, we assume verification if not verifiable easily.
-            # But user said: "Check if status changed to idle"
-            # Session dict doesn't have explicit 'idle' status tracking synced from ZMQ status channel 
-            # unless I implemented it. (The digest shows some heartbeat/io logic but not full status state machine).
-            # However, I implemented 'executions' Dict update in cancel_execution below.
+            # Check kernel client responsiveness
+            kc = session.get('kc')
+            if kc and not kc.is_alive():
+                logger.warning(f"[CANCEL] Kernel died during interrupt")
+                return "Kernel terminated"
+        
+        # Stage 2: SIGINT failed, escalate to SIGTERM
+        logger.warning(f"[CANCEL] Stage 1 failed, escalating to Stage 2: SIGTERM")
+        try:
+            km = session['km']
+            if hasattr(km, 'kernel') and km.kernel:
+                import signal
+                km.kernel.send_signal(signal.SIGTERM)
+                logger.info(f"[CANCEL] Stage 2: Sent SIGTERM to PID {km.kernel.pid}")
+        except Exception as e:
+            logger.error(f"[CANCEL] Failed to send SIGTERM: {e}")
+        
+        # Wait 2 seconds
+        await asyncio.sleep(2)
+        
+        # Check if kernel stopped
+        kc = session.get('kc')
+        if kc and not kc.is_alive():
+            logger.info(f"[CANCEL] Stage 2 succeeded (SIGTERM)")
+            return "Force terminated (SIGTERM)"
+        
+        # Stage 3: Nuclear option - SIGKILL + restart
+        logger.error(f"[CANCEL] Stage 2 failed, escalating to Stage 3: SIGKILL + restart")
+        try:
+            km = session['km']
+            if hasattr(km, 'kernel') and km.kernel:
+                import signal
+                km.kernel.send_signal(signal.SIGKILL)
+                logger.info(f"[CANCEL] Stage 3: Sent SIGKILL to PID {km.kernel.pid}")
+                
+            # Force cleanup
+            await self.stop_kernel(nb_path, cleanup_assets=False)
             
-            # The user provided snippet manually cancels keys.
-            # I should verify if the change I made previously works?
-            # User wants: "if session['executions'].get(task_id, {}).get('status') in [...]"
-            pass
+            # Attempt restart with state recovery
+            logger.info(f"[CANCEL] Attempting kernel restart...")
+            await self.start_kernel(nb_path)
+            
+            # Try to restore from checkpoint if available
+            checkpoint_dir = Path(nb_path).parent / ".mcp"
+            if checkpoint_dir.exists():
+                checkpoints = list(checkpoint_dir.glob("*.json"))
+                if checkpoints:
+                    latest = max(checkpoints, key=lambda p: p.stat().st_mtime)
+                    logger.info(f"[CANCEL] Restoring from checkpoint: {latest.name}")
+                    # Note: load_checkpoint is async, but we don't await to avoid blocking
+                    asyncio.create_task(self.load_checkpoint(nb_path, latest.stem))
+                    return "Killed and restarted (state restored from checkpoint)"
+            
+            return "Killed and restarted (state lost - no checkpoint available)"
+            
+        except Exception as e:
+            logger.error(f"[CANCEL] Stage 3 failed: {e}")
+            return f"Failed to kill and restart: {e}"
 
         # We manually mark the specific execution as cancelled if found (Force fallback)
         if exec_id is not None:

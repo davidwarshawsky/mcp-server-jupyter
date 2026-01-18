@@ -268,9 +268,18 @@ export class McpClient {
 
           this.ws = new WebSocket(url, ['mcp'], { headers });
                 
-                this.ws.on('open', () => {
+                this.ws.on('open', async () => {
                     this.outputChannel.appendLine('WebSocket connected');
                     this.setConnectionState('connected');
+                    
+                    // Check version compatibility
+                    try {
+                        await this.checkVersionCompatibility();
+                    } catch (error) {
+                        this.outputChannel.appendLine(`Version check warning: ${error}`);
+                        // Don't fail connection on version mismatch, just warn
+                    }
+                    
                     // Emit an internal reconnection notification so higher-level
                     // controllers can reconcile any active executions that may
                     // have completed while we were disconnected.
@@ -322,6 +331,42 @@ export class McpClient {
             if (i === retries - 1) throw e;
             await new Promise(r => setTimeout(r, delay));
         }
+    }
+  }
+
+  /**
+   * Check version compatibility between client and server
+   * Warns user if major versions don't match
+   */
+  private async checkVersionCompatibility(): Promise<void> {
+    try {
+      const response = await this.callTool('get_version', {});
+      const serverInfo = JSON.parse(response.content[0].text);
+      
+      // Extension version (from package.json)
+      const extensionVersion = '0.2.0'; // TODO: Read from package.json
+      
+      // Parse versions
+      const serverMajor = parseInt(serverInfo.version.split('.')[0], 10);
+      const clientMajor = parseInt(extensionVersion.split('.')[0], 10);
+      
+      this.outputChannel.appendLine(`Server version: ${serverInfo.version}`);
+      this.outputChannel.appendLine(`Client version: ${extensionVersion}`);
+      
+      if (serverMajor !== clientMajor) {
+        vscode.window.showWarningMessage(
+          `MCP server version mismatch: server=${serverInfo.version}, client=${extensionVersion}. ` +
+          `Some features may not work correctly. Consider updating.`,
+          'Show Logs'
+        ).then(choice => {
+          if (choice === 'Show Logs') {
+            this.outputChannel.show();
+          }
+        });
+      }
+    } catch (error) {
+      // Version check is optional - don't fail if server doesn't support get_version yet
+      this.outputChannel.appendLine(`Could not check version compatibility: ${error}`);
     }
   }
 
@@ -692,6 +737,34 @@ export class McpClient {
             console.error('Failed to inject structure:', e);
         }
     }
+    
+    // [FIX #2] Inject buffer hashes for detect_sync_needed to prevent split-brain race condition
+    if (toolName === 'detect_sync_needed' && args.notebook_path) {
+        try {
+            const nbDoc = vscode.workspace.notebookDocuments.find(
+                nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
+            );
+            
+            if (nbDoc) {
+                // Calculate SHA-256 hashes for all code cells in the buffer
+                const crypto = await import('crypto');
+                const hashes: Record<number, string> = {};
+                
+                nbDoc.getCells().forEach((cell, index) => {
+                    if (cell.kind === vscode.NotebookCellKind.Code) {
+                        const source = cell.document.getText();
+                        const hash = crypto.createHash('sha256').update(source).digest('hex');
+                        hashes[index] = hash;
+                    }
+                });
+                
+                // Inject buffer hashes as source of truth
+                args.buffer_hashes = hashes;
+            }
+        } catch (e) {
+            console.error('Failed to inject buffer hashes:', e);
+        }
+    }
     // ----------------------------------------
 
     // Use general request mechanism
@@ -1039,12 +1112,43 @@ export class McpClient {
   /**
    * Find MCP server path.
    * Returns empty string '' if no local source found (implies installed package).
+   * Priority:
+   * 1. User configuration (mcp-jupyter.serverPath)
+   * 2. Pip-installed package (mcp-server-jupyter)
+   * 3. Bundled with extension (python_server/)
+   * 4. Development sibling directory (../tools/mcp-server-jupyter)
    */
   findServerPath(): string {
     const config = vscode.workspace.getConfiguration('mcp-jupyter');
     const configuredPath = config.get<string>('serverPath');
     if (configuredPath) {
       return configuredPath;
+    }
+
+    // Check if installed via pip
+    try {
+      const { execSync } = require('child_process');
+      const pythonPath = config.get<string>('pythonPath') || 'python3';
+      
+      // Try to find the package installation location
+      const showOutput = execSync(`${pythonPath} -m pip show mcp-server-jupyter`, { 
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe']  // Suppress stderr
+      });
+      
+      // Parse Location: line from pip show output
+      const match = showOutput.match(/Location:\s*(.+)/i);
+      if (match && match[1]) {
+        const sitePackages = match[1].trim();
+        const installedPath = path.join(sitePackages, 'mcp_server_jupyter');
+        
+        if (fs.existsSync(path.join(installedPath, 'src', 'main.py'))) {
+          this.outputChannel.appendLine(`Found pip-installed server at: ${installedPath}`);
+          return installedPath;
+        }
+      }
+    } catch (error) {
+      // pip show failed - package not installed, continue to fallbacks
     }
 
     // When packaged, Python server is bundled in extension root at python_server/
