@@ -41,11 +41,10 @@ class SecureDockerConfig:
     network_mode: str = "none"
     
     # Linux capabilities (drop all, add minimal)
+    # SECURITY: SETUID/SETGID removed - only add via MCP_ALLOW_PRIVILEGE_ESCALATION=1
     capabilities_drop: List[str] = field(default_factory=lambda: ["ALL"])
     capabilities_add: List[str] = field(default_factory=lambda: [
         "CHOWN",     # Allow changing file ownership (pip installs)
-        "SETUID",    # Allow setuid (required for user switching)
-        "SETGID",    # Allow setgid (required for group switching)
     ])
     
     # ulimits: (soft_limit, hard_limit)
@@ -95,7 +94,17 @@ class SecureDockerConfig:
             args.extend(['--cap-drop', cap])
         
         # Add minimal required capabilities
-        for cap in self.capabilities_add:
+        caps_to_add = list(self.capabilities_add)
+        
+        # Only add SETUID/SETGID if explicitly enabled
+        if os.environ.get('MCP_ALLOW_PRIVILEGE_ESCALATION') == '1':
+            logger.warning(
+                "⚠️  MCP_ALLOW_PRIVILEGE_ESCALATION=1: Adding SETUID/SETGID capabilities. "
+                "This increases container escape risk."
+            )
+            caps_to_add.extend(['SETUID', 'SETGID'])
+        
+        for cap in caps_to_add:
             args.extend(['--cap-add', cap])
         
         # ulimits

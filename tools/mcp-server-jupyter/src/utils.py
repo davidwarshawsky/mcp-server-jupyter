@@ -575,7 +575,13 @@ def get_project_root(start_path: Path) -> Path:
     SECURITY: Never returns system root or paths outside user's home directory.
     """
     current = start_path.resolve()
-    home = Path.home().resolve()
+    
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent.resolve() if settings.MCP_DATA_DIR else Path.home().resolve()
+    except Exception:
+        home = Path.home().resolve()
     
     for _ in range(10): # Limit traversing depth
         # [SECURITY] Stop if we've escaped $HOME (prevents mounting system dirs)

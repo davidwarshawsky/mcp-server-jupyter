@@ -41,10 +41,12 @@ def get_or_create_secret():
     """
     [SECURITY FIX] Get or create persistent session secret.
     
-    The secret is stored in ~/.mcp-jupyter/secret.key with 0o600 permissions.
+    The secret is stored in $MCP_DATA_DIR/secret.key with 0o600 permissions.
     This ensures checkpoints remain valid across server restarts.
     """
-    secret_path = Path.home() / ".mcp-jupyter" / "secret.key"
+    from src.config import load_and_validate_settings
+    settings = load_and_validate_settings()
+    secret_path = settings.get_data_dir() / "secret.key"
     
     if secret_path.exists():
         return secret_path.read_bytes()
@@ -98,8 +100,10 @@ class SessionManager:
         self.mcp_server = None
         self.server_session = None
         
-        # Session persistence directory
-        self.persistence_dir = Path.home() / ".mcp-jupyter" / "sessions"
+        # Session persistence directory (12-Factor compliant)
+        from src.config import load_and_validate_settings
+        _settings = load_and_validate_settings()
+        self.persistence_dir = _settings.get_data_dir() / "sessions"
         self.persistence_dir.mkdir(parents=True, exist_ok=True)
         
         # [PHASE 2 - COMPONENTS] Initialize specialized modules
@@ -422,7 +426,15 @@ class SessionManager:
                 )
         
         # Define allowed base path (configurable via environment)
-        allowed_base = Path(os.environ.get("MCP_ALLOWED_ROOT", Path.home())).resolve()
+        # [P0 FIX #2] Use config-based data directory as fallback
+        try:
+            from src.config import load_and_validate_settings
+            _cfg = load_and_validate_settings()
+            default_allowed = _cfg.get_data_dir().parent if _cfg.MCP_DATA_DIR else Path.home()
+        except Exception:
+            default_allowed = Path.home()
+        
+        allowed_base = Path(os.environ.get("MCP_ALLOWED_ROOT", str(default_allowed))).resolve()
         
         # Containment check
         try:
@@ -1395,7 +1407,13 @@ print(_inspect_var())
         envs.append({"name": "System/Global", "path": sys.executable})
         
         # 2. Check common locations relative to user home
-        home = Path.home()
+        try:
+            from src.config import load_and_validate_settings
+            _cfg = load_and_validate_settings()
+            home = _cfg.get_data_dir().parent if _cfg.MCP_DATA_DIR else Path.home()
+        except Exception:
+            home = Path.home()
+        
         candidates = [
             home / ".virtualenvs",
             home / "miniconda3" / "envs",

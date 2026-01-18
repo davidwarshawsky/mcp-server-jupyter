@@ -38,8 +38,12 @@ from starlette.routing import Mount
 from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
+from src.config import load_and_validate_settings
 import websockets
 import mcp.types as types
+
+# Load validated configuration
+settings = load_and_validate_settings()
 
 # Pydantic models and decorator for strict validation
 from src.models import (
@@ -262,8 +266,8 @@ def get_server_status():
     })
 
 
-# Persistence for proposals
-PROPOSAL_STORE_FILE = Path.home() / ".mcp-jupyter" / "proposals.json"
+# Persistence for proposals (12-Factor compliant)
+PROPOSAL_STORE_FILE = settings.get_data_dir() / "proposals.json"
 
 from collections import deque
 
@@ -2538,7 +2542,7 @@ def export_diagnostic_bundle():
         
         with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
             # 1. Include .mcp directory (sessions, checkpoints)
-            mcp_dir = Path.home() / ".mcp-jupyter"
+            mcp_dir = settings.get_data_dir()
             if mcp_dir.exists():
                 for file in mcp_dir.rglob('*'):
                     if file.is_file():

@@ -25,11 +25,18 @@ class Settings(BaseSettings):
     MCP_ASSET_MAX_AGE_HOURS: int = Field(default=24, ge=1, le=720, description="Asset retention hours")
     MCP_ALLOWED_ROOT: Optional[str] = Field(default=None, description="Docker volume mount root")
 
+    # Persistence (12-Factor App)
+    MCP_DATA_DIR: Optional[str] = Field(default=None, description="Data directory for sessions/proposals/secrets")
+
     # Observability
     OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = Field(default=None, description="OpenTelemetry endpoint")
     
     # Development
     MCP_DEV_MODE: bool = Field(default=False, description="Development mode flag")
+    
+    # Security
+    MCP_STRICT_MODE: bool = Field(default=False, description="Enforce strict security policies")
+    MCP_ALLOW_PRIVILEGE_ESCALATION: bool = Field(default=False, description="Allow SETUID/SETGID capabilities")
     
     @field_validator("LOG_LEVEL")
     @classmethod
@@ -50,6 +57,12 @@ class Settings(BaseSettings):
             if not pkg.replace("-", "").replace("_", "").isalnum():
                 raise ValueError(f"Invalid package name: '{pkg}'")
         return v
+    
+    def get_data_dir(self) -> Path:
+        """Get data directory with fallback to $HOME/.mcp-jupyter"""
+        if self.MCP_DATA_DIR:
+            return Path(self.MCP_DATA_DIR).resolve()
+        return Path.home() / ".mcp-jupyter"
 
 
 def load_and_validate_settings() -> Settings:

@@ -94,8 +94,16 @@ class KernelLifecycle:
         
         # Define allowed base paths (HOME and /tmp for testing)
         # Allow /tmp for pytest but maintain security for production
+        # [P0 FIX #2] Use config-based data directory as fallback
+        try:
+            from src.config import load_and_validate_settings
+            _cfg = load_and_validate_settings()
+            default_allowed = _cfg.get_data_dir().parent if _cfg.MCP_DATA_DIR else Path.home()
+        except Exception:
+            default_allowed = Path.home()
+        
         allowed_bases = [
-            Path(os.environ.get("MCP_ALLOWED_ROOT", Path.home())).resolve(),
+            Path(os.environ.get("MCP_ALLOWED_ROOT", str(default_allowed))).resolve(),
             Path('/tmp').resolve()
         ]
         

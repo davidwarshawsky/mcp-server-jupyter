@@ -183,19 +183,33 @@ class KernelStateManager:
                         proc = psutil.Process(kernel_pid)
                         should_kill = False
                         
-                        # UUID Check (Primary)
+                        # [P0 FIX #4] UUID Check is MANDATORY - no fallback to create_time
                         if kernel_uuid:
                             try:
                                 proc_env = proc.environ()
                                 if proc_env.get('MCP_KERNEL_ID') == kernel_uuid:
                                     should_kill = True
-                            except (psutil.AccessDenied, psutil.NoSuchProcess):
-                                # Fallback to create_time
-                                if saved_create_time and proc.create_time() == saved_create_time:
-                                    should_kill = True
-                        # Legacy Check
-                        elif saved_create_time and proc.create_time() == saved_create_time:
-                             should_kill = True
+                                    logger.info(
+                                        f"[REAPER] UUID match confirmed for PID {kernel_pid} "
+                                        f"(UUID: {kernel_uuid[:8]}...)"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[REAPER] PID {kernel_pid} exists but UUID mismatch. "
+                                        f"Expected {kernel_uuid[:8]}..., got {proc_env.get('MCP_KERNEL_ID', 'NONE')[:8] if proc_env.get('MCP_KERNEL_ID') else 'NONE'}... "
+                                        "Skipping (possible PID recycling)."
+                                    )
+                            except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
+                                logger.error(
+                                    f"[REAPER] Cannot verify UUID for PID {kernel_pid}: {e}. "
+                                    "Refusing to kill process without UUID verification (PID recycling risk)."
+                                )
+                        else:
+                            logger.warning(
+                                f"[REAPER] Session {session_file.name} has no kernel_uuid. "
+                                "Legacy sessions without UUID cannot be safely reaped (PID recycling risk). "
+                                "Skipping."
+                            )
                         
                         if should_kill:
                             logger.warning(f"[REAPER] Killing zombie kernel {kernel_pid}")

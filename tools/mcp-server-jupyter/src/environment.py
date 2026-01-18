@@ -208,7 +208,13 @@ def find_conda_environments() -> List[Dict[str, Any]]:
             pass
     
     # Also check common conda locations
-    home = Path.home()
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()
+    except Exception:
+        home = Path.home()
+    
     common_locations = [
         home / 'miniconda3' / 'envs',
         home / 'anaconda3' / 'envs',
@@ -248,7 +254,13 @@ def find_venv_environments() -> List[Dict[str, Any]]:
     """Finds venv/virtualenv environments in common locations."""
     environments = []
     
-    home = Path.home()
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()
+    except Exception:
+        home = Path.home()
+    
     cwd = Path.cwd()
     
     # Common locations
@@ -494,6 +506,8 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     [SECURITY FIX] Validates package against allowlist.
     Organizations can override with environment variable MCP_PACKAGE_ALLOWLIST.
     
+    [P0 FIX #5] Strict Mode: MCP_STRICT_MODE=1 enforces non-wildcard allowlist.
+    
     Args:
         package_name: Name of package (e.g. 'pandas' or 'pandas==2.0.0')
         python_path: Path to python executable. Defaults to sys.executable.
@@ -508,13 +522,34 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     # [SECURITY] Extract base package name (remove version specifiers)
     base_package = package_name.split('==')[0].split('>=')[0].split('<=')[0].split('>')[0].split('<')[0].split('[')[0].strip()
     
+    # [P0 FIX #5] Check strict mode
+    strict_mode = os.environ.get('MCP_STRICT_MODE', '0') == '1'
+    
     # Check allowlist (can be disabled with MCP_PACKAGE_ALLOWLIST="*")
     allowlist_str = os.environ.get('MCP_PACKAGE_ALLOWLIST', ','.join(PACKAGE_ALLOWLIST))
     
-    # Allow wildcard to disable allowlist (enterprise environments may have other controls)
+    # [P0 FIX #5] In strict mode, wildcard is forbidden
+    if strict_mode and allowlist_str.strip() == '*':
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            "[SECURITY] MCP_STRICT_MODE=1 but MCP_PACKAGE_ALLOWLIST='*'. "
+            "This violates supply chain policy. Package installation blocked."
+        )
+        return False, (
+            "STRICT MODE VIOLATION: Wildcard allowlist ('*') is forbidden when MCP_STRICT_MODE=1. "
+            "Set explicit package list in MCP_PACKAGE_ALLOWLIST or disable strict mode."
+        )
+    
+    # Allow wildcard to disable allowlist (only in non-strict mode)
     if allowlist_str.strip() == '*':
         # Allowlist disabled - install any package
-        pass
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"[SECURITY] Installing '{base_package}' with WILDCARD allowlist. "
+            "Supply chain protections are disabled. Enable MCP_STRICT_MODE=1 in production."
+        )
     else:
         allowed_packages = set(p.strip().lower() for p in allowlist_str.split(','))
         if base_package.lower() not in allowed_packages:
