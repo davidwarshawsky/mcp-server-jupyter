@@ -15,11 +15,20 @@ class KernelStateManager:
     """
     def __init__(self, persistence_dir: Path):
         self.persistence_dir = persistence_dir
-        self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            self.persistence_dir.mkdir(parents=True, exist_ok=True)
+        except (PermissionError, OSError) as e:
+            logger.error(f"Failed to create persistence directory {persistence_dir}: {e}")
+            logger.warning("Session persistence disabled due to directory creation failure")
         self._session_locks = {}
 
     def persist_session(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None):
         """Save session info to disk to prevent zombie kernels after server restart."""
+        # Skip if persistence directory is not available
+        if not self.persistence_dir.exists():
+            logger.debug(f"Skipping session persistence for {nb_path}: directory unavailable")
+            return
+            
         try:
             import hashlib
             path_hash = hashlib.md5(nb_path.encode()).hexdigest()
@@ -82,6 +91,11 @@ class KernelStateManager:
 
     def remove_session(self, nb_path: str):
         """Remove persisted session info and locks."""
+        # Skip if persistence directory is not available
+        if not self.persistence_dir.exists():
+            logger.debug(f"Skipping session removal for {nb_path}: directory unavailable")
+            return
+            
         try:
             import hashlib
             path_hash = hashlib.md5(nb_path.encode()).hexdigest()
@@ -106,6 +120,10 @@ class KernelStateManager:
 
     def get_persisted_sessions(self):
         """Yields all session JSON objects found in persistence dir."""
+        # Return empty list if persistence directory is not available
+        if not self.persistence_dir.exists():
+            logger.debug("No persisted sessions available: directory does not exist")
+            return []
         return self.persistence_dir.glob("session_*.json")
 
     def reconcile_zombies(self):
@@ -113,6 +131,11 @@ class KernelStateManager:
         [REAPER] Kills orphan kernels from dead server processes.
         Uses UUID verification and Server PID liveness checks.
         """
+        # Skip if persistence directory is not available
+        if not self.persistence_dir.exists():
+            logger.debug("Skipping zombie reconciliation: persistence directory unavailable")
+            return
+            
         logger.info("reaper_start: Scanning for zombie kernels...")
         current_server_pid = os.getpid()
 

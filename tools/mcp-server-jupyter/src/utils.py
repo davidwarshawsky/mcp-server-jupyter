@@ -59,11 +59,12 @@ def check_asset_limits(asset_dir: Path, max_size_bytes: int = 1024 * 1024 * 1024
                     sz = f.stat().st_size
                     f.unlink()
                     total_size -= sz
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Log but don't crash on permission errors, etc.
+                    print(f"[ASSET GC] Failed to delete {f.name}: {e}", file=sys.stderr)
     except Exception as e:
-        # Don't let cleanup crash the main process
-        pass
+        # Don't let cleanup crash the main process, but log the issue
+        print(f"[ASSET GC] Error during check: {e}", file=sys.stderr)
 
 
 def compress_traceback(traceback_lines: List[str]) -> List[str]:
