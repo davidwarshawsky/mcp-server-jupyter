@@ -290,7 +290,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             return None, None, None
         
         # 1. Save to Asset
-        content_hash = hashlib.md5(raw_text.encode()).hexdigest()
+        # [SECURITY] Use SHA-256 for FIPS compliance (not MD5)
+        content_hash = hashlib.sha256(raw_text.encode()).hexdigest()[:32]
         asset_filename = f"text_{content_hash}.txt"
         asset_path = Path(asset_dir) / asset_filename
         

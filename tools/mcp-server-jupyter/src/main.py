@@ -685,36 +685,6 @@ async def get_kernel_info(notebook_path: str):
     """
     return await session_manager.get_kernel_info(notebook_path)
 
-@mcp.tool()
-async def install_package(package_name: str, notebook_path: Optional[str] = None):
-    """
-    [Magic Import] Install a package in the kernel's environment.
-    Use this when an import fails (ModuleNotFoundError).
-    
-    Args:
-        package_name: Name of package (e.g. 'pandas')
-        notebook_path: Optional notebook path to target specific kernel environment
-    """
-    python_path = None
-    env_vars = None
-    
-    if notebook_path:
-        session = session_manager.get_session(notebook_path)
-        if session and 'env_info' in session:
-            python_path = session['env_info'].get('python_path')
-
-    # Derive environment variables
-    env_vars = _derive_env_vars(python_path) if python_path else None
-
-    success, output = environment.install_package(package_name, python_path, env_vars)
-    
-    return ToolResult(
-        success=success,
-        data={"output": output},
-        error_msg=output if not success else None,
-        user_suggestion="IMPORTANT: You MUST restart the kernel to load the new package." if success else "Check package name"
-    ).to_json()
-
 def _derive_env_vars(python_path: str) -> Optional[dict]:
     """Helper to derive environment variables from a Python executable path."""
     import os
@@ -1432,11 +1402,6 @@ def read_asset(
         })
 
 # -----------------------
-
-@mcp.tool()
-async def install_package(notebook_path: str, package_name: str):
-    """Installs packages into the active kernel's environment."""
-    return await session_manager.install_package(notebook_path, package_name)
 
 @mcp.tool()
 async def interrupt_kernel(notebook_path: str):

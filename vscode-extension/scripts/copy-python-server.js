@@ -15,11 +15,48 @@ if (fs.existsSync(targetDir)) {
 }
 fs.mkdirSync(targetDir, { recursive: true });
 
-// Copy src directory
+// Copy src directory (with filter to exclude cache files)
 const srcSource = path.join(sourceDir, 'src');
 const srcTarget = path.join(targetDir, 'src');
-fs.cpSync(srcSource, srcTarget, { recursive: true });
-console.log('✓ Copied src/');
+
+// Helper function to filter out unwanted files
+function shouldCopyFile(src) {
+  const name = path.basename(src);
+  // Exclude __pycache__, .pyc files, .pytest_cache, .DS_Store
+  if (name === '__pycache__' || name === '.pytest_cache' || name === '.DS_Store') {
+    return false;
+  }
+  if (name.endsWith('.pyc') || name.endsWith('.pyo')) {
+    return false;
+  }
+  return true;
+}
+
+// Recursive copy with filter
+function copyDirFiltered(src, dest) {
+  if (!fs.existsSync(dest)) {
+    fs.mkdirSync(dest, { recursive: true });
+  }
+  
+  const entries = fs.readdirSync(src, { withFileTypes: true });
+  for (const entry of entries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    
+    if (!shouldCopyFile(srcPath)) {
+      continue; // Skip this file/directory
+    }
+    
+    if (entry.isDirectory()) {
+      copyDirFiltered(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
+}
+
+copyDirFiltered(srcSource, srcTarget);
+console.log('✓ Copied src/ (excluding __pycache__, .pyc, .DS_Store)');
 
 // Copy essential files
 const filesToCopy = [

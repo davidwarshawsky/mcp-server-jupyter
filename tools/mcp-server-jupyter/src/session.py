@@ -20,74 +20,11 @@ from src.cell_id_manager import get_cell_id_at_index
 from src.observability import get_logger, get_tracer
 from src.utils import check_asset_limits
 from src.kernel_state import KernelStateManager
+from src.kernel_startup import INSPECT_HELPER_CODE, get_startup_code
 
 # Configure logging
 logger = get_logger()
 tracer = get_tracer(__name__)
-
-# [SECURITY] Safe Inspection Helper
-INSPECT_HELPER_CODE = """
-def _mcp_inspect(var_name):
-    import builtins
-    import sys
-    
-    # Safe lookup: Check locals then globals
-    # Note: In ipykernel, user variables are in globals()
-    ns = globals()
-    if var_name not in ns:
-        return f"Variable '{var_name}' not found."
-    
-    obj = ns[var_name]
-    
-    try:
-        t_name = type(obj).__name__
-        output = [f"### Type: {t_name}"]
-        
-        # Check for pandas/numpy without importing if not already imported
-        is_pd_df = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].DataFrame)
-        is_pd_series = 'pandas' in sys.modules and isinstance(obj, sys.modules['pandas'].Series)
-        is_numpy = 'numpy' in sys.modules and hasattr(obj, 'shape') and hasattr(obj, 'dtype')
-        
-        # Safe Primitives
-        if isinstance(obj, (int, float, bool, str, bytes, type(None))):
-             output.append(f"- Value: {str(obj)[:500]}")
-
-        elif is_pd_df:
-            output.append(f"- Shape: {obj.shape}")
-            output.append(f"- Columns: {list(obj.columns)}")
-            output.append("\\n#### Head (3 rows):")
-            # to_markdown requires tabulate, fallback to string if fails
-            try:
-                output.append(obj.head(3).to_markdown(index=False))
-            except:
-                output.append(str(obj.head(3)))
-            
-        elif is_pd_series:
-            output.append(f"- Length: {len(obj)}")
-            try:
-                output.append(obj.head(3).to_markdown())
-            except:
-                output.append(str(obj.head(3)))
-            
-        elif is_numpy:
-            output.append(f"- Shape: {obj.shape}")
-            output.append(f"- Dtype: {obj.dtype}")
-            
-        elif isinstance(obj, (list, tuple, set)):
-             output.append(f"- Length: {len(obj)}")
-             output.append(f"- Sample: {str(list(obj)[:3])}")
-             
-        elif isinstance(obj, dict):
-             output.append(f"- Keys ({len(obj)}): {list(obj.keys())[:5]}")
-             
-        elif hasattr(obj, '__dict__'):
-             output.append(f"- Attributes: {list(obj.__dict__.keys())[:5]}")
-             
-        return "\\n".join(output)
-            
-    except Exception as e:
-        return f"Error inspecting '{var_name}': {str(e)}"
-"""
 
 # START: Moved to environment.py but kept for backward compatibility if needed
 # Better to import it
@@ -705,117 +642,9 @@ class SessionManager:
         is_python_kernel = 'python' in kernel_name.lower() if kernel_name else True
 
         if is_python_kernel:
-            # Execute startup setup (fire-and-forget for reliability)
-            startup_code = f'''
-%load_ext autoreload
-%autoreload 2
-
-import sys
-import json
-import traceback
-import os
-
-# [LAST MILE #4] Network Isolation (soft defense-in-depth)
-# Blocks common network libraries to prevent accidental/malicious egress
-# Note: This is Python-level blocking. For true isolation, use Docker with --network none.
-# This stops scripts but not C-extensions or direct socket operations.
-if os.environ.get("MCP_BLOCK_NETWORK") == "1":
-    try:
-        import requests
-        import urllib.request
-        
-        def _blocked_network_call(*args, **kwargs):
-            raise PermissionError(
-                "Network access is disabled in this environment. "
-                "If you need to download data, please ask the administrator to allowlist specific domains."
-            )
-        
-        # Monkeypatch common HTTP libraries
-        requests.get = _blocked_network_call
-        requests.post = _blocked_network_call
-        requests.put = _blocked_network_call
-        requests.delete = _blocked_network_call
-        requests.request = _blocked_network_call
-        urllib.request.urlopen = _blocked_network_call
-        
-        print("[SECURITY] Network access has been restricted for this kernel.", file=sys.stderr)
-    except ImportError:
-        pass  # Requests/urllib not installed, nothing to block
-
-# [STDIN ENABLED] MCP handles input() requests via stdin channel
-# Interactive input is now supported via MCP notifications
-
-# [SECURITY] Safe Inspection Helper
-{INSPECT_HELPER_CODE}
-
-# [PHASE 4: Smart Error Recovery]
-# Inject a custom exception handler to provide context-aware error reports
-def _mcp_handler(shell, etype, value, tb, tb_offset=None, **kwargs):
-    # Print standard traceback
-    if hasattr(sys, 'last_type'):
-        del sys.last_type
-    if hasattr(sys, 'last_value'):
-        del sys.last_value
-    if hasattr(sys, 'last_traceback'):
-        del sys.last_traceback
-        
-    traceback.print_exception(etype, value, tb)
-    
-    # Generate sidecar JSON
-    try:
-        error_context = {{
-            "error": str(value),
-            "type": etype.__name__,
-            "suggestion": "Check your inputs."
-        }}
-        sidecar_msg = f"\\n__MCP_ERROR_CONTEXT_START__\\n{{json.dumps(error_context)}}\\n__MCP_ERROR_CONTEXT_END__\\n"
-        sys.stderr.write(sidecar_msg)
-        sys.stderr.flush()
-    except Exception as e:
-        sys.stderr.write(f"Error in MCP Handler: {{e}}\\n")
-        sys.stderr.flush()
-
-try:
-    get_ipython().set_custom_exc((Exception,), _mcp_handler)
-except Exception:
-    pass
-
-# [PHASE 3.3] Force static rendering for interactive visualization libraries
-# This allows AI agents to "see" plots that would otherwise be JavaScript-based
-import os
-try:
-    import matplotlib
-    matplotlib.use('Agg')  # Headless backend for matplotlib
-    # Inline backend is still useful for png display
-    try:
-        get_ipython().run_line_magic('matplotlib', 'inline')
-    except:
-        pass
-except ImportError:
-    pass  # matplotlib not installed, skip
-
-# Force Plotly to render as static PNG
-# NOTE: Requires kaleido installed in kernel environment: pip install kaleido
-try:
-    import plotly
-    try:
-        import kaleido
-        os.environ['PLOTLY_RENDERER'] = 'png'
-    except ImportError:
-        # Kaleido not installed - Plotly will fall back to HTML output
-        # which will be sanitized to text by the asset extraction pipeline
-        pass
-except ImportError:
-    pass  # plotly not installed, skip
-
-# Force Bokeh to use static SVG backend
-try:
-    import bokeh
-    os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg'
-except ImportError:
-    pass  # bokeh not installed, skip
-'''
-        if is_python_kernel:
+            # [MAINTAINABILITY] Load startup code from dedicated module (easier to test/audit)
+            startup_code = get_startup_code()
+            
             try:
                 kc.execute(startup_code, silent=True)
                 # Give it a moment to take effect
@@ -1009,7 +838,23 @@ except ImportError:
         except asyncio.CancelledError:
             logger.info(f"Listener cancelled for {nb_path}")
         except Exception as e:
-            logger.error(f"Listener error for {nb_path}: {e}")
+            # [SRE] Circuit breaker: prevent CPU spin on broken kernel state
+            consecutive_errors = session_data.get('listener_consecutive_errors', 0)
+            consecutive_errors += 1
+            session_data['listener_consecutive_errors'] = consecutive_errors
+            
+            logger.error(f"Listener error for {nb_path}: {e} (consecutive errors: {consecutive_errors})")
+            
+            if consecutive_errors >= 5:
+                logger.critical(f"[CIRCUIT BREAKER] Listener for {nb_path} hit 5 consecutive errors. Exiting to prevent resource exhaustion.")
+                # Attempt self-healing: mark session as unhealthy
+                session_data['listener_healthy'] = False
+                break
+            else:
+                # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                backoff_seconds = min(2 ** (consecutive_errors - 1), 16)
+                logger.warning(f"[CIRCUIT BREAKER] Backing off for {backoff_seconds}s before retry")
+                await asyncio.sleep(backoff_seconds)
 
     async def _stdin_listener(self, nb_path: str, session_data: Dict):
         """
@@ -1408,7 +1253,7 @@ except ImportError:
                 "This prevents server resource exhaustion."
             )
         
-        # Track as queued immediately (fixes race condition with status checks)
+        # Track as queued immediately (before atomic queue operation)
         session['queued_executions'][exec_id] = {
             'cell_index': cell_index,
             'code': code,
@@ -1423,8 +1268,24 @@ except ImportError:
             'exec_id': exec_id
         }
         
-        # Enqueue the execution
-        await session['execution_queue'].put(exec_request)
+        # [SECURITY] Atomic backpressure check using put_nowait (prevents race condition)
+        try:
+            session['execution_queue'].put_nowait(exec_request)
+        except asyncio.QueueFull:
+            # Remove from queued_executions since we failed to enqueue
+            del session['queued_executions'][exec_id]
+            
+            queue_size = session['execution_queue'].qsize()
+            max_size = session['execution_queue'].maxsize
+            logger.error(
+                f"[BACKPRESSURE] Execution queue full for {nb_path} "
+                f"({queue_size}/{max_size} items). Rejecting execution request."
+            )
+            raise RuntimeError(
+                f"Execution queue is full ({queue_size}/{max_size} pending executions). "
+                "Please wait for current executions to complete before submitting more. "
+                "This prevents server resource exhaustion."
+            )
         
         logger.debug(f"Queued execution {exec_id} for {nb_path} cell {cell_index}")
         return exec_id
