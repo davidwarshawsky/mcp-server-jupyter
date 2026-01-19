@@ -190,7 +190,18 @@ async def _proposal_cleanup_loop():
             logger.error(f"[PROPOSALS CLEANUP] Error: {e}")
             await asyncio.sleep(3600)
 
-asyncio.create_task(_proposal_cleanup_loop())
+# Defer task creation to avoid "no running event loop" during import
+_proposal_cleanup_task = None
+
+def _ensure_proposal_cleanup_task():
+    """Start the proposal cleanup task if not already running."""
+    global _proposal_cleanup_task
+    if _proposal_cleanup_task is None or _proposal_cleanup_task.done():
+        try:
+            _proposal_cleanup_task = asyncio.create_task(_proposal_cleanup_loop())
+        except RuntimeError:
+            # No running event loop - task will be started later
+            pass
 
 # Health endpoint used by external orchestrators (module-level so tests can import it)
 from starlette.responses import JSONResponse
@@ -1999,228 +2010,6 @@ def get_assets_summary(notebook_path: str):
     return json.dumps(result, indent=2)
 
 @mcp.tool()
-@validated_tool(InspectVariableArgs)
-async def inspect_variable(notebook_path: str, variable_name: str):
-    """
-    [DATA SCIENCE] Inspect a variable in the kernel without printing it.
-    
-    Returns structured metadata about the variable (type, shape, columns, dtypes, preview).
-    Much more efficient than repr() for large DataFrames/arrays.
-    
-    Args:
-        notebook_path: Path to notebook
-        variable_name: Name of variable to inspect (e.g., "df", "model")
-    
-    Returns:
-        JSON with type, shape, memory usage, and preview
-        
-    Example:
-        inspect_variable("analysis.ipynb", "df")
-        # Returns: {"type": "DataFrame", "shape": [1000, 5], "columns": [...], "dtypes": {...}}
-    """
-    session = session_manager.get_session(notebook_path)
-    if not session:
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg="No running kernel. Call start_kernel first."
-        ).to_json()
-    
-    # Inspection code that returns JSON
-    inspection_code = f"""
-import json
-import sys
-
-def _inspect_var():
-    try:
-        var = {variable_name}
-        info = {{
-            "variable": "{variable_name}",
-            "type": type(var).__name__,
-            "module": type(var).__module__
-        }}
-        
-        # Pandas DataFrame
-        if hasattr(var, 'shape') and hasattr(var, 'columns'):
-            info['shape'] = list(var.shape)
-            info['columns'] = list(var.columns)
-            info['dtypes'] = {{str(k): str(v) for k, v in var.dtypes.items()}}
-            info['memory_mb'] = var.memory_usage(deep=True).sum() / 1024 / 1024
-            info['preview'] = var.head(5).to_dict('records')
-        # NumPy array
-        elif hasattr(var, 'shape') and hasattr(var, 'dtype'):
-            info['shape'] = list(var.shape)
-            info['dtype'] = str(var.dtype)
-            info['size'] = var.size
-            # Flatten preview for multi-dimensional arrays
-            flat = var.flatten()
-            info['preview'] = flat[:10].tolist() if len(flat) > 10 else flat.tolist()
-        # List/Tuple
-        elif isinstance(var, (list, tuple)):
-            info['length'] = len(var)
-            info['preview'] = var[:5] if len(var) > 5 else var
-        # Dict
-        elif isinstance(var, dict):
-            info['length'] = len(var)
-            info['keys_sample'] = list(var.keys())[:10]
-        # String
-        elif isinstance(var, str):
-            info['length'] = len(var)
-            info['preview'] = var[:200]
-        # Scalar
-        else:
-            info['value'] = str(var)
-        
-        return json.dumps(info, indent=2)
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
-
-print(_inspect_var())
-"""
-    
-    # Execute inspection code using SessionManager's queue (index -1 = internal tool)
-    try:
-        exec_id = await session_manager.execute_cell_async(notebook_path, -1, inspection_code)
-    except RuntimeError as e:
-        # Queue is full
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg=f"Execution queue is full. Please wait for pending executions to complete. {str(e)}"
-        ).to_json()
-    
-    if not exec_id:
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg="Failed to submit inspection"
-        ).to_json()
-    
-    # Wait for completion and collect output
-    import time
-    timeout = 10
-    start_time = time.time()
-    
-    while time.time() - start_time < timeout:
-        status = session_manager.get_execution_status(notebook_path, exec_id)
-        if status['status'] in ['completed', 'error']:
-            # Extract text output
-            outputs = status.get('outputs', [])
-            for out in outputs:
-                if out.get('output_type') == 'stream' and 'text' in out:
-                    result_text = out['text']
-                    try:
-                        # Parse JSON response
-                        result_data = json.loads(result_text)
-                        return ToolResult(
-                            success=True,
-                            data=result_data,
-                            error_msg=result_data.get('error')
-                        ).to_json()
-                    except json.JSONDecodeError:
-                        return ToolResult(
-                            success=False,
-                            data={},
-                            error_msg="Failed to parse inspection result"
-                        ).to_json()
-            
-            return ToolResult(
-                success=False,
-                data={},
-                error_msg="No output from inspection"
-            ).to_json()
-        
-        await asyncio.sleep(0.2)
-    
-    return ToolResult(
-        success=False,
-        data={},
-        error_msg="Inspection timeout"
-    ).to_json()
-
-@mcp.tool()
-def search_notebook(notebook_path: str, pattern: str, case_sensitive: bool = False):
-    """
-    [NAVIGATION] Search for pattern across all cells in notebook.
-    
-    Returns matching cells with context. Useful for large notebooks
-    to avoid loading full content into context window.
-    
-    Args:
-        notebook_path: Path to notebook
-        pattern: Text or regex pattern to search for
-        case_sensitive: Whether search should be case-sensitive (default: False)
-    
-    Returns:
-        JSON with matching cells, line numbers, and snippets
-        
-    Example:
-        search_notebook("analysis.ipynb", "import pandas")
-        # Returns: [{"cell_index": 2, "cell_type": "code", "snippet": "..."}]
-    """
-    try:
-        # Read notebook directly with nbformat
-        with open(notebook_path, 'r', encoding='utf-8') as f:
-            nb = nbformat.read(f, as_version=4)
-        
-        matches = []
-        
-        for idx, cell in enumerate(nb['cells']):
-            if cell['cell_type'] not in ['code', 'markdown']:
-                continue
-            
-            source = cell.get('source', '')
-            if isinstance(source, list):
-                source = ''.join(source)
-            
-            # Perform search
-            search_text = source if case_sensitive else source.lower()
-            search_pattern = pattern if case_sensitive else pattern.lower()
-            
-            if search_pattern in search_text:
-                # Find all occurrences with line numbers
-                lines = source.split('\n')
-                matching_lines = []
-                
-                for line_idx, line in enumerate(lines):
-                    check_line = line if case_sensitive else line.lower()
-                    if search_pattern in check_line:
-                        matching_lines.append({
-                            'line_number': line_idx + 1,
-                            'content': line.strip()
-                        })
-                
-                # Create snippet (first 500 chars)
-                snippet = source[:500]
-                if len(source) > 500:
-                    snippet += "... [truncated]"
-                
-                matches.append({
-                    'cell_index': idx,
-                    'cell_type': cell['cell_type'],
-                    'matches': len(matching_lines),
-                    'matching_lines': matching_lines[:10],  # Limit to 10 lines
-                    'snippet': snippet
-                })
-        
-        return ToolResult(
-            success=True,
-            data={
-                'pattern': pattern,
-                'notebook': notebook_path,
-                'total_matches': len(matches),
-                'matches': matches
-            }
-        ).to_json()
-        
-    except Exception as e:
-        return ToolResult(
-            success=False,
-            data={},
-            error_msg=f"Search failed: {str(e)}"
-        ).to_json()
-
-@mcp.tool()
 @validated_tool(InstallPackageArgs)
 async def install_package(notebook_path: str, package: str):
     """
@@ -2597,6 +2386,18 @@ def export_diagnostic_bundle():
             "message": "Failed to create diagnostic bundle"
         })
 
+
+def log_startup_configuration():
+    """Log startup configuration banner for debugging and operational visibility."""
+    logger.info("=" * 60)
+    logger.info(f"MCP Jupyter Server v{__version__}")
+    logger.info("=" * 60)
+    logger.info(f"Python: {sys.version}")
+    logger.info(f"Platform: {sys.platform}")
+    logger.info(f"Working directory: {os.getcwd()}")
+    logger.info("=" * 60)
+
+
 def main():
     import argparse
     
@@ -2672,6 +2473,10 @@ def main():
             loop.run_until_complete(session_manager.reconcile_zombies())
         except Exception as e:
             logger.error("reaper_failed", error=str(e))
+        
+        # Start deferred background tasks now that we have an event loop
+        _ensure_proposal_cleanup_task()
+        session_manager._ensure_asset_cleanup_task()
         
         if args.transport == "websocket":
             import uvicorn

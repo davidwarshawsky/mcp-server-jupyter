@@ -70,6 +70,28 @@ def get_or_create_secret():
 # This ensures checkpoints remain valid across server restarts.
 SESSION_SECRET = get_or_create_secret()
 
+
+def _get_kernel_process(km):
+    """
+    Get the kernel subprocess from a KernelManager.
+    
+    In newer versions of jupyter_client, the process is accessed via
+    km.provisioner.process instead of the deprecated km.kernel.
+    
+    Returns:
+        The subprocess.Popen object, or None if not available.
+    """
+    # Try new way first (jupyter_client >= 7.0)
+    if hasattr(km, 'provisioner') and km.provisioner:
+        process = getattr(km.provisioner, 'process', None)
+        if process:
+            return process
+    # Fallback to old way (jupyter_client < 7.0)
+    if hasattr(km, 'kernel') and km.kernel:
+        return km.kernel
+    return None
+
+
 class SessionManager:
     def __init__(self, default_execution_timeout: int = 300, input_request_timeout: int = 60):
         # Maps notebook_path (str) -> {
@@ -99,6 +121,8 @@ class SessionManager:
         # Reference to MCP server for notifications
         self.mcp_server = None
         self.server_session = None
+        # [BROADCASTER] Connection manager for multi-user support (set by main.py)
+        self.connection_manager = None
         
         # Session persistence directory (12-Factor compliant)
         from src.config import load_and_validate_settings
@@ -112,8 +136,17 @@ class SessionManager:
         self.execution_scheduler = ExecutionScheduler(default_timeout=default_execution_timeout)
         self.io_multiplexer = IOMultiplexer(input_request_timeout=input_request_timeout)
 
-        # [PHASE 2.3] Start asset cleanup task
-        self._asset_cleanup_task = asyncio.create_task(self._asset_cleanup_loop())
+        # [PHASE 2.3] Asset cleanup task - deferred to avoid "no running event loop" error
+        self._asset_cleanup_task = None
+        
+    def _ensure_asset_cleanup_task(self):
+        """Start the asset cleanup task if not already running."""
+        if self._asset_cleanup_task is None or self._asset_cleanup_task.done():
+            try:
+                self._asset_cleanup_task = asyncio.create_task(self._asset_cleanup_loop())
+            except RuntimeError:
+                # No running event loop - task will be started later
+                pass
         
     def set_mcp_server(self, mcp_server):
         """Set the MCP server instance to enable notifications."""
@@ -229,7 +262,7 @@ class SessionManager:
                     break
                 
                 # Check if kernel is alive via heartbeat
-                if not kc.is_alive():
+                if not await kc.is_alive():
                     logger.error(f"[HEALTH CHECK] Kernel {nb_path} died. Attempting restart...")
                     try:
                         await self.restart_kernel(nb_path)
@@ -463,6 +496,9 @@ class SessionManager:
             timeout: Execution timeout in seconds (default: 300)
             agent_id: Optional agent ID for workspace isolation
         """
+        # Ensure asset cleanup task is running (deferred from __init__)
+        self._ensure_asset_cleanup_task()
+        
         abs_path = str(Path(nb_path).resolve())
         execution_timeout = timeout if timeout is not None else self.default_execution_timeout
         
@@ -765,8 +801,9 @@ class SessionManager:
         # Safely get PID and connection file
         pid = "unknown"
         connection_file = "unknown"
-        if hasattr(km, 'kernel') and km.kernel:
-            pid = getattr(km.kernel, 'pid', 'unknown')
+        kernel_process = _get_kernel_process(km)
+        if kernel_process:
+            pid = getattr(kernel_process, 'pid', 'unknown')
         if hasattr(km, 'connection_file'):
             connection_file = km.connection_file
         
@@ -814,6 +851,14 @@ class SessionManager:
             notification_callback=self._send_notification,
             interrupt_callback=self.interrupt_kernel
         )
+
+    async def submit_input(self, notebook_path: str, text: str):
+        """Send user input back to the kernel."""
+        session = self.get_session(notebook_path)
+        if not session:
+            raise ValueError("No active session")
+            
+        kc = session.get('kc')
         # If we don't have a kernel client (test mode or transient), just clear the flag
         if kc is None:
             session['waiting_for_input'] = False
@@ -1098,6 +1143,63 @@ print(_inspect_var())
 """
         return await self._run_and_wait_internal(nb_path, code)
 
+    def get_execution_status(self, nb_path: str, exec_id: str):
+        """Get the status of an execution by its ID."""
+        abs_path = str(Path(nb_path).resolve())
+        if abs_path not in self.sessions:
+            return {"status": "error", "message": "Kernel not found"}
+            
+        session = self.sessions[abs_path]
+        
+        # Check if still in queue (not started processing yet)
+        if exec_id in session.get('queued_executions', {}):
+            queued_data = session['queued_executions'][exec_id]
+            return {
+                "status": "queued",
+                "output": "",
+                "cell_index": queued_data.get('cell_index', -1),
+                "intermediate_outputs_count": 0
+            }
+        
+        # Look for the execution by ID in active executions
+        target_data = None
+        for msg_id, data in session.get('executions', {}).items():
+            if data.get('id') == exec_id:
+                target_data = data
+                break
+                
+        if not target_data:
+            return {"status": "not_found", "output": ""}
+            
+        return {
+            "status": target_data.get('status', 'unknown'),
+            "output": target_data.get('text_summary', ''),
+            "intermediate_outputs_count": len(target_data.get('outputs', []))
+        }
+
+    def is_kernel_busy(self, nb_path: str) -> bool:
+        """
+        Check if the kernel is currently busy executing code.
+        
+        Returns True if there are any executions with 'running' or 'queued' status.
+        """
+        abs_path = str(Path(nb_path).resolve())
+        if abs_path not in self.sessions:
+            return False
+            
+        session = self.sessions[abs_path]
+        
+        # Check queued executions
+        if session.get('queued_executions'):
+            return True
+            
+        # Check active executions for running status
+        for msg_id, data in session.get('executions', {}).items():
+            if data.get('status') in ['running', 'queued']:
+                return True
+                
+        return False
+
     async def _run_and_wait_internal(self, nb_path: str, code: str):
         """Internal helper to run code via the async system and wait for result."""
         abs_path = str(Path(nb_path).resolve())
@@ -1112,6 +1214,11 @@ print(_inspect_var())
             await asyncio.sleep(0.5)
             status = self.get_execution_status(nb_path, exec_id)
             if status['status'] in ['completed', 'error']:
+                # Give a moment for finalization to set text_summary
+                # (status becomes 'completed' before finalize_callback finishes)
+                if not status.get('output'):
+                    await asyncio.sleep(0.2)
+                    status = self.get_execution_status(nb_path, exec_id)
                 return status['output']
         
         return "Error: Timeout waiting for internal command."
@@ -1190,7 +1297,7 @@ print(_inspect_var())
         
         # Remove from sessions and clean up state
         del self.sessions[abs_path]
-        self.state_manager.remove_persisted_session(abs_path)
+        self.state_manager.remove_session(abs_path)
         
         return "Kernel shutdown."
 
@@ -1232,7 +1339,7 @@ print(_inspect_var())
             
             # Check kernel client responsiveness
             kc = session.get('kc')
-            if kc and not kc.is_alive():
+            if kc and not await kc.is_alive():
                 logger.warning(f"[CANCEL] Kernel died during interrupt")
                 return "Kernel terminated"
         
@@ -1240,10 +1347,11 @@ print(_inspect_var())
         logger.warning(f"[CANCEL] Stage 1 failed, escalating to Stage 2: SIGTERM")
         try:
             km = session['km']
-            if hasattr(km, 'kernel') and km.kernel:
+            kernel_process = _get_kernel_process(km)
+            if kernel_process:
                 import signal
-                km.kernel.send_signal(signal.SIGTERM)
-                logger.info(f"[CANCEL] Stage 2: Sent SIGTERM to PID {km.kernel.pid}")
+                kernel_process.send_signal(signal.SIGTERM)
+                logger.info(f"[CANCEL] Stage 2: Sent SIGTERM to PID {kernel_process.pid}")
         except Exception as e:
             logger.error(f"[CANCEL] Failed to send SIGTERM: {e}")
         
@@ -1252,7 +1360,7 @@ print(_inspect_var())
         
         # Check if kernel stopped
         kc = session.get('kc')
-        if kc and not kc.is_alive():
+        if kc and not await kc.is_alive():
             logger.info(f"[CANCEL] Stage 2 succeeded (SIGTERM)")
             return "Force terminated (SIGTERM)"
         
@@ -1260,10 +1368,11 @@ print(_inspect_var())
         logger.error(f"[CANCEL] Stage 2 failed, escalating to Stage 3: SIGKILL + restart")
         try:
             km = session['km']
-            if hasattr(km, 'kernel') and km.kernel:
+            kernel_process = _get_kernel_process(km)
+            if kernel_process:
                 import signal
-                km.kernel.send_signal(signal.SIGKILL)
-                logger.info(f"[CANCEL] Stage 3: Sent SIGKILL to PID {km.kernel.pid}")
+                kernel_process.send_signal(signal.SIGKILL)
+                logger.info(f"[CANCEL] Stage 3: Sent SIGKILL to PID {kernel_process.pid}")
                 
             # Force cleanup
             await self.stop_kernel(nb_path, cleanup_assets=False)
@@ -1457,11 +1566,12 @@ print(_inspect_var())
         try:
             km = self.sessions[abs_path]['km']
             
-            # Safely get PID (same pattern as start_kernel)
-            if not hasattr(km, 'kernel') or not km.kernel:
+            # Safely get PID using the helper
+            kernel_process = _get_kernel_process(km)
+            if not kernel_process:
                 return {"error": "Kernel process not found"}
             
-            pid = getattr(km.kernel, 'pid', None)
+            pid = getattr(kernel_process, 'pid', None)
             if not pid:
                 return {"error": "Kernel PID not available"}
             

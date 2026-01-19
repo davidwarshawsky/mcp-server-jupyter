@@ -107,6 +107,17 @@
         "icon": "$(pulse)"
       },
       {
+        "command": "mcp-jupyter.showAuditLog",
+        "title": "MCP Jupyter: Show Audit Log",
+        "category": "MCP Jupyter",
+        "icon": "$(notebook)"
+      },
+      {
+        "command": "mcp-jupyter.refreshExecutions",
+        "title": "MCP Jupyter: Refresh Executions",
+        "icon": "$(refresh)"
+      },
+      {
         "command": "mcp-jupyter.openWalkthrough",
         "title": "MCP Jupyter: Open Setup Wizard",
         "category": "MCP Jupyter"
@@ -160,6 +171,11 @@
           "id": "mcpVariables",
           "name": "Variable Dashboard",
           "when": "true"
+        },
+        {
+          "id": "mcpExecutions",
+          "name": "Active Executions",
+          "when": "true"
         }
       ]
     },
@@ -168,6 +184,11 @@
         {
           "command": "mcp-jupyter.refreshVariables",
           "when": "view == mcpVariables",
+          "group": "navigation"
+        },
+        {
+          "command": "mcp-jupyter.refreshExecutions",
+          "when": "view == mcpExecutions",
           "group": "navigation"
         }
       ]

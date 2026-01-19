@@ -8,6 +8,8 @@ import { SetupManager } from './setupManager';
 import { SyncCodeLensProvider } from './syncCodeLensProvider';
 import { QuickStartWizard } from './quickStartWizard';
 import { HealthCheckDashboard } from './healthCheckDashboard';
+import { ExecutionViewProvider } from './executionView';
+import { AuditLogViewer } from './auditLogViewer';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
@@ -18,6 +20,8 @@ let setupManager: SetupManager;
 let syncCodeLensProvider: SyncCodeLensProvider;
 let quickStartWizard: QuickStartWizard;
 let healthCheckDashboard: HealthCheckDashboard;
+let executionViewProvider: ExecutionViewProvider;
+let auditLogViewer: AuditLogViewer;
 const notebooksNeedingSync = new Set<string>();
 
 export interface ExtensionApi {
@@ -31,7 +35,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
   try {
     // Initialize MCP client
-    mcpClient = new McpClient();
+    mcpClient = new McpClient(context);
 
     // Create connection health status bar
     connectionStatusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 101);
@@ -91,6 +95,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     // [WEEK 2] Health check dashboard
     healthCheckDashboard = new HealthCheckDashboard(mcpClient);
     context.subscriptions.push(healthCheckDashboard);
+    
+    // [WEEK 4] Execution view provider
+    executionViewProvider = new ExecutionViewProvider(mcpClient);
+    const executionView = vscode.window.createTreeView('mcpExecutions', {
+      treeDataProvider: executionViewProvider,
+      showCollapseAll: true
+    });
+    context.subscriptions.push(executionView);
+    context.subscriptions.push(executionViewProvider);
+    
+    // [WEEK 4] Audit log viewer
+    auditLogViewer = new AuditLogViewer(mcpClient);
+    context.subscriptions.push(auditLogViewer);
 
     // Open the walkthrough on first activation (idempotent)
     const isInstalled = context.globalState.get('mcp.hasCompletedSetup', false);
@@ -255,6 +272,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.showHealthCheck', () => {
         healthCheckDashboard.show();
+      })
+    );
+    
+    // [WEEK 4] Audit log viewer command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.showAuditLog', async () => {
+        await auditLogViewer.show();
+      })
+    );
+    
+    // [WEEK 4] Refresh executions command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.refreshExecutions', () => {
+        executionViewProvider.refresh();
       })
     );
     

@@ -154,12 +154,14 @@ pip install "mcp-server-jupyter[superpowers]"
    - Search "MCP Agent Kernel"
    - Click Install
 
-2. **Open a Notebook**:
-   ```bash
-   code demo.ipynb
-   ```
+2. **Launch Quick Start Wizard** (New Users):
+   - Press `Ctrl+Shift+P`
+   - Type "MCP Jupyter: Quick Start"
+   - Choose setup mode (managed server, existing server, or remote)
+   - Done in <2 minutes!
 
-3. **Select Kernel**:
+3. **Or Configure Manually**:
+   - Open a Notebook: `code demo.ipynb`
    - Click kernel selector (top-right)
    - Choose "MCP Agent Kernel"
 
@@ -167,6 +169,15 @@ pip install "mcp-server-jupyter[superpowers]"
    ```python
    /prompt auto-analyst
    ```
+
+### Connection Resilience
+
+The extension includes enterprise-grade connection features:
+
+- **Auto-Reconnection**: Exponential backoff (1s → 32s, up to 10 attempts)
+- **Heartbeat Monitoring**: Ping/pong every 30s, auto-reconnect on 3 missed beats
+- **Connection Status**: Visual indicator in status bar (🟢 Connected, 🟡 Reconnecting, 🔴 Disconnected)
+- **State Persistence**: Pending executions saved to `.vscode/mcp-state.json` and restored after reconnect
 
 ---
 
@@ -203,6 +214,37 @@ graph TB
 - **Output Truncation**: Massive logs handled gracefully
 
 **[🏗️ Architecture Deep Dive →](https://yourusername.github.io/mcp-jupyter-server/architecture/crucible/)**
+
+---
+
+## Observability & Diagnostics
+
+### Error Transparency (Week 3)
+
+The extension classifies all connection errors into 6 types with actionable recovery steps:
+
+- **AUTH_FAILED**: Invalid API key → Check credentials in settings
+- **NETWORK_ERROR**: Connection timeout → Verify server URL and firewall
+- **SERVER_CRASH**: Kernel died → Check server logs for Python errors
+- **PORT_IN_USE**: Port conflict → Kill process or change port
+- **TIMEOUT**: Server not responding → Increase timeout or check server load
+- **UNKNOWN**: Unclassified error → View full logs
+
+**Privacy-Preserving Telemetry**: All errors logged to `.vscode/mcp-telemetry.jsonl` (no PII, auto-rotates at 1000 entries)
+
+### Execution Dashboard (Week 4)
+
+**Active Executions View**:
+- Real-time tree view showing running cells
+- Elapsed time for each execution
+- Notebook name and cell index
+- Auto-refresh every 2 seconds
+
+**Audit Log Viewer**:
+- Filter by kernel ID, event type, or time range
+- CSV export for compliance reporting
+- Color-coded events (🔴 security, 🟢 kernel, 🔵 execution)
+- Command: `Ctrl+Shift+P` → "MCP Jupyter: Show Audit Log"
 
 ---
 

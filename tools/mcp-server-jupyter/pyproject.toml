@@ -91,7 +91,8 @@ filterwarnings = [
 markers = [
     "optional: marks tests as optional (heavy integration tests requiring matplotlib/pandas)",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "integration: marks tests as integration tests requiring real kernel"
+    "integration: marks tests as integration tests requiring real kernel",
+    "resource_intensive: marks tests that create many resources and should run with low parallelism"
 ]
 
 [tool.coverage.run]

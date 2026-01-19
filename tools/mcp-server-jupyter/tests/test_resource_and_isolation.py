@@ -49,13 +49,17 @@ def test_prlimit_prefix_applied(monkeypatch):
 
     # Start kernel (should set km.kernel_cmd)
     import asyncio
-    asyncio.run(manager.start_kernel(nb_path, venv_path=None))
+    try:
+        asyncio.run(manager.start_kernel(nb_path, venv_path=None))
 
-    km = manager.sessions[list(manager.sessions.keys())[0]]['km']
-    assert km.kernel_cmd is not None
-    # prlimit prefix applied
-    assert km.kernel_cmd[0] == 'prlimit'
-    assert '--as=4294967296' in km.kernel_cmd
+        km = manager.sessions[list(manager.sessions.keys())[0]]['km']
+        assert km.kernel_cmd is not None
+        # prlimit prefix applied
+        assert km.kernel_cmd[0] == 'prlimit'
+        assert '--as=4294967296' in km.kernel_cmd
+    finally:
+        # Cleanup
+        manager.sessions.clear()
 
 
 def test_agent_cwd_isolation(monkeypatch, tmp_path):
@@ -84,8 +88,12 @@ def test_agent_cwd_isolation(monkeypatch, tmp_path):
     nb.write_text('{}')
 
     import asyncio
-    # Start kernel with agent id
-    asyncio.run(manager.start_kernel(str(nb), agent_id='alice'))
-    sess = manager.sessions.get(str(nb.resolve()))
-    assert sess is not None
-    assert 'agent_alice' in sess['cwd'] or sess['cwd'].endswith('agent_alice')
+    try:
+        # Start kernel with agent id
+        asyncio.run(manager.start_kernel(str(nb), agent_id='alice'))
+        sess = manager.sessions.get(str(nb.resolve()))
+        assert sess is not None
+        assert 'agent_alice' in sess['cwd'] or sess['cwd'].endswith('agent_alice')
+    finally:
+        # Cleanup
+        manager.sessions.clear()

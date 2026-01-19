@@ -8,6 +8,8 @@ Tests for the critical AI agent usability fixes:
 
 Note: Docker security hardening (restricted mounts, no-new-privileges, read-only) 
 is implemented in src/session.py but not tested here (requires Docker environment).
+
+WARNING: Some tests start real kernels. For WSL safety, run with low parallelism.
 """
 
 import pytest
@@ -15,6 +17,10 @@ import asyncio
 from pathlib import Path
 from src.utils import compress_traceback
 from src.session import SessionManager
+
+
+# Mark only the async tests that start kernels as resource intensive
+# (The unit tests for compress_traceback are fine to run in parallel)
 
 
 def test_compress_traceback_removes_library_frames():

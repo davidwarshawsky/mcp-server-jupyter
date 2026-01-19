@@ -4,6 +4,10 @@ Tests for agent-ready features:
 - run_all_cells
 - get_variable_info / list_variables
 - stop_on_error flag
+
+WARNING: These tests create many SessionManager instances with real OS resources.
+On WSL, running with high parallelism (-n 15) can exhaust ephemeral ports and
+corrupt the network stack. Run with: pytest tests/test_agent_ready_features.py -n 1
 """
 
 import pytest
@@ -14,19 +18,56 @@ from unittest.mock import MagicMock, AsyncMock, patch
 from src.session import SessionManager
 
 
+# Mark entire module as resource intensive for WSL safety
+pytestmark = pytest.mark.resource_intensive
+
+
+@pytest.fixture
+async def clean_session_manager():
+    """
+    Fixture that provides a SessionManager with proper cleanup.
+    CRITICAL: Without this, tests leak resources that corrupt WSL network stack.
+    """
+    manager = SessionManager()
+    yield manager
+    
+    # Cleanup: Stop all kernels and clear sessions
+    for nb_path in list(manager.sessions.keys()):
+        try:
+            # Close kernel client channels if they exist
+            session = manager.sessions[nb_path]
+            if 'kc' in session and hasattr(session['kc'], 'stop_channels'):
+                try:
+                    session['kc'].stop_channels()
+                except Exception:
+                    pass
+            
+            # Stop kernel manager if it exists
+            if 'km' in session and hasattr(session['km'], 'shutdown_kernel'):
+                try:
+                    await session['km'].shutdown_kernel(now=True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Clear all sessions
+    manager.sessions.clear()
+
+
 class TestListKernels:
     """Test list_kernels functionality."""
     
     @pytest.mark.asyncio
-    async def test_list_kernels_empty(self):
+    async def test_list_kernels_empty(self, clean_session_manager):
         """Test listing kernels when none are running."""
-        manager = SessionManager()
+        manager = clean_session_manager
         assert len(manager.sessions) == 0
     
     @pytest.mark.asyncio
-    async def test_list_kernels_with_sessions(self):
+    async def test_list_kernels_with_sessions(self, clean_session_manager):
         """Test listing kernels with active sessions."""
-        manager = SessionManager()
+        manager = clean_session_manager
         
         # Mock a session
         nb_path = str(Path("test.ipynb").resolve())
@@ -53,7 +94,7 @@ class TestRunAllCells:
     """Test run_all_cells functionality."""
     
     @pytest.mark.asyncio
-    async def test_run_all_cells_enqueues_all_code_cells(self, tmp_path):
+    async def test_run_all_cells_enqueues_all_code_cells(self, clean_session_manager, tmp_path):
         """Test that run_all_cells enqueues all code cells."""
         # Create test notebook
         nb = nbformat.v4.new_notebook()
@@ -69,7 +110,7 @@ class TestRunAllCells:
             nbformat.write(nb, f)
         
         # Mock session
-        manager = SessionManager()
+        manager = clean_session_manager
         resolved_path = str(nb_path.resolve())
         
         execution_queue = asyncio.Queue()
@@ -102,9 +143,9 @@ class TestVariableInspection:
     """Test get_variable_info and list_variables."""
     
     @pytest.mark.asyncio
-    async def test_get_variable_info_structure(self):
+    async def test_get_variable_info_structure(self, clean_session_manager):
         """Test that get_variable_info generates correct inspection code."""
-        manager = SessionManager()
+        manager = clean_session_manager
         nb_path = str(Path("test.ipynb").resolve())
         
         # Mock session with execute capability
@@ -148,9 +189,9 @@ class TestStopOnError:
     """Test stop_on_error flag functionality."""
     
     @pytest.mark.asyncio
-    async def test_stop_on_error_default_false(self):
+    async def test_stop_on_error_default_false(self, clean_session_manager):
         """Test that stop_on_error defaults to False."""
-        manager = SessionManager()
+        manager = clean_session_manager
         nb_path = str(Path("test.ipynb").resolve())
         
         with patch("src.session.AsyncKernelManager") as MockKM:
@@ -170,9 +211,9 @@ class TestStopOnError:
             assert session['stop_on_error'] is False
     
     @pytest.mark.asyncio
-    async def test_stop_on_error_can_be_toggled(self):
+    async def test_stop_on_error_can_be_toggled(self, clean_session_manager):
         """Test that stop_on_error can be set to True."""
-        manager = SessionManager()
+        manager = clean_session_manager
         nb_path = str(Path("test.ipynb").resolve())
         
         # Mock session
@@ -193,9 +234,9 @@ class TestStopOnError:
         assert session['stop_on_error'] is True
     
     @pytest.mark.asyncio
-    async def test_stop_on_error_clears_queue_on_error(self):
+    async def test_stop_on_error_clears_queue_on_error(self, clean_session_manager):
         """Test that stop_on_error=True clears remaining queue items on error."""
-        manager = SessionManager()
+        manager = clean_session_manager
         nb_path = str(Path("test.ipynb").resolve())
         
         # Create session with stop_on_error enabled
@@ -235,13 +276,13 @@ class TestAgentWorkflow:
     """Integration tests for typical agent workflows."""
     
     @pytest.mark.asyncio
-    async def test_agent_workflow_list_then_inspect(self):
+    async def test_agent_workflow_list_then_inspect(self, clean_session_manager):
         """
         Test typical agent workflow:
         1. List variables
         2. Inspect specific variable
         """
-        manager = SessionManager()
+        manager = clean_session_manager
         nb_path = str(Path("test.ipynb").resolve())
         
         # Mock session

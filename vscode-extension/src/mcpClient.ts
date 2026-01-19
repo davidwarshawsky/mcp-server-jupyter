@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import WebSocket from 'ws';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 import { trace, context } from '@opentelemetry/api';
+import { ErrorClassifier } from './errorClassifier';
 
 export class McpClient {
   private process?: ChildProcess;
@@ -46,9 +47,13 @@ export class McpClient {
   private lastPongReceived = Date.now();
   private missedHeartbeats = 0;
   private maxMissedHeartbeats = 3;
+  private errorClassifier?: ErrorClassifier;
 
-  constructor() {
+  constructor(context?: vscode.ExtensionContext) {
     this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter Server');
+    if (context) {
+      this.errorClassifier = new ErrorClassifier(context);
+    }
   }
 
   public getConnectionState(): 'connected' | 'disconnected' | 'connecting' {
@@ -227,23 +232,38 @@ export class McpClient {
       await this.waitForReady();
       this.outputChannel.appendLine('MCP server ready');
       this.setConnectionState('connected');
+      
+      // [WEEK 3] Log successful connection
+      if (this.errorClassifier) {
+        await this.errorClassifier.logTelemetry({ type: 'connection_success' });
+      }
     } catch (error) {
       this.setConnectionState('disconnected');
-      // Auto-reveal output channel on error
-      this.outputChannel.show();
-      // Show actionable error message
-      const errorMsg = error instanceof Error ? error.message : String(error);
-      vscode.window.showErrorMessage(
-        `Failed to start MCP server: ${errorMsg}`,
-        'Show Logs',
-        'Open Setup Wizard'
-      ).then(choice => {
-        if (choice === 'Show Logs') {
-          this.outputChannel.show();
-        } else if (choice === 'Open Setup Wizard') {
-          vscode.commands.executeCommand('mcp-jupyter.openWalkthrough');
-        }
-      });
+      
+      // [WEEK 3] Classify error and log telemetry
+      if (this.errorClassifier) {
+        const classified = this.errorClassifier.classify(error as Error);
+        await this.errorClassifier.logTelemetry({
+          type: 'connection_failure',
+          reason: classified.reason
+        });
+        await this.errorClassifier.showError(classified);
+      } else {
+        // Fallback to generic error
+        this.outputChannel.show();
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        vscode.window.showErrorMessage(
+          `Failed to start MCP server: ${errorMsg}`,
+          'Show Logs',
+          'Open Setup Wizard'
+        ).then(choice => {
+          if (choice === 'Show Logs') {
+            this.outputChannel.show();
+          } else if (choice === 'Open Setup Wizard') {
+            vscode.commands.executeCommand('mcp-jupyter.openWalkthrough');
+          }
+        });
+      }
       throw error;
     } finally {
       this.isStarting = false;
@@ -1159,8 +1179,19 @@ export class McpClient {
       
       try {
         this.setConnectionState('connecting');
+        const startTime = Date.now();
         await this.connectWebSocket(this.lastWsUrl, 1, 0); // Single attempt per reconnection cycle
+        const duration = Date.now() - startTime;
         this.outputChannel.appendLine('✅ Reconnection successful');
+        
+        // [WEEK 3] Log successful reconnection
+        if (this.errorClassifier) {
+          await this.errorClassifier.logTelemetry({
+            type: 'reconnection',
+            retryAttempt: this.reconnectAttempt,
+            duration
+          });
+        }
       } catch (error) {
         this.outputChannel.appendLine(`Reconnection attempt failed: ${error}`);
         // Try again with next backoff

@@ -6,10 +6,32 @@ import pytest
 import tempfile
 import shutil
 import asyncio
+import subprocess
+import atexit
 from pathlib import Path
 from unittest.mock import Mock, AsyncMock, MagicMock
 import nbformat
 import sys
+
+
+def _cleanup_all_kernels():
+    """Kill all ipykernel processes - called at test session end."""
+    try:
+        subprocess.run(['pkill', '-9', '-f', 'ipykernel_launcher'], 
+                      capture_output=True, check=False)
+    except Exception:
+        pass
+
+
+# Register cleanup to run when Python exits (covers pytest-xdist workers)
+atexit.register(_cleanup_all_kernels)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_kernels_at_session_end():
+    """Session-scoped fixture to clean up all kernels when test session ends."""
+    yield
+    _cleanup_all_kernels()
 
 
 @pytest.fixture
@@ -399,4 +421,134 @@ def isolate_home(monkeypatch, tmp_path):
     fake_home = tmp_path / "fake_home"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
+
+
+@pytest.fixture(autouse=True)
+async def auto_cleanup_session_managers(monkeypatch):
+    """
+    AUTOMATIC CLEANUP: Tracks all SessionManager instances created during a test
+    and cleans them up automatically, even if the test fails or raises an exception.
+    
+    This is an autouse fixture that runs for EVERY test, providing fail-safe cleanup
+    to prevent resource leaks and WSL network corruption.
+    
+    How it works:
+    1. Monkey-patches SessionManager.__init__ to track all instances
+    2. After test completes (success or failure), cleans up all tracked instances
+    3. Cleans up kernels, channels, tasks, and sessions
+    
+    Tests don't need to do anything - this runs automatically.
+    """
+    from src.session import SessionManager
+    
+    # Track all SessionManager instances created during this test
+    tracked_managers = []
+    original_init = SessionManager.__init__
+    
+    def tracking_init(self, *args, **kwargs):
+        """Wrapper that tracks SessionManager instances."""
+        original_init(self, *args, **kwargs)
+        tracked_managers.append(self)
+    
+    # Monkey-patch the __init__ to track instances
+    monkeypatch.setattr(SessionManager, '__init__', tracking_init)
+    
+    # Let the test run
+    yield
+    
+    # CLEANUP: After test completes (even if it failed), clean up all managers
+    for manager in tracked_managers:
+        try:
+            # Clean up all sessions in this manager
+            for nb_path in list(manager.sessions.keys()):
+                try:
+                    session = manager.sessions[nb_path]
+                    
+                    # Cancel ALL background tasks first
+                    for task_key in ['queue_task', 'iopub_task', 'stdin_task']:
+                        if task_key in session:
+                            try:
+                                session[task_key].cancel()
+                            except Exception:
+                                pass
+                    
+                    # Close kernel client channels
+                    if 'kc' in session and hasattr(session['kc'], 'stop_channels'):
+                        try:
+                            session['kc'].stop_channels()
+                        except Exception:
+                            pass
+                    
+                    # Stop kernel manager (force immediate shutdown)
+                    if 'km' in session and hasattr(session['km'], 'shutdown_kernel'):
+                        try:
+                            await session['km'].shutdown_kernel(now=True)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+            
+            # Clear all sessions
+            manager.sessions.clear()
+        except Exception:
+            # Ignore any errors during cleanup
+            pass
+    
+    # Give event loop time to finalize all cancellations
+    await asyncio.sleep(0.05)
+
+
+@pytest.fixture
+async def clean_session_manager():
+    """
+    Provides a SessionManager with proper cleanup to prevent resource leaks.
+    
+    CRITICAL: Without this, tests leak OS resources (asyncio queues, file descriptors,
+    threads) that can corrupt WSL's network stack when running with high parallelism.
+    
+    Usage:
+        async def test_something(clean_session_manager):
+            manager = clean_session_manager
+            await manager.start_kernel("test.ipynb")
+            # ... test code ...
+            # Automatic cleanup happens here
+    """
+    from src.session import SessionManager
+    
+    manager = SessionManager()
+    yield manager
+    
+    # Cleanup: Stop all kernels and clear sessions
+    for nb_path in list(manager.sessions.keys()):
+        try:
+            # Close kernel client channels if they exist
+            session = manager.sessions[nb_path]
+            if 'kc' in session and hasattr(session['kc'], 'stop_channels'):
+                try:
+                    session['kc'].stop_channels()
+                except Exception:
+                    pass
+            
+            # Stop kernel manager if it exists
+            if 'km' in session and hasattr(session['km'], 'shutdown_kernel'):
+                try:
+                    await session['km'].shutdown_kernel(now=True)
+                except Exception:
+                    pass
+            
+            # Cancel background tasks
+            if 'queue_task' in session:
+                try:
+                    session['queue_task'].cancel()
+                    await asyncio.sleep(0)  # Allow cancellation to propagate
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    # Clear all sessions
+    manager.sessions.clear()
+    
+    # Give event loop time to clean up
+    await asyncio.sleep(0.01)
 

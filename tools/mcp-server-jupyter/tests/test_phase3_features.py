@@ -1,5 +1,8 @@
 """
 Tests for Phase 3 features: Streaming, Resource Monitoring, and Visualization
+
+WARNING: These tests create many SessionManager instances and start kernels.
+For WSL safety, run with low parallelism: pytest tests/test_phase3_features.py -n 2
 """
 import pytest
 import asyncio
@@ -7,6 +10,10 @@ import json
 import time
 from pathlib import Path
 from src.session import SessionManager
+
+
+# Mark entire module as resource intensive
+pytestmark = pytest.mark.resource_intensive
 
 class TestStreaming:
     """Test Phase 3.1: Streaming feedback for long-running cells"""

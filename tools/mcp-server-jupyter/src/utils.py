@@ -99,23 +99,47 @@ def compress_traceback(traceback_lines: List[str]) -> List[str]:
     # Filter intermediate frames
     user_frames = []
     inside_library_block = False
+    skip_next_code_line = False
     
     for line in traceback_lines[1:]:
-        # Heuristic: If it contains site-packages or dist-packages, it's library code
-        is_lib = any(marker in line for marker in ['site-packages', 'dist-packages', 'lib/python', '<frozen', 'importlib'])
-        # Always keep the final error message (usually doesn't start with "  File")
-        is_message = not line.strip().startswith('File')
+        stripped = line.strip()
         
-        if not is_lib or is_message:
-            # This is user code or the final error message
+        # Check if this is a "File ..." line
+        is_file_line = stripped.startswith('File ')
+        
+        # Check if this is library code (based on the File path)
+        is_lib = any(marker in line for marker in ['site-packages', 'dist-packages', 'lib/python', '<frozen', 'importlib'])
+        
+        # Check if this is the final error message (no leading spaces, or is an exception type)
+        # Error messages like "ValueError: ..." don't have "  " prefix OR they have exception format
+        is_error_message = not line.startswith('  ') or (not is_file_line and not line.startswith('    '))
+        
+        if is_file_line:
+            # This is a "File ..." line
+            if is_lib:
+                # Library file - compress
+                if not inside_library_block:
+                    user_frames.append("  ... [Internal Library Frames] ...\n")
+                    inside_library_block = True
+                skip_next_code_line = True  # Skip the following code line too
+            else:
+                # User file - keep
+                inside_library_block = False
+                skip_next_code_line = False
+                user_frames.append(line)
+        elif skip_next_code_line and line.startswith('    '):
+            # This is a code line following a library File line - skip it
+            skip_next_code_line = False
+        elif is_error_message:
+            # Keep error messages
             inside_library_block = False
+            skip_next_code_line = False
             user_frames.append(line)
         else:
-            # It's a library frame. Replace blocks of lib frames with a placeholder
-            if not inside_library_block:
-                user_frames.append("  ... [Internal Library Frames] ...\n")
-                inside_library_block = True
-            # Otherwise, skip this library frame (already have placeholder)
+            # User code line (follows a user File line)
+            inside_library_block = False
+            skip_next_code_line = False
+            user_frames.append(line)
 
     compressed.extend(user_frames)
     return compressed

@@ -107,7 +107,7 @@ else:
         
     finally:
         # Cleanup
-        await session_manager.shutdown_kernel(notebook_path)
+        await session_manager.stop_kernel(notebook_path)
         Path(notebook_path).unlink(missing_ok=True)
 
 

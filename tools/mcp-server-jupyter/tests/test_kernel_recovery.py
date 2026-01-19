@@ -16,9 +16,18 @@ from src.session import SessionManager
 
 
 @pytest.fixture
-def session_manager():
-    """Create a fresh SessionManager for each test."""
-    return SessionManager()
+async def session_manager():
+    """Create a fresh SessionManager for each test with automatic cleanup."""
+    manager = SessionManager()
+    yield manager
+    
+    # Cleanup all sessions
+    for nb_path in list(manager.sessions.keys()):
+        try:
+            await manager.stop_kernel(nb_path)
+        except Exception:
+            pass
+    manager.sessions.clear()
 
 
 @pytest.fixture
