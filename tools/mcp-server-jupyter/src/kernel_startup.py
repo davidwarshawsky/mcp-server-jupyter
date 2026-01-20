@@ -86,6 +86,76 @@ def _mcp_inspect(var_name):
         return f"Error inspecting {var_name}: {str(e)}"
 """
 
+# [DS UX FIX] %%duckdb and %%sql Magic Commands
+# Data scientists prefer writing SQL directly, not wrapped in Python strings
+DUCKDB_MAGIC_CODE = """
+# [DS UX] Register %%duckdb and %%sql magics for native SQL syntax
+try:
+    from IPython.core.magic import register_cell_magic, register_line_magic
+    import sys
+    
+    @register_cell_magic
+    def duckdb(line, cell):
+        '''
+        Run SQL queries on DataFrames using DuckDB.
+        
+        Usage:
+            %%duckdb
+            SELECT * FROM df_sales WHERE revenue > 1000
+        
+        All DataFrames in the namespace are automatically available as tables.
+        Results are returned as a DataFrame.
+        '''
+        try:
+            import duckdb
+        except ImportError:
+            print("❌ DuckDB not installed. Run: pip install duckdb")
+            return None
+        
+        # Get all DataFrames from user namespace
+        ns = get_ipython().user_ns
+        dataframes = {}
+        
+        if 'pandas' in sys.modules:
+            pd = sys.modules['pandas']
+            for name, obj in ns.items():
+                if isinstance(obj, pd.DataFrame) and not name.startswith('_'):
+                    dataframes[name] = obj
+        
+        if not dataframes:
+            print("⚠️ No DataFrames found in namespace. Load data first.")
+            return None
+        
+        # Execute SQL with DataFrames registered as tables
+        try:
+            conn = duckdb.connect(':memory:')
+            for name, df in dataframes.items():
+                conn.register(name, df)
+            
+            result = conn.execute(cell).fetchdf()
+            conn.close()
+            
+            # Display result nicely
+            from IPython.display import display
+            display(result)
+            return result
+        except Exception as e:
+            print(f"❌ SQL Error: {e}")
+            return None
+    
+    # Alias %%sql to %%duckdb for familiarity
+    @register_cell_magic
+    def sql(line, cell):
+        '''Alias for %%duckdb magic.'''
+        return duckdb(line, cell)
+    
+    print("✅ SQL magics loaded: Use %%duckdb or %%sql to query DataFrames")
+    
+except Exception as e:
+    # Silently fail if IPython magic registration fails
+    pass
+"""
+
 # Main startup code template
 KERNEL_STARTUP_TEMPLATE = """
 # [PHASE 2: Autoreload Magic]
@@ -101,6 +171,9 @@ except Exception:
 
 # [SECURITY] Safe Inspection Helper
 {INSPECT_HELPER_CODE}
+
+# [DS UX] SQL Magic Commands
+{DUCKDB_MAGIC_CODE}
 
 # [PHASE 4: Smart Error Recovery]
 # Inject a custom exception handler to provide context-aware error reports
@@ -178,4 +251,7 @@ def get_startup_code() -> str:
     Returns:
         str: Python code to execute in the kernel
     """
-    return KERNEL_STARTUP_TEMPLATE.format(INSPECT_HELPER_CODE=INSPECT_HELPER_CODE)
+    return KERNEL_STARTUP_TEMPLATE.format(
+        INSPECT_HELPER_CODE=INSPECT_HELPER_CODE,
+        DUCKDB_MAGIC_CODE=DUCKDB_MAGIC_CODE
+    )

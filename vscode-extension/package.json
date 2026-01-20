@@ -47,7 +47,10 @@
         },
         "mcp-jupyter.serverMode": {
           "type": "string",
-          "enum": ["spawn", "connect"],
+          "enum": [
+            "spawn",
+            "connect"
+          ],
           "default": "spawn",
           "description": "Whether to spawn a new server process or connect to an existing one."
         },
@@ -73,22 +76,37 @@
             "id": "select-runtime",
             "title": "1. Select Runtime",
             "description": "Choose where the MCP Server should run. We recommend the **Managed Environment** for stability.",
-            "media": { "image": "media/setup-step-1.svg", "altText": "Runtime Selection" },
-            "completionEvents": ["onCommand:mcp-jupyter.selectRuntime"]
+            "media": {
+              "image": "media/setup-step-1.svg",
+              "altText": "Runtime Selection"
+            },
+            "completionEvents": [
+              "onCommand:mcp-jupyter.selectRuntime"
+            ]
           },
           {
             "id": "install-server",
             "title": "2. Install Server",
             "description": "Install the necessary Python dependencies into the selected environment.",
-            "media": { "image": "media/setup-step-2.svg", "altText": "Install Process" },
-            "completionEvents": ["onCommand:mcp-jupyter.installServer"]
+            "media": {
+              "image": "media/setup-step-2.svg",
+              "altText": "Install Process"
+            },
+            "completionEvents": [
+              "onCommand:mcp-jupyter.installServer"
+            ]
           },
           {
             "id": "verify-connection",
             "title": "3. Verify Connection",
             "description": "Test the connection to ensure the Agent is ready to collaborate.",
-            "media": { "image": "media/setup-step-3.svg", "altText": "Connection Test" },
-            "completionEvents": ["onCommand:mcp-jupyter.testConnection"]
+            "media": {
+              "image": "media/setup-step-3.svg",
+              "altText": "Connection Test"
+            },
+            "completionEvents": [
+              "onCommand:mcp-jupyter.testConnection"
+            ]
           }
         ]
       }
@@ -205,33 +223,39 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run bundle-python && npm run bundle-wheels && npm run compile",
+    "vscode:prepublish": "npm run bundle-python && npm run bundle-wheels && npm run compile && npm run build:renderer",
     "bundle-python": "node scripts/copy-python-server.js",
     "bundle-wheels": "bash scripts/bundle_wheels.sh",
     "bundle-wheels:skip": "echo 'Skipping wheel bundling (online mode)'",
     "compile": "tsc -p ./",
+    "build:renderer": "node esbuild.renderer.mjs",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile",
+    "watch:renderer": "node esbuild.renderer.mjs --watch",
+    "pretest": "npm run compile && npm run build:renderer",
     "test:e2e": "playwright test --config=playwright.config.ts",
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@playwright/test": "^1.40.1",    "@playwright/test": "^1.40.1",    "@types/mocha": "^10.x",
+    "@opentelemetry/api": "^1.9.0",
+    "@playwright/test": "^1.40.1",
+    "@types/mocha": "^10.x",
     "@types/node": "^20.x",
     "@types/sinon": "^21.0.0",
+    "@types/vscode": "^1.108.1",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^6.x",
     "@typescript-eslint/parser": "^6.x",
     "@vscode/test-electron": "^2.3.x",
     "@vscode/vsce": "^3.7.1",
+    "esbuild": "^0.27.2",
     "eslint": "^8.x",
     "glob": "^13.0.0",
     "mocha": "^10.x",
     "sinon": "^21.0.1",
     "typescript": "^5.3.0",
-    "@types/ws": "^8.18.1"
+    "vscode-notebook-renderer": "^0.0.1-security"
   },
   "dependencies": {
-    "@opentelemetry/api": "^1.7.0",
     "ws": "^8.19.0"
   }
 }

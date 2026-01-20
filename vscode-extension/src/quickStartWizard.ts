@@ -7,9 +7,13 @@ import { McpClient } from './mcpClient';
 /**
  * Week 2: Quick Start Wizard
  * One-click setup that guides users through installation
+ * 
+ * [DS UX FIX] Now supports "Invisible Setup" mode for zero-friction onboarding.
+ * Data scientists don't want wizards - they want their notebook to just work.
  */
 export class QuickStartWizard {
   private statusBarItem: vscode.StatusBarItem;
+  private isAutoInstalling = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -28,13 +32,114 @@ export class QuickStartWizard {
 
   /**
    * Show status bar if setup is not complete
+   * [DS UX FIX] Now triggers silent auto-install instead of showing notifications
    */
   public showIfNeeded(): void {
     const isSetupComplete = this.context.globalState.get('mcp.hasCompletedSetup', false);
     if (!isSetupComplete) {
-      this.statusBarItem.show();
+      // [DS UX FIX] Start silent auto-install - no wizard, no prompts
+      this.runSilentAutoInstall();
     } else {
       this.statusBarItem.hide();
+    }
+  }
+
+  /**
+   * [DS UX FIX] Silent auto-install for zero-friction onboarding
+   * Data scientists don't want to click through setup wizards.
+   * This runs in the background with minimal notifications.
+   */
+  private async runSilentAutoInstall(): Promise<void> {
+    // Prevent duplicate auto-installs
+    if (this.isAutoInstalling) return;
+    
+    const alreadyAttempted = this.context.workspaceState.get('mcp.autoInstallAttempted', false);
+    if (alreadyAttempted) {
+      // Show status bar for manual retry if auto-install already attempted this session
+      this.statusBarItem.show();
+      return;
+    }
+    
+    this.isAutoInstalling = true;
+    await this.context.workspaceState.update('mcp.autoInstallAttempted', true);
+
+    // Show discrete toast notification (not a modal wizard)
+    const statusMessage = vscode.window.setStatusBarMessage(
+      '$(sync~spin) Installing AI Kernel dependencies in background...'
+    );
+
+    try {
+      // Step 1: Create managed environment (silent)
+      const venvPath = await this.setupManager.createManagedEnvironmentSilent();
+      
+      // Step 2: Install dependencies (silent)
+      await this.setupManager.installDependenciesSilent(venvPath);
+      
+      // Step 3: Start server
+      await this.mcpClient.start();
+      
+      // Success! Mark setup complete
+      await this.context.globalState.update('mcp.hasCompletedSetup', true);
+      this.statusBarItem.hide();
+      statusMessage.dispose();
+      
+      // Show success toast with kernel hint
+      vscode.window.showInformationMessage(
+        '✅ AI Agent Ready! Select "MCP Agent Kernel" in any notebook to start.',
+        'Open Example Notebook'
+      ).then(choice => {
+        if (choice === 'Open Example Notebook') {
+          this.openTestNotebook();
+        }
+      });
+      
+      // Flash the kernel picker to draw attention
+      vscode.commands.executeCommand('notebook.selectKernel');
+      
+    } catch (error) {
+      statusMessage.dispose();
+      this.isAutoInstalling = false;
+      
+      // Only show error on failure - don't bother user if it worked
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Show discrete error with option to manually configure
+      vscode.window.showErrorMessage(
+        `AI Kernel setup failed: ${errorMessage}`,
+        'Open Setup Wizard',
+        'Show Logs'
+      ).then(choice => {
+        if (choice === 'Open Setup Wizard') {
+          this.run(); // Fall back to manual wizard
+        } else if (choice === 'Show Logs') {
+          this.mcpClient.getOutputChannel().show();
+        }
+      });
+      
+      // Show status bar for manual retry
+      this.statusBarItem.show();
+    }
+  }
+
+  /**
+   * [LEGACY] Show prominent welcome notification for first-time users
+   * Now deprecated in favor of silent auto-install, but kept for manual invocation
+   */
+  private async showWelcomeNotification(): Promise<void> {
+    // Don't show if we already showed it this session
+    const shownThisSession = this.context.workspaceState.get('mcp.welcomeShownThisSession', false);
+    if (shownThisSession) return;
+    
+    await this.context.workspaceState.update('mcp.welcomeShownThisSession', true);
+    
+    const choice = await vscode.window.showInformationMessage(
+      '🚀 Welcome to MCP Jupyter! Set up your AI Data Science Assistant in 60 seconds.',
+      'Setup Now (Recommended)',
+      'Later'
+    );
+    
+    if (choice === 'Setup Now (Recommended)') {
+      await this.run();
     }
   }
 
@@ -203,32 +308,36 @@ export class QuickStartWizard {
 
   /**
    * Select installation mode
+   * [FRICTION FIX #2] Renamed options for clarity, "Automatic" is default
    */
   private async selectMode(): Promise<'managed' | 'existing' | 'remote' | undefined> {
     const items: Array<vscode.QuickPickItem & { mode: 'managed' | 'existing' | 'remote' }> = [
       {
-        label: '$(package) Managed Environment',
-        description: 'Recommended - Automatic setup in isolated environment',
-        detail: 'Creates a virtual environment and installs all dependencies automatically',
-        mode: 'managed'
+        label: '$(rocket) Automatic Setup',
+        description: '⭐ Recommended - One-click installation',
+        detail: 'Installs everything automatically in 60 seconds. No configuration needed.',
+        mode: 'managed',
+        picked: true  // Pre-select this option
       },
       {
-        label: '$(folder-library) Use Existing Python',
-        description: 'Advanced - Use your own Python installation',
-        detail: 'You must manually install mcp-server-jupyter in your environment',
+        label: '$(folder-library) Use My Python Environment',
+        description: 'Advanced - For users with existing setups',
+        detail: 'Use your own Python/Conda environment. You handle the dependencies.',
         mode: 'existing'
       },
       {
         label: '$(remote) Connect to Remote Server',
-        description: 'Advanced - Connect to MCP server on another machine',
-        detail: 'Server must already be running and accessible via WebSocket',
+        description: 'Advanced - Team/Enterprise deployment',
+        detail: 'Connect to an MCP server running on another machine or container.',
         mode: 'remote'
       }
     ];
 
     const selected = await vscode.window.showQuickPick(items, {
-      placeHolder: 'Choose how to set up MCP Jupyter',
-      ignoreFocusOut: true
+      placeHolder: '🚀 Choose setup method (Automatic recommended)',
+      ignoreFocusOut: true,
+      matchOnDescription: true,
+      matchOnDetail: true
     });
 
     return selected?.mode;

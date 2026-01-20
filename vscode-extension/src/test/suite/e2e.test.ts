@@ -67,23 +67,15 @@ suite('E2E: Kernel Lifecycle', () => {
         assert.ok(extension, 'Extension should be available');
         await extension.activate();
         
-        // Find the MCP Agent Kernel controller
-        const controllers = vscode.notebooks.getAllNotebookControllers(notebookDocument);
-        const mcpController = controllers.find(c => c.id === 'mcp-agent-kernel');
-        assert.ok(mcpController, 'MCP Agent Kernel controller should be registered');
-        
-        // Select the controller
+        // Select the MCP Agent Kernel via command
+        // Note: VS Code doesn't expose getAllNotebookControllers publicly
         await vscode.commands.executeCommand('notebook.selectKernel', {
-            id: mcpController.id,
+            id: 'mcp-agent-kernel',
             extension: extension.id
         });
         
-        // Execute the first cell
+        // Execute the first cell via command (controller handles execution internally)
         const cell = notebookDocument.cellAt(0);
-        const execution = mcpController.createNotebookCellExecution(cell);
-        execution.start();
-        
-        // Simulate execution (in real test, this would trigger via controller)
         await vscode.commands.executeCommand('notebook.cell.execute', { ranges: [{ start: 0, end: 1 }] });
         
         // Wait for output (with timeout)

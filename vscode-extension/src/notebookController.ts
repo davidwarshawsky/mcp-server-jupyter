@@ -614,8 +614,8 @@ export class McpNotebookController {
   /**
    * Update environment (called from extension.ts)
    */
-  updateEnvironment(env: { name: string; path: string; type: string }): void {
-    this.currentEnvironment = env;
+  updateEnvironment(env: { name: string; path: string; type: 'conda' | 'venv' | 'global' | string }): void {
+    this.currentEnvironment = env as { name: string; path: string; type: 'conda' | 'venv' | 'global' };
     this.updateStatusBar();
   }
 

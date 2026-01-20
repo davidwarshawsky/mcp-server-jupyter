@@ -52,10 +52,67 @@ const autoEdaDemo: DemoConfig = {
   ]
 };
 
-// Demo: DuckDB SQL Query
+// Demo: Zero-Friction Onboarding (Invisible Setup)
+const zeroFrictionDemo: DemoConfig = {
+  name: 'zero-friction',
+  description: 'First launch experience - no popups, no wizards, just works',
+  steps: [
+    // Fresh install - just open a notebook
+    { action: 'wait', timeout: 2000 },
+    
+    // Open Command Palette to create new notebook
+    { action: 'click', selector: 'body' },
+    { action: 'wait', timeout: 500 },
+    
+    // Wait for silent auto-install toast to appear
+    { action: 'wait', timeout: 3000 },
+    { action: 'screenshot', filename: 'zero-friction-toast.png' },
+    
+    // Toast should auto-dismiss, notebook is ready
+    { action: 'wait', timeout: 5000 },
+    { action: 'screenshot', filename: 'zero-friction-ready.png' }
+  ]
+};
+
+// Demo: %%duckdb SQL Magic
+const duckdbMagicDemo: DemoConfig = {
+  name: 'duckdb-magic',
+  description: 'Write native SQL with %%duckdb cell magic',
+  steps: [
+    // Create DataFrame first
+    { action: 'type', text: 'import pandas as pd\n', delay: 60 },
+    { action: 'type', text: 'sales = pd.DataFrame({\n', delay: 60 },
+    { action: 'type', text: '    "region": ["North", "South", "East", "West"],\n', delay: 60 },
+    { action: 'type', text: '    "revenue": [10000, 15000, 12000, 18000]\n', delay: 60 },
+    { action: 'type', text: '})\n', delay: 60 },
+    { action: 'type', text: 'sales', delay: 60 },
+    { action: 'execute' },
+    { action: 'wait', timeout: 2000 },
+    { action: 'screenshot', filename: 'duckdb-magic-dataframe.png' },
+    
+    // Now use %%duckdb magic - native SQL!
+    { action: 'type', text: '%%duckdb\n', delay: 60 },
+    { action: 'type', text: 'SELECT region, revenue\n', delay: 60 },
+    { action: 'type', text: 'FROM sales\n', delay: 60 },
+    { action: 'type', text: 'WHERE revenue > 12000\n', delay: 60 },
+    { action: 'type', text: 'ORDER BY revenue DESC', delay: 60 },
+    { action: 'execute' },
+    { action: 'wait', timeout: 3000 },
+    { action: 'screenshot', filename: 'duckdb-magic-result.png' },
+    
+    // Show %%sql alias too
+    { action: 'type', text: '%%sql\n', delay: 60 },
+    { action: 'type', text: "SELECT region, SUM(revenue) as total FROM sales GROUP BY region", delay: 60 },
+    { action: 'execute' },
+    { action: 'wait', timeout: 2000 },
+    { action: 'screenshot', filename: 'sql-magic-result.png' }
+  ]
+};
+
+// Legacy demo for backwards compatibility
 const sqlDemo: DemoConfig = {
   name: 'duckdb-sql',
-  description: 'Query DataFrames with SQL',
+  description: 'Query DataFrames with SQL (legacy function style)',
   steps: [
     // Create DataFrame
     { action: 'type', text: 'import pandas as pd\n', delay: 60 },
@@ -190,7 +247,7 @@ async function main() {
   console.log('   Run: code-server --bind-addr 127.0.0.1:8080 --auth none .');
   console.log('');
   
-  const demos = [autoEdaDemo, sqlDemo];
+  const demos = [zeroFrictionDemo, duckdbMagicDemo, autoEdaDemo, sqlDemo];
   
   for (const demo of demos) {
     await recordDemo(demo);
