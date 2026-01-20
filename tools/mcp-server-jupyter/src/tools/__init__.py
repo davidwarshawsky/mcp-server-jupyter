@@ -10,7 +10,11 @@ This package contains the refactored tools from main.py, organized by domain:
 - environment_tools: Environment management (list envs, switch, create venv)
 - asset_tools: Asset management (read, get content, prune, summary)
 - proposal_tools: Edit proposal workflow
-- data_tools: SQL queries on DataFrames
+- data_tools: SQL queries on DataFrames, package installation
+- server_tools: Server status, health, version
+- sync_tools: Synchronization and state management
+- diagnostic_tools: Enterprise support (export_diagnostic_bundle)
+- prompts_tools: Prompt personas (jupyter_expert, autonomous_researcher, auto_analyst)
 """
 
 from src.tools.kernel_tools import register_kernel_tools
@@ -23,6 +27,10 @@ from src.tools.asset_tools import register_asset_tools
 from src.tools.proposal_tools import register_proposal_tools
 from src.tools.server_tools import register_server_tools
 from src.tools.sync_tools import register_sync_tools
+from src.tools.data_tools import register_data_tools
+from src.tools.diagnostic_tools import register_diagnostic_tools
+from src.tools.prompts_tools import register_prompts
+
 
 def register_all_tools(mcp, session_manager, connection_manager):
     """Register all tool modules with the MCP server."""
@@ -36,3 +44,6 @@ def register_all_tools(mcp, session_manager, connection_manager):
     register_asset_tools(mcp)
     register_proposal_tools(mcp)
     register_sync_tools(mcp, session_manager)
+    register_data_tools(mcp, session_manager)
+    register_diagnostic_tools(mcp, session_manager)
+    register_prompts(mcp)

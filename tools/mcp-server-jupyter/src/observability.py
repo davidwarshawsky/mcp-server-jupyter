@@ -4,6 +4,7 @@ import logging.handlers
 import structlog
 import uuid
 import contextvars
+import threading
 from typing import Any, Dict, Optional, List
 import os
 from pathlib import Path
@@ -74,7 +75,12 @@ def configure_logging(level="INFO"):
         
         # Wrapper to make RotatingFileHandler work with structlog's file-like interface
         class RotatingFileWrapper:
-            """Wraps RotatingFileHandler to provide file-like write() interface for structlog."""
+            """
+            Wraps RotatingFileHandler to provide file-like write() interface for structlog.
+            
+            Thread-safe: Uses a lock to prevent log corruption during rotation when
+            multiple threads (e.g., io_pool workers) write concurrently.
+            """
             def __init__(self, path: Path, max_bytes: int, backup_count: int):
                 self._handler = logging.handlers.RotatingFileHandler(
                     str(path),
@@ -82,24 +88,27 @@ def configure_logging(level="INFO"):
                     backupCount=backup_count,
                     encoding='utf-8'
                 )
+                self._lock = threading.Lock()
                 # Open stream initially
                 if self._handler.stream is None:
                     self._handler.stream = self._handler._open()
             
             def write(self, msg: str) -> None:
-                """Write message, rotating if needed."""
-                # Check if rotation is needed
-                if self._handler.stream:
-                    # Create a minimal LogRecord just for size checking
-                    record = logging.makeLogRecord({"msg": msg})
-                    if self._handler.shouldRollover(record):
-                        self._handler.doRollover()
-                    self._handler.stream.write(msg)
+                """Write message, rotating if needed. Thread-safe."""
+                with self._lock:
+                    # Check if rotation is needed
+                    if self._handler.stream:
+                        # Create a minimal LogRecord just for size checking
+                        record = logging.makeLogRecord({"msg": msg})
+                        if self._handler.shouldRollover(record):
+                            self._handler.doRollover()
+                        self._handler.stream.write(msg)
             
             def flush(self) -> None:
-                """Flush the underlying stream."""
-                if self._handler.stream:
-                    self._handler.stream.flush()
+                """Flush the underlying stream. Thread-safe."""
+                with self._lock:
+                    if self._handler.stream:
+                        self._handler.stream.flush()
         
         audit_file = RotatingFileWrapper(audit_path, max_bytes, backup_count)
         

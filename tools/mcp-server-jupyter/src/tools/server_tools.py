@@ -3,6 +3,7 @@ Server Tools - Server info, status, and health check endpoints.
 """
 
 import json
+import sys
 from starlette.responses import JSONResponse
 
 # Version for capability negotiation
@@ -50,6 +51,30 @@ def register_server_tools(mcp, session_manager, connection_manager):
         return json.dumps({
             "active_connections": len(connection_manager.active_connections),
             "mode": "multi-user" if len(connection_manager.active_connections) > 1 else "solo"
+        })
+
+    @mcp.tool()
+    async def get_version():
+        """
+        Get MCP server version for compatibility checking.
+        
+        Returns:
+            JSON with version, protocol_version, and capabilities
+        """
+        return json.dumps({
+            'version': __version__,
+            'protocol_version': '1.0',
+            'capabilities': [
+                'execute_cells',
+                'async_execution',
+                'websocket_streaming',
+                'health_monitoring',
+                'interrupt_escalation',
+                'checkpoint_recovery',
+                'docker_isolation',
+                'sql_superpowers'
+            ],
+            'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
         })
 
 
