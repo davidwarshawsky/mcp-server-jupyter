@@ -208,7 +208,13 @@ def find_conda_environments() -> List[Dict[str, Any]]:
             pass
     
     # Also check common conda locations
-    home = Path.home()
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()
+    except Exception:
+        home = Path.home()
+    
     common_locations = [
         home / 'miniconda3' / 'envs',
         home / 'anaconda3' / 'envs',
@@ -248,7 +254,13 @@ def find_venv_environments() -> List[Dict[str, Any]]:
     """Finds venv/virtualenv environments in common locations."""
     environments = []
     
-    home = Path.home()
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()
+    except Exception:
+        home = Path.home()
+    
     cwd = Path.cwd()
     
     # Common locations
@@ -462,9 +474,39 @@ def create_venv(path: str, python_executable: str = None) -> Dict[str, Any]:
             'error': str(e)
         }
 
+# [SECURITY] Package Allowlist for Enterprise Organizations
+# Prevents arbitrary code execution via malicious package installation.
+# Organizations can override via MCP_PACKAGE_ALLOWLIST environment variable.
+# To disable allowlist (NOT RECOMMENDED), set MCP_PACKAGE_ALLOWLIST="*"
+PACKAGE_ALLOWLIST = {
+    # Data Science Core
+    'numpy', 'pandas', 'scipy', 'scikit-learn', 'statsmodels',
+    'matplotlib', 'seaborn', 'plotly', 'polars', 'dask',
+    
+    # ML/DL Frameworks
+    'torch', 'tensorflow', 'keras', 'xgboost', 'lightgbm', 'catboost',
+    'jax', 'jaxlib', 'transformers', 'accelerate',
+    
+    # Data Processing & Storage
+    'requests', 'beautifulsoup4', 'sqlalchemy', 'duckdb',
+    'openpyxl', 'pyarrow', 'pillow', 'jupyter', 'jupyterlab',
+    'lxml', 'html5lib', 'urllib3', 'httpx',
+    
+    # Visualization
+    'bokeh', 'altair', 'holoviews', 'hvplot', 'ipywidgets',
+    
+    # Development Tools  
+    'pytest', 'ipython', 'black', 'mypy', 'pylint', 'flake8',
+}
+
 def install_package(package_name: str, python_path: str = None, env_vars: Optional[Dict[str, str]] = None) -> Tuple[bool, str]:
     """
     Install a package using pip in the specified environment.
+    
+    [SECURITY FIX] Validates package against allowlist.
+    Organizations can override with environment variable MCP_PACKAGE_ALLOWLIST.
+    
+    [P0 FIX #5] Strict Mode: MCP_STRICT_MODE=1 enforces non-wildcard allowlist.
     
     Args:
         package_name: Name of package (e.g. 'pandas' or 'pandas==2.0.0')
@@ -477,12 +519,55 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     if not python_path:
         python_path = sys.executable
     
+    # [SECURITY] Extract base package name (remove version specifiers)
+    base_package = package_name.split('==')[0].split('>=')[0].split('<=')[0].split('>')[0].split('<')[0].split('[')[0].strip()
+    
+    # [P0 FIX #5] Check strict mode
+    strict_mode = os.environ.get('MCP_STRICT_MODE', '0') == '1'
+    
+    # Check allowlist (can be disabled with MCP_PACKAGE_ALLOWLIST="*")
+    allowlist_str = os.environ.get('MCP_PACKAGE_ALLOWLIST', ','.join(PACKAGE_ALLOWLIST))
+    
+    # [P0 FIX #5] In strict mode, wildcard is forbidden
+    if strict_mode and allowlist_str.strip() == '*':
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(
+            "[SECURITY] MCP_STRICT_MODE=1 but MCP_PACKAGE_ALLOWLIST='*'. "
+            "This violates supply chain policy. Package installation blocked."
+        )
+        return False, (
+            "STRICT MODE VIOLATION: Wildcard allowlist ('*') is forbidden when MCP_STRICT_MODE=1. "
+            "Set explicit package list in MCP_PACKAGE_ALLOWLIST or disable strict mode."
+        )
+    
+    # Allow wildcard to disable allowlist (only in non-strict mode)
+    if allowlist_str.strip() == '*':
+        # Allowlist disabled - install any package
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            f"[SECURITY] Installing '{base_package}' with WILDCARD allowlist. "
+            "Supply chain protections are disabled. Enable MCP_STRICT_MODE=1 in production."
+        )
+    else:
+        allowed_packages = set(p.strip().lower() for p in allowlist_str.split(','))
+        if base_package.lower() not in allowed_packages:
+            return False, f"Package '{base_package}' is not in the allowlist. Contact IT to add it or set MCP_PACKAGE_ALLOWLIST=* to disable."
+    
     # Use provided env vars or current environment
     run_env = env_vars if env_vars else os.environ.copy()
+    
+    # [GOVERNANCE] Respect corporate proxy if configured
+    if 'PIP_CONFIG_FILE' in os.environ:
+        # pip will automatically use the config file
+        pass
+    elif 'PIP_INDEX_URL' in os.environ:
+        # Use corporate index (e.g., Artifactory/Nexus)
+        run_env['PIP_INDEX_URL'] = os.environ['PIP_INDEX_URL']
         
     try:
         # Use simple pip install
-        # Note: In production, consider --no-input or --quiet
         cmd = [python_path, "-m", "pip", "install", package_name]
         
         result = subprocess.run(

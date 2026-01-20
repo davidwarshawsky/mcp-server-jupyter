@@ -3,6 +3,7 @@ import hashlib
 import re
 import json
 import asyncio
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -19,6 +20,129 @@ io_pool = ThreadPoolExecutor(max_workers=_io_pool_workers)
 
 # Output truncation to prevent crashes from massive outputs
 MAX_OUTPUT_LENGTH = 3000
+
+
+def check_asset_limits(asset_dir: Path, max_size_bytes: int = 1024 * 1024 * 1024):
+    """
+    [LAST MILE #2] Reactive asset pruning - prevent disk exhaustion.
+    Stakeholder: QA & Edge Case Hunter
+    
+    Called after every asset write. If directory exceeds limit,
+    immediately prune oldest files (LRU strategy).
+    
+    Args:
+        asset_dir: Path to assets directory
+        max_size_bytes: Maximum directory size (default: 1GB)
+    """
+    if not asset_dir.exists():
+        return
+
+    try:
+        files = list(asset_dir.glob("*"))
+        total_size = sum(f.stat().st_size for f in files if f.is_file())
+
+        if total_size > max_size_bytes:
+            # Target 80% of limit to avoid thrashing
+            target_size = int(max_size_bytes * 0.8)
+            
+            # Sort by modification time (oldest first)
+            # [BUG FIX] Filter out directories to prevent stat() errors
+            files_sorted = sorted(
+                [f for f in files if f.is_file()],
+                key=lambda f: f.stat().st_mtime
+            )
+            
+            for f in files_sorted:
+                if total_size <= target_size:
+                    break
+                try:
+                    sz = f.stat().st_size
+                    f.unlink()
+                    total_size -= sz
+                except Exception as e:
+                    # Log but don't crash on permission errors, etc.
+                    import logging
+                    logging.getLogger(__name__).warning(f"[ASSET GC] Failed to delete {f.name}: {e}")
+    except Exception as e:
+        # Don't let cleanup crash the main process, but log the issue
+        import logging
+        logging.getLogger(__name__).error(f"[ASSET GC] Error during check: {e}")
+
+
+def compress_traceback(traceback_lines: List[str]) -> List[str]:
+    """
+    [TOKENOMICS] Compress stack traces to save context window tokens.
+    
+    Removes frames from site-packages/dist-packages (library code)
+    unless they are the immediate cause of the error.
+    
+    Problem: A pandas schema mismatch produces 60-line stack traces.
+    This flushes 1,000+ tokens per error. After 3 retries, the agent
+    has consumed 3,000 tokens on noise and "forgets" original instructions.
+    
+    Solution: Strip internal library frames, keep only:
+    1. Traceback header
+    2. User code frames
+    3. Final error message
+    
+    Returns:
+        Compressed traceback with library frames replaced by placeholder
+    """
+    if not traceback_lines:
+        return []
+
+    compressed = []
+    # Always keep the header ("Traceback (most recent call last):")
+    if traceback_lines:
+        compressed.append(traceback_lines[0])
+
+    # Filter intermediate frames
+    user_frames = []
+    inside_library_block = False
+    skip_next_code_line = False
+    
+    for line in traceback_lines[1:]:
+        stripped = line.strip()
+        
+        # Check if this is a "File ..." line
+        is_file_line = stripped.startswith('File ')
+        
+        # Check if this is library code (based on the File path)
+        is_lib = any(marker in line for marker in ['site-packages', 'dist-packages', 'lib/python', '<frozen', 'importlib'])
+        
+        # Check if this is the final error message (no leading spaces, or is an exception type)
+        # Error messages like "ValueError: ..." don't have "  " prefix OR they have exception format
+        is_error_message = not line.startswith('  ') or (not is_file_line and not line.startswith('    '))
+        
+        if is_file_line:
+            # This is a "File ..." line
+            if is_lib:
+                # Library file - compress
+                if not inside_library_block:
+                    user_frames.append("  ... [Internal Library Frames] ...\n")
+                    inside_library_block = True
+                skip_next_code_line = True  # Skip the following code line too
+            else:
+                # User file - keep
+                inside_library_block = False
+                skip_next_code_line = False
+                user_frames.append(line)
+        elif skip_next_code_line and line.startswith('    '):
+            # This is a code line following a library File line - skip it
+            skip_next_code_line = False
+        elif is_error_message:
+            # Keep error messages
+            inside_library_block = False
+            skip_next_code_line = False
+            user_frames.append(line)
+        else:
+            # User code line (follows a user File line)
+            inside_library_block = False
+            skip_next_code_line = False
+            user_frames.append(line)
+
+    compressed.extend(user_frames)
+    return compressed
 
 
 async def offload_json_dumps(data: Any) -> str:
@@ -152,8 +276,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
         'image/jpeg': (1, 'jpeg', True),
     }
 
-    # [SECRET REDACTION] Regex to catch common API keys
-    # Catches sk-..., AWS, Google keys.
+    # [SECRET REDACTION] Regex patterns (kept for backward compatibility)
+    # Phase 3.3: Enhanced with entropy-based detection
     SECRET_PATTERNS = [
         r'sk-[a-zA-Z0-9]{20,}',  # OpenAI looking keys
         r'AKIA[0-9A-Z]{16}',     # AWS Access Key
@@ -161,8 +285,24 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
     ]
 
     def _redact_text(text: str) -> str:
+        """
+        Redact secrets using both regex patterns and entropy-based detection.
+        
+        Phase 3.3: Enhanced with Shannon entropy analysis to catch untagged secrets.
+        Falls back to regex-only if entropy scanner fails.
+        """
+        # Step 1: Legacy regex-based redaction (fast path)
         for pattern in SECRET_PATTERNS:
             text = re.sub(pattern, '[REDACTED_SECRET]', text)
+        
+        # Step 2: Entropy-based detection (Phase 3.3)
+        try:
+            from .secret_scanner import redact_secrets
+            text = redact_secrets(text, min_confidence=0.6)
+        except Exception as e:
+            # Fallback to regex-only if entropy scanner fails
+            logger.warning(f"Entropy scanner failed, using regex-only: {e}")
+        
         return text
     
     def _make_preview(text: str, max_lines: int) -> str:
@@ -190,7 +330,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             return None, None, None
         
         # 1. Save to Asset
-        content_hash = hashlib.md5(raw_text.encode()).hexdigest()
+        # [SECURITY] Use SHA-256 for FIPS compliance (not MD5)
+        content_hash = hashlib.sha256(raw_text.encode()).hexdigest()[:32]
         asset_filename = f"text_{content_hash}.txt"
         asset_path = Path(asset_dir) / asset_filename
         
@@ -284,9 +425,20 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                         with open(save_path, "w", encoding='utf-8') as f:
                             f.write(content if isinstance(content, str) else content.decode('utf-8'))
                     
-                    # Report to LLM with forward slashes for cross-platform compatibility
-                    report_path = str(save_path).replace("\\", "/")
-                    llm_summary.append(f"[{ext.upper()} SAVED: {report_path}]")
+                    # [PHASE 3.1] Inline Asset Rendering
+                    # The VS Code extension will have a renderer for this type.
+                    # Embed base64 data directly for robust rendering in sandboxed webviews.
+                    data[f"application/vnd.mcp.asset+json"] = {
+                        "path": str(save_path), # Keep path for reference, but don't use for rendering
+                        "type": mime_type,
+                        "content": content, # The original base64 content
+                        "alt": f"{ext.upper()} plot"
+                    }
+                    # Remove the original large binary data to save space
+                    if mime_type in data:
+                        del data[mime_type]
+
+                    llm_summary.append(f"[{ext.upper()} ASSET RENDERED INLINE]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
@@ -296,16 +448,13 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
-            # [OUTPUT TRUNCATION] Apply before offloading decision
-            text = truncate_output(text)
-            
-            # Check if text should be offloaded
+            # Check if text should be offloaded (before truncation!)
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(
                 text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
             )
             
             if stub_text:
-                # Text was offloaded - update both raw output and LLM summary
+                # Text was offloaded - use stub text (already has preview)
                 data['text/plain'] = stub_text
                 
                 # Ensure metadata exists in out_dict
@@ -316,6 +465,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                 clean_raw['metadata'].update(asset_metadata)
                 llm_summary.append(stub_text)
             else:
+                # Text NOT offloaded - apply truncation for inline display
+                text = truncate_output(text)
                 # Text is small enough to keep inline
                 llm_summary.append(text)
         
@@ -364,16 +515,13 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
-            # [OUTPUT TRUNCATION] Apply before offloading decision
-            text = truncate_output(text)
-            
-            # Check if text should be offloaded
+            # Check if text should be offloaded (before truncation!)
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(
                 text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
             )
             
             if stub_text:
-                # Text was offloaded - update both raw output and LLM summary
+                # Text was offloaded - use stub text (already has preview)
                 out_dict['text'] = stub_text
                 if 'metadata' not in out_dict:
                     out_dict['metadata'] = {}
@@ -382,6 +530,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                 clean_raw['metadata'].update(asset_metadata)
                 llm_summary.append(stub_text)
             else:
+                # Text NOT offloaded - apply truncation for inline display
+                text = truncate_output(text)
                 # Text is small enough to keep inline
                 llm_summary.append(text)
             
@@ -391,18 +541,21 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             evalue = out_dict.get('evalue', '')
             traceback = out_dict.get('traceback', [])
             
-            # Strip ANSI from traceback
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-            clean_traceback = [ansi_escape.sub('', line) for line in traceback]
+            # [TOKENOMICS] 1. Compress traceback FIRST (removes library noise)
+            clean_traceback = compress_traceback(traceback)
             
-            # [SECRET REDACTION]
+            # 2. Strip ANSI escape codes
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            clean_traceback = [ansi_escape.sub('', line) for line in clean_traceback]
+            
+            # 3. Redact secrets
             clean_traceback = [_redact_text(line) for line in clean_traceback]
-
             
             # Build clean error message
             error_msg = f"Error: {ename}: {evalue}"
             if clean_traceback:
-                error_msg += "\n" + "\n".join(clean_traceback[-10:])  # Last 10 lines of traceback
+                # After compression, limit to last 20 lines (already compressed)
+                error_msg += "\n" + "\n".join(clean_traceback[-20:])
             llm_summary.append(error_msg)
 
     # Return structured data for both LLM (summary) and VS Code (rich output)
@@ -410,6 +563,9 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
         "llm_summary": "\n".join(llm_summary),
         "raw_outputs": raw_outputs
     }
+
+    # [LAST MILE #2] Reactive asset pruning after writing
+    check_asset_limits(Path(asset_dir))
 
     # Offload JSON serialization to prevent blocking the event loop for large payloads
     return await offload_json_dumps(result)
@@ -437,9 +593,28 @@ def get_project_root(start_path: Path) -> Path:
     """
     Finds the project root by looking for common markers (.git, pyproject.toml).
     Walks up from start_path.
+    
+    SECURITY: Never returns system root or paths outside user's home directory.
     """
     current = start_path.resolve()
+    
+    try:
+        from src.config import load_and_validate_settings
+        settings = load_and_validate_settings()
+        home = settings.get_data_dir().parent.resolve() if settings.MCP_DATA_DIR else Path.home().resolve()
+    except Exception:
+        home = Path.home().resolve()
+    
     for _ in range(10): # Limit traversing depth
+        # [SECURITY] Stop if we've escaped $HOME (prevents mounting system dirs)
+        if not current.is_relative_to(home):
+            import logging
+            logging.getLogger(__name__).warning(
+                f"[SECURITY] Project root search escaped HOME directory at {current}. "
+                f"Falling back to start_path."
+            )
+            return start_path
+        
         if (current / ".git").exists() or \
            (current / "pyproject.toml").exists() or \
            (current / "requirements.txt").exists() or \
@@ -452,6 +627,7 @@ def get_project_root(start_path: Path) -> Path:
             break
         current = parent
     
-    return start_path # Fallback to start path if no root marker found
+    # Fallback to start path if no root marker found
+    return start_path
 
 

@@ -4,11 +4,26 @@ import sys
 import tempfile
 import logging
 import re
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Union
 
 # Configure logging
 logger = logging.getLogger(__name__)
+
+# Thread pool for blocking I/O operations
+_notebook_io_pool = ThreadPoolExecutor(max_workers=2)
+
+async def read_notebook_async(path: str):
+    """
+    [FIX #1] Async wrapper for nbformat.read to prevent event loop blocking.
+    
+    Large notebooks (>1MB) can block the asyncio loop for 100ms+,
+    causing heartbeat timeouts and agent disconnects.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_notebook_io_pool, lambda: nbformat.read(path, as_version=4))
 
 
 def _slice_text(text: str, line_range: Optional[List[int]] = None) -> str:
@@ -279,17 +294,26 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
     with open(path, 'r', encoding='utf-8') as f:
         nb = nbformat.read(f, as_version=4)
     
-    # Ensure all cells have IDs (auto-migration)
-    # CRITICAL FIX: Do NOT write changes back to disk silently.
-    # We perform migration in-memory only for the purpose of the outline.
-    # If the user wants to migrate the file, they should use a dedicated tool or save/edit.
+    # [IIRB P0 FIX #3] Persist Cell IDs for git-safety
+    # OLD BEHAVIOR: Generated IDs in-memory only, causing Heisenbug:
+    # - Agent calls get_notebook_outline, gets ID "abc123"
+    # - Agent tries edit_cell(id="abc123")
+    # - Server restarts or user reloads
+    # - ID "abc123" no longer exists (regenerated as "xyz789")
+    # - Edit fails with "Cell ID not found"
+    #
+    # NEW BEHAVIOR: Write Cell IDs back to disk immediately
+    # - Ensures stable IDs across server restarts
+    # - Migrates notebooks to nbformat 4.5 for ID support
+    # - Complies with git-safe cell addressing promise
     was_modified, cells_updated = ensure_cell_ids(nb)
-    # if was_modified:
-    #    # Upgrade nbformat version if needed
-    #    if nb.nbformat_minor < 5:
-    #        nb.nbformat_minor = 5
-    #    # Save with atomic write - DISABLED to prevent side effects
-    #    _atomic_write_notebook(nb, path)
+    if was_modified:
+        # Upgrade nbformat version if needed
+        if nb.nbformat_minor < 5:
+            nb.nbformat_minor = 5
+        # Save with atomic write to persist IDs
+        _atomic_write_notebook(nb, path)
+        logger.info(f"Migrated {notebook_path} to nbformat 4.5 with {cells_updated} Cell IDs")
 
     # Build outline
     outline = []

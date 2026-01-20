@@ -173,6 +173,17 @@ MCP Jupyter Server uses environment variables for configuration. All settings ha
 - `OTEL_SERVICE_NAME` - Service identifier (default: `mcp-jupyter`)
 - `OTEL_EXPORTER_OTLP_HEADERS` - Auth headers (e.g., `x-honeycomb-team=<api-key>`)
 
+### `MCP_AUDIT_LOG_PATH`
+- **Type:** String (Optional)
+- **Default:** `None` (logs only to stderr)
+- **Description:** Path to audit log file for dual logging (stderr + file)
+- **Example:** `MCP_AUDIT_LOG_PATH=~/.mcp-jupyter/audit.log`
+- **Use Case:** VS Code extension's audit log viewer expects a file at one of:
+  - `.mcp-jupyter/audit.log` (workspace-relative)
+  - `audit.log` (workspace root)
+  - `~/.mcp-jupyter/audit.log` (user home)
+- **Note:** When set, all structured logs are written to both stderr and the specified file
+
 ---
 
 ## Development

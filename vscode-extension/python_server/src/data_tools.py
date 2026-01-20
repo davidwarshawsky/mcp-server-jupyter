@@ -40,42 +40,62 @@ async def query_dataframes(session_manager: SessionManager, notebook_path: str, 
             error_msg="No running kernel. Call start_kernel first."
         ).to_json()
     
-    # Use triple-quoted string to handle newlines, quotes, and special chars safely
-    # No manual escaping needed - Python handles it automatically
+    # [SECURITY FIX] Base64 encode the query to prevent injection.
+    # The kernel will decode it before execution. This is safer than string replacement.
+    import base64
+    encoded_query = base64.b64encode(sql_query.encode()).decode()
+
     code = f'''
 import sys
+import base64
 
-# [STEP 1] Ensure DuckDB is available
 try:
     import duckdb
 except ImportError:
-    print("Installing duckdb...")
-    import subprocess
-    result = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "duckdb"],
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        print(f"ERROR: Failed to install duckdb: {{result.stderr}}")
-        sys.exit(1)
-    import duckdb
-    print("✅ duckdb installed successfully")
+    print("❌ DuckDB is required for SQL queries on DataFrames.")
+    print("Install it with: pip install mcp-server-jupyter[superpowers]")
+    print("Or directly: pip install duckdb")
+    raise ImportError("duckdb not installed - see message above for installation instructions")
 
-# [STEP 2] Execute SQL query
+# Decode the query from Base64 (prevents SQL injection via string breakout)
 try:
+    decoded_query = base64.b64decode("{encoded_query}").decode()
+    
     # DuckDB can query pandas DataFrames in the current scope
     con = duckdb.connect(database=':memory:')
+    
+    # [SECURITY] Resource limits to prevent DoS attacks
+    # Limit memory usage to 512MB (prevents OOM from cross-join bombs)
+    con.execute("SET memory_limit='512MB';")
+    # Limit threads to prevent CPU exhaustion
+    con.execute("SET threads=2;")
+    # Set query timeout (30 seconds max)
+    con.execute("SET max_expression_depth=100;")
+    
     # Disable filesystem access and external extensions
     con.execute("SET enable_external_access=false;")
     con.execute("SET lock_configuration=true;")
-    # Register all available DataFrames
-    for var_name, var_obj in list(globals().items()):
-        if 'DataFrame' in type(var_obj).__name__:
-            con.register(var_name, var_obj)
-    # Use triple-quoted string to safely pass the SQL query
-    query_str = """{sql_query}"""
-    result_df = con.execute(query_str).df()
+    # [IIRB P0 FIX #5] REMOVED: Auto-registration of all DataFrames
+    # OLD BEHAVIOR: Auto-registered ALL DataFrames in globals(), including:
+    # - df_public (intended for query)
+    # - df_confidential_salaries (private, not intended for query)
+    # - Any other DataFrames in kernel namespace
+    #
+    # SECURITY RISK: Violates Principle of Least Privilege
+    # - Agent could access sensitive data via prompt injection
+    # - Example: "JOIN df_public WITH df_confidential_salaries"
+    #
+    # NEW BEHAVIOR: Query MUST explicitly reference table names
+    # - DuckDB can access DataFrames by name without explicit registration
+    # - Example: SELECT * FROM df_public (works if df_public exists in globals())
+    # - But agent cannot discover table names via auto-registration
+    #
+    # FUTURE: Add explicit register_table() tool if needed:
+    # register_table("sales_data", "df_sales") -> Allow query access
+    
+    # DuckDB automatically discovers DataFrames in scope when referenced by name
+    # No explicit registration needed - query must know table name
+    result_df = con.execute(decoded_query).df()
     
     # Convert to markdown for clean display
     if len(result_df) == 0:

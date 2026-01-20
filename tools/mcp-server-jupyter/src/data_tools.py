@@ -52,10 +52,10 @@ import base64
 try:
     import duckdb
 except ImportError:
-    import subprocess
-    print("Installing duckdb...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "duckdb"])
-    import duckdb
+    print("❌ DuckDB is required for SQL queries on DataFrames.")
+    print("Install it with: pip install mcp-server-jupyter[superpowers]")
+    print("Or directly: pip install duckdb")
+    raise ImportError("duckdb not installed - see message above for installation instructions")
 
 # Decode the query from Base64 (prevents SQL injection via string breakout)
 try:

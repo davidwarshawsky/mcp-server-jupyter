@@ -3,8 +3,9 @@ import logging
 import structlog
 import uuid
 import contextvars
-from typing import Any, Dict
+from typing import Any, Dict, Optional, List
 import os
+from pathlib import Path
 
 # OpenTelemetry imports
 from opentelemetry import trace
@@ -55,9 +56,39 @@ def configure_logging(level="INFO"):
     else:
         processors = shared_processors + [structlog.processors.JSONRenderer()]
 
+    # Check if audit log file should be written
+    audit_log_path = os.environ.get("MCP_AUDIT_LOG_PATH")
+    
+    if audit_log_path:
+        # Dual logging: stderr + file for VS Code audit viewer
+        audit_path = Path(audit_log_path).expanduser()
+        audit_path.parent.mkdir(parents=True, exist_ok=True)
+        audit_file = open(audit_path, "a", encoding="utf-8")
+        print(f"[AUDIT] Writing audit log to {audit_path}", file=sys.stderr)
+        
+        # Use a multi-target logger factory
+        class DualLoggerFactory:
+            def __init__(self, targets: List):
+                self._targets = targets
+            def __call__(self, *args, **kwargs):
+                return DualLogger(self._targets)
+        
+        class DualLogger:
+            def __init__(self, targets: List):
+                self._targets = targets
+            def msg(self, message: str) -> None:
+                for target in self._targets:
+                    target.write(message + "\n")
+                    target.flush()
+            log = debug = info = warn = warning = error = critical = exception = msg
+        
+        logger_factory = DualLoggerFactory([sys.stderr, audit_file])
+    else:
+        logger_factory = structlog.PrintLoggerFactory(file=sys.stderr)
+    
     structlog.configure(
         processors=processors,
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
+        logger_factory=logger_factory,
         cache_logger_on_first_use=True,
     )
 
