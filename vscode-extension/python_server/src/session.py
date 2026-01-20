@@ -347,6 +347,10 @@ class SessionManager:
                             abs_path = str(Path(nb_path).resolve())
                             # [SECURITY] Bounded queue prevents DoS from runaway executions
                             max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '100'))
+                            
+                            # [SMART SYNC FIX] Restore executed_indices from persisted state
+                            restored_indices = set(session_data.get('executed_indices', []))
+                            
                             session_dict = {
                                 'km': km,
                                 'kc': kc,
@@ -358,6 +362,7 @@ class SessionManager:
                                 'execution_counter': 0,
                                 'stop_on_error': False,
                                 'exec_lock': asyncio.Lock(), # [RACE CONDITION FIX]
+                                'executed_indices': restored_indices,  # [SMART SYNC FIX]
                                 'env_info': session_data.get('env_info', {
                                     'python_path': 'unknown',
                                     'env_name': 'unknown',
@@ -780,7 +785,10 @@ class SessionManager:
         
         # Persist session info to prevent zombie kernels after server restart
         if pid != "unknown" and connection_file != "unknown":
-            self.state_manager.persist_session(abs_path, connection_file, pid, session_data['env_info'], kernel_uuid)
+            self.state_manager.persist_session(
+                abs_path, connection_file, pid, session_data['env_info'], 
+                kernel_uuid, session_data.get('executed_indices', set())
+            )
                  
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
@@ -799,13 +807,47 @@ class SessionManager:
             session_data=session_data,
             finalize_callback=self._finalize_execution_async,
             broadcast_callback=self._broadcast_output,
-            notification_callback=self._send_notification
+            notification_callback=self._send_notification,
+            persist_callback=self._persist_session_state
         )
     
     async def _broadcast_output(self, message: Dict):
         """Helper to broadcast output to WebSocket clients."""
         if self.connection_manager:
             await self.connection_manager.broadcast(message)
+    
+    async def _persist_session_state(self, nb_path: str, session_data: Dict):
+        """
+        [SMART SYNC FIX] Persist session state (including executed_indices) to disk.
+        
+        Called after each cell execution to ensure Smart Sync survives server restarts.
+        """
+        try:
+            session = self.sessions.get(nb_path)
+            if not session:
+                return
+            
+            # Get kernel info for persistence
+            km = session.get('km')
+            pid = "unknown"
+            connection_file = "unknown"
+            
+            kernel_process = _get_kernel_process(km)
+            if kernel_process:
+                pid = getattr(kernel_process, 'pid', 'unknown')
+            if hasattr(km, 'connection_file'):
+                connection_file = km.connection_file
+            
+            if pid != "unknown" and connection_file != "unknown":
+                # Re-persist with updated executed_indices
+                self.state_manager.persist_session(
+                    nb_path, connection_file, pid, 
+                    session.get('env_info', {}),
+                    getattr(km, 'kernel_id', None),
+                    session.get('executed_indices', set())
+                )
+        except Exception as e:
+            logger.warning(f"Failed to persist session state for {nb_path}: {e}")
     
     async def _stdin_listener(self, nb_path: str, session_data: Dict):
         """

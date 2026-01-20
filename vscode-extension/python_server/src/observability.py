@@ -1,5 +1,6 @@
 import sys
 import logging
+import logging.handlers
 import structlog
 import uuid
 import contextvars
@@ -63,8 +64,44 @@ def configure_logging(level="INFO"):
         # Dual logging: stderr + file for VS Code audit viewer
         audit_path = Path(audit_log_path).expanduser()
         audit_path.parent.mkdir(parents=True, exist_ok=True)
-        audit_file = open(audit_path, "a", encoding="utf-8")
-        print(f"[AUDIT] Writing audit log to {audit_path}", file=sys.stderr)
+        
+        # [AUDIT FIX] Use rotating file handler to prevent disk exhaustion
+        # 10MB max file size, keep 3 backups (audit.log, audit.log.1, audit.log.2, audit.log.3)
+        max_bytes = int(os.environ.get("MCP_AUDIT_LOG_MAX_BYTES", 10 * 1024 * 1024))  # 10MB default
+        backup_count = int(os.environ.get("MCP_AUDIT_LOG_BACKUP_COUNT", 3))
+        
+        print(f"[AUDIT] Writing audit log to {audit_path} (max {max_bytes // (1024*1024)}MB, {backup_count} backups)", file=sys.stderr)
+        
+        # Wrapper to make RotatingFileHandler work with structlog's file-like interface
+        class RotatingFileWrapper:
+            """Wraps RotatingFileHandler to provide file-like write() interface for structlog."""
+            def __init__(self, path: Path, max_bytes: int, backup_count: int):
+                self._handler = logging.handlers.RotatingFileHandler(
+                    str(path),
+                    maxBytes=max_bytes,
+                    backupCount=backup_count,
+                    encoding='utf-8'
+                )
+                # Open stream initially
+                if self._handler.stream is None:
+                    self._handler.stream = self._handler._open()
+            
+            def write(self, msg: str) -> None:
+                """Write message, rotating if needed."""
+                # Check if rotation is needed
+                if self._handler.stream:
+                    # Create a minimal LogRecord just for size checking
+                    record = logging.makeLogRecord({"msg": msg})
+                    if self._handler.shouldRollover(record):
+                        self._handler.doRollover()
+                    self._handler.stream.write(msg)
+            
+            def flush(self) -> None:
+                """Flush the underlying stream."""
+                if self._handler.stream:
+                    self._handler.stream.flush()
+        
+        audit_file = RotatingFileWrapper(audit_path, max_bytes, backup_count)
         
         # Use a multi-target logger factory
         class DualLoggerFactory:

@@ -52,7 +52,8 @@ class IOMultiplexer:
         session_data: Dict[str, Any],
         finalize_callback: Optional[Callable] = None,
         broadcast_callback: Optional[Callable] = None,
-        notification_callback: Optional[Callable] = None
+        notification_callback: Optional[Callable] = None,
+        persist_callback: Optional[Callable] = None
     ):
         """
         Listen for IOPub messages from the kernel and route them.
@@ -65,6 +66,7 @@ class IOMultiplexer:
             finalize_callback: Async callback to finalize execution
             broadcast_callback: Async callback to broadcast output
             notification_callback: Async callback to send MCP notifications
+            persist_callback: Async callback to persist session state after cell execution
         """
         logger.info(f"Starting IOPub listener for {nb_path}")
         consecutive_errors = 0
@@ -83,7 +85,8 @@ class IOMultiplexer:
                         session_data=session_data,
                         finalize_callback=finalize_callback,
                         broadcast_callback=broadcast_callback,
-                        notification_callback=notification_callback
+                        notification_callback=notification_callback,
+                        persist_callback=persist_callback
                     )
                     
                     # Reset error counter on success
@@ -125,7 +128,8 @@ class IOMultiplexer:
         session_data: Dict[str, Any],
         finalize_callback: Optional[Callable],
         broadcast_callback: Optional[Callable],
-        notification_callback: Optional[Callable]
+        notification_callback: Optional[Callable],
+        persist_callback: Optional[Callable] = None
     ):
         """
         Route a single IOPub message to the appropriate handler.
@@ -138,6 +142,7 @@ class IOMultiplexer:
             finalize_callback: Callback to finalize execution
             broadcast_callback: Callback to broadcast output
             notification_callback: Callback to send notifications
+            persist_callback: Callback to persist session state
         """
         # Identify which execution this belongs to
         parent_id = msg['parent_header'].get('msg_id')
@@ -153,7 +158,7 @@ class IOMultiplexer:
         if msg_type == 'status':
             await self._handle_status(
                 nb_path, exec_data, content, session_data,
-                finalize_callback, notification_callback
+                finalize_callback, notification_callback, persist_callback
             )
         elif msg_type == 'clear_output':
             self._handle_clear_output(exec_data, content)
@@ -170,7 +175,8 @@ class IOMultiplexer:
         content: Dict[str, Any],
         session_data: Dict[str, Any],
         finalize_callback: Optional[Callable],
-        notification_callback: Optional[Callable]
+        notification_callback: Optional[Callable],
+        persist_callback: Optional[Callable] = None
     ):
         """Handle 'status' messages (kernel state changes)."""
         exec_data['kernel_state'] = content['execution_state']
@@ -196,6 +202,13 @@ class IOMultiplexer:
                 session_data.setdefault('executed_indices', set()).add(
                     exec_data['cell_index']
                 )
+                
+                # [SMART SYNC FIX] Persist updated executed_indices to disk
+                if persist_callback:
+                    try:
+                        await persist_callback(nb_path, session_data)
+                    except Exception as e:
+                        logger.warning(f"Failed to persist session state: {e}")
             
             # Send completion notification
             if notification_callback:

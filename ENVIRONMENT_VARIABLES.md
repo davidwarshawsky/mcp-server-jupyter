@@ -183,6 +183,21 @@ MCP Jupyter Server uses environment variables for configuration. All settings ha
   - `audit.log` (workspace root)
   - `~/.mcp-jupyter/audit.log` (user home)
 - **Note:** When set, all structured logs are written to both stderr and the specified file
+- **Log Rotation:** Uses rotating file handler to prevent disk exhaustion (see `MCP_AUDIT_LOG_MAX_BYTES`)
+
+### `MCP_AUDIT_LOG_MAX_BYTES`
+- **Type:** Integer (Optional)
+- **Default:** `10485760` (10MB)
+- **Description:** Maximum size of audit log file before rotation
+- **Example:** `MCP_AUDIT_LOG_MAX_BYTES=5242880` (5MB)
+- **Note:** Only applies when `MCP_AUDIT_LOG_PATH` is set
+
+### `MCP_AUDIT_LOG_BACKUP_COUNT`
+- **Type:** Integer (Optional)
+- **Default:** `3`
+- **Description:** Number of backup log files to keep (e.g., `audit.log.1`, `audit.log.2`, `audit.log.3`)
+- **Example:** `MCP_AUDIT_LOG_BACKUP_COUNT=5`
+- **Note:** Only applies when `MCP_AUDIT_LOG_PATH` is set
 
 ---
 

@@ -89,15 +89,45 @@ class MCPWebSocketHarness:
             raise e
 
     async def _wait_for_port(self, timeout):
+        """Wait for the server port to be ready by polling socket connectivity."""
         start_time = asyncio.get_event_loop().time()
+        last_error = None
+        
+        # Simple, reliable approach: just poll the socket
         while True:
             try:
-                with socket.create_connection(("127.0.0.1", self.port), timeout=0.1):
+                # Try to connect to the server
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
+                    logger.info(f"Successfully connected to port {self.port}")
                     return
-            except (ConnectionRefusedError, OSError):
-                if asyncio.get_event_loop().time() - start_time > timeout:
-                    raise TimeoutError(f"Port {self.port} did not open within {timeout}s")
-                await asyncio.sleep(0.1)
+            except (ConnectionRefusedError, OSError, socket.timeout) as e:
+                last_error = e
+            
+            # Check timeout
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                # Log any available output for debugging
+                await self._drain_output_for_debug()
+                raise TimeoutError(f"Port {self.port} did not open within {timeout}s (last error: {last_error})")
+            
+            await asyncio.sleep(0.3)
+    
+    async def _drain_output_for_debug(self):
+        """Drain stdout/stderr for debugging when connection fails."""
+        if not self.proc:
+            return
+        
+        for name, stream in [("stdout", self.proc.stdout), ("stderr", self.proc.stderr)]:
+            if not stream:
+                continue
+            try:
+                while True:
+                    line = await asyncio.wait_for(stream.readline(), timeout=0.1)
+                    if not line:
+                        break
+                    logger.error(f"Server {name}: {line.decode().strip()}")
+            except asyncio.TimeoutError:
+                pass
 
     async def _wait_for_token(self, timeout):
         if not self.proc or not self.proc.stderr:

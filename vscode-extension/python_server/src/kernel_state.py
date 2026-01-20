@@ -33,7 +33,7 @@ class KernelStateManager:
                 ) from e
         self._session_locks = {}
 
-    def persist_session(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None):
+    def persist_session(self, nb_path: str, connection_file: str, pid: Any, env_info: Dict, kernel_uuid: Optional[str] = None, executed_indices: Optional[set] = None):
         """Save session info to disk to prevent zombie kernels after server restart."""
         # Alert if persistence directory is not available
         if not self._persistence_available:
@@ -68,7 +68,9 @@ class KernelStateManager:
                 "server_pid": os.getpid(),
                 "server_create_time": current_proc.create_time(),
                 "env_info": env_info,
-                "created_at": datetime.datetime.now().isoformat()
+                "created_at": datetime.datetime.now().isoformat(),
+                # [SMART SYNC FIX] Persist executed cell indices for session restore
+                "executed_indices": list(executed_indices) if executed_indices else []
             }
             
             with open(session_file, 'w') as f:
