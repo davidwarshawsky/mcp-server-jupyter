@@ -42,7 +42,7 @@ class TestSecureDockerConfig:
         assert config.network_mode == "none"
         assert config.capabilities_drop == ["ALL"]
         assert "CHOWN" in config.capabilities_add
-        assert "SETUID" in config.capabilities_add
+        # Note: SETUID/SETGID were removed for security - only added via MCP_ALLOW_PRIVILEGE_ESCALATION=1
         assert config.ulimits["nofile"] == (1024, 1024)
         assert config.ulimits["nproc"] == (512, 512)
         assert config.memory_limit == "4g"

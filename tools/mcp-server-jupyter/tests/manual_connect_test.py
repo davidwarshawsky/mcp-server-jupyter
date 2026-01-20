@@ -3,8 +3,14 @@ import websockets
 import json
 import argparse
 import sys
+import os
 
-async def simulate_human_client(uri):
+async def simulate_human_client(uri, token=None):
+    # Append token to query string if provided (required for WebSocket auth)
+    if token:
+        uri = f"{uri}?token={token}"
+        print(f"Using auth token: {token[:8]}...")
+    
     print(f"Connecting to {uri}...")
     try:
         # MCP uses 'mcp' subprotocol
@@ -36,7 +42,11 @@ async def simulate_human_client(uri):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=3000)
+    parser.add_argument("--token", type=str, default=None, help="Auth token for WebSocket connection")
     args = parser.parse_args()
+    
+    # Check environment variable if no token passed
+    token = args.token or os.environ.get('MCP_SESSION_TOKEN')
     
     uri = f"ws://localhost:{args.port}/ws"
     
@@ -50,4 +60,4 @@ if __name__ == "__main__":
     print("Run the server first in another terminal: python -m src.main --transport websocket --port 3000 --host 0.0.0.0")
     if sys.platform == 'win32':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(simulate_human_client(uri))
+    asyncio.run(simulate_human_client(uri, token))

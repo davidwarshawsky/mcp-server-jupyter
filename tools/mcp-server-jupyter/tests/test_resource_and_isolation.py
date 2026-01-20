@@ -93,7 +93,8 @@ def test_agent_cwd_isolation(monkeypatch, tmp_path):
         asyncio.run(manager.start_kernel(str(nb), agent_id='alice'))
         sess = manager.sessions.get(str(nb.resolve()))
         assert sess is not None
-        assert 'agent_alice' in sess['cwd'] or sess['cwd'].endswith('agent_alice')
+        # CWD should contain agent_alice (could be agent_test/agent_alice)
+        assert 'agent_alice' in sess['cwd'], f"Expected 'agent_alice' in cwd, got: {sess['cwd']}"
     finally:
         # Cleanup
         manager.sessions.clear()

@@ -24,8 +24,10 @@ async def test_manual_verification_flow():
 
     # 1. Start the MCP Server in a subprocess
     server_port = 8123
+    test_token = "test-integration-token-12345"
     server_env = os.environ.copy()
     server_env["PORT"] = str(server_port)
+    server_env["MCP_SESSION_TOKEN"] = test_token  # Set known token for test
     server_env["PYTHONPATH"] = str(SERVER_CWD)
     
     print(f"Starting server on port {server_port}...")
@@ -50,8 +52,8 @@ async def test_manual_verification_flow():
 
         print("Server process appears running. Running client script...")
 
-        # 2. Run the manual connect script unbuffered
-        client_cmd = [sys.executable, "-u", str(MANUAL_TEST_SCRIPT), "--port", str(server_port)]
+        # 2. Run the manual connect script unbuffered with token
+        client_cmd = [sys.executable, "-u", str(MANUAL_TEST_SCRIPT), "--port", str(server_port), "--token", test_token]
         
         print(f"Running client: {' '.join(client_cmd)}")
         client_process = await asyncio.create_subprocess_exec(

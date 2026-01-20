@@ -2453,8 +2453,10 @@ def main():
     try:
         # [SECURITY] Generate and communicate auth token
         import secrets
-        token = secrets.token_urlsafe(32)
-        os.environ["MCP_SESSION_TOKEN"] = token
+        token = os.environ.get("MCP_SESSION_TOKEN")
+        if not token:
+            token = secrets.token_urlsafe(32)
+            os.environ["MCP_SESSION_TOKEN"] = token
         print(f"[MCP_SESSION_TOKEN]: {token}", file=sys.stderr)
 
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)

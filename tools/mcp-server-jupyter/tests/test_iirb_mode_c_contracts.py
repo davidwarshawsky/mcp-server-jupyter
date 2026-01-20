@@ -184,7 +184,7 @@ class TestPIDValidationContract:
                 "connection_file": "/tmp/conn.json",
                 "pid": 99999,  # Non-existent PID
                 "kernel_uuid": "test-uuid-123",
-                "server_pid": 1,  # Dead server
+                "server_pid": 99998,  # Dead server (non-existent PID)
                 "created_at": "2025-01-20T10:00:00"
             }
             
@@ -212,24 +212,26 @@ class TestPIDValidationContract:
             state_manager = KernelStateManager(persistence_dir)
             
             # Create legacy session WITHOUT kernel_uuid
+            import hashlib
+            path_hash = hashlib.md5(b"/tmp/test.ipynb").hexdigest()
             session_data = {
                 "notebook_path": "/tmp/test.ipynb",
                 "connection_file": "/tmp/conn.json",
-                "pid": 99999,
-                "server_pid": 1,  # Dead server
+                "pid": os.getpid(),  # Use current process PID (exists but shouldn't be killed)
+                "server_pid": 999999,  # Definitely dead server PID
                 "created_at": "2025-01-20T10:00:00"
             }
             
-            session_file = persistence_dir / "session_legacy.json"
+            session_file = persistence_dir / f"session_{path_hash}.json"
             session_file.write_text(json.dumps(session_data))
             
             # Capture logs
-            with patch('logging.Logger.warning') as mock_warning:
+            with patch.object(logging.getLogger('src.kernel_state'), 'warning') as mock_warning:
                 state_manager.reconcile_zombies()
                 
                 # Should log warning about missing UUID
                 warning_calls = [str(call) for call in mock_warning.call_args_list]
-                assert any('no kernel_uuid' in str(call).lower() for call in warning_calls)
+                assert any('has no kernel_uuid' in str(call).lower() or 'legacy' in str(call).lower() for call in warning_calls), f"Expected warning about missing kernel_uuid, got: {warning_calls}"
 
 
 class TestConfigValidationContract:

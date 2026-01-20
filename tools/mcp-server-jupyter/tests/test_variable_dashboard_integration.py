@@ -119,11 +119,21 @@ async def test_variable_manifest_populates(tmp_path: Path):
                     break
                 await asyncio.sleep(0.1)
 
-        # Collect manifest
+        # Collect manifest (with retry for timing issues)
         manifest_code = _build_manifest_code()
-        output = await sm.run_simple_code(str(test_nb), manifest_code)
-        assert not output.startswith("Error"), output
-        manifest = _extract_manifest_from_sanitized(output)
+        manifest = []
+        for attempt in range(3):
+            output = await sm.run_simple_code(str(test_nb), manifest_code)
+            if output and not output.startswith("Error"):
+                try:
+                    manifest = _extract_manifest_from_sanitized(output)
+                    if manifest:  # Successfully extracted
+                        break
+                except json.JSONDecodeError:
+                    pass  # Retry
+            await asyncio.sleep(0.5)
+        
+        assert manifest, f"Failed to extract manifest after retries. Last output: {output!r}"
 
         names = {v.get('name') for v in manifest}
         # Some environments inject tiny variables (like is_wsl); ensure ours are present

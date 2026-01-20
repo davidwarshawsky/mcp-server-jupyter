@@ -109,22 +109,29 @@ async def test_linearity_guard_detects_out_of_order(tmp_path):
     
     manager = SessionManager()
     await manager.start_kernel(str(nb_path))
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)  # Increased wait for kernel startup under load
+    
+    async def wait_for_completion(exec_id, timeout=10):
+        """Wait for execution to complete."""
+        for _ in range(timeout * 10):
+            status = manager.get_execution_status(str(nb_path), exec_id)
+            if status['status'] in ['completed', 'error']:
+                return status
+            await asyncio.sleep(0.1)
+        return manager.get_execution_status(str(nb_path), exec_id)
     
     # Run Cell 0
     exec_id_0 = await manager.execute_cell_async(str(nb_path), 0, "x = 1")
-    await asyncio.sleep(1)
+    await wait_for_completion(exec_id_0)
     
     # Run Cell 1
     exec_id_1 = await manager.execute_cell_async(str(nb_path), 1, "y = x + 1")
-    await asyncio.sleep(1)
+    await wait_for_completion(exec_id_1)
     
     # Run Cell 0 again (out of order!)
     exec_id_0_v2 = await manager.execute_cell_async(str(nb_path), 0, "x = 2")
-    await asyncio.sleep(1)
+    status = await wait_for_completion(exec_id_0_v2)
     
-    # Check if warning was injected
-    status = manager.get_execution_status(str(nb_path), exec_id_0_v2)
     output = status.get('output', '')
     
     # Should contain integrity warning
@@ -176,7 +183,16 @@ async def test_max_executed_index_tracking(tmp_path):
     
     manager = SessionManager()
     await manager.start_kernel(str(nb_path))
-    await asyncio.sleep(2)
+    await asyncio.sleep(3)  # Increased wait for kernel startup under load
+    
+    async def wait_for_completion(exec_id, timeout=10):
+        """Wait for execution to complete."""
+        for _ in range(timeout * 10):
+            status = manager.get_execution_status(str(nb_path), exec_id)
+            if status['status'] in ['completed', 'error']:
+                return status
+            await asyncio.sleep(0.1)
+        return manager.get_execution_status(str(nb_path), exec_id)
     
     session = manager.get_session(str(nb_path))
     
@@ -184,22 +200,22 @@ async def test_max_executed_index_tracking(tmp_path):
     assert session['max_executed_index'] == -1
     
     # Run Cell 5 (skipping 0-4)
-    await manager.execute_cell_async(str(nb_path), 5, "x = 5")
-    await asyncio.sleep(1)
+    exec_id = await manager.execute_cell_async(str(nb_path), 5, "x = 5")
+    await wait_for_completion(exec_id)
     
     # Should now be 5
     assert session['max_executed_index'] == 5
     
     # Run Cell 3 (backward)
-    await manager.execute_cell_async(str(nb_path), 3, "y = 3")
-    await asyncio.sleep(1)
+    exec_id = await manager.execute_cell_async(str(nb_path), 3, "y = 3")
+    await wait_for_completion(exec_id)
     
     # Should still be 5 (not updated on backward execution)
     assert session['max_executed_index'] == 5
     
     # Run Cell 10 (forward)
-    await manager.execute_cell_async(str(nb_path), 10, "z = 10")
-    await asyncio.sleep(1)
+    exec_id = await manager.execute_cell_async(str(nb_path), 10, "z = 10")
+    await wait_for_completion(exec_id)
     
     # Should now be 10
     assert session['max_executed_index'] == 10

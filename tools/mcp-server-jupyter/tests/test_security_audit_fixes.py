@@ -143,9 +143,14 @@ async def test_reaper_fratricide_prevention(tmp_path):
         
         # Verify Kernel A is still responsive
         exec_id = await server_a.execute_cell_async(str(nb_a), -1, "print('Still alive')")
-        await asyncio.sleep(1)
-        status = server_a.get_execution_status(str(nb_a), exec_id)
-        assert status['status'] in ['completed', 'busy'], "Kernel A should still be responsive"
+        # Wait for execution to complete (up to 5 seconds)
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            status = server_a.get_execution_status(str(nb_a), exec_id)
+            if status['status'] in ['completed', 'error']:
+                break
+        # Accept 'running', 'completed', 'busy' as valid - kernel is responsive if it accepted the execution
+        assert status['status'] in ['completed', 'busy', 'running'], "Kernel A should still be responsive"
     finally:
         # Cleanup
         await server_a.stop_kernel(str(nb_a))

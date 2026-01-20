@@ -448,16 +448,13 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
-            # [OUTPUT TRUNCATION] Apply before offloading decision
-            text = truncate_output(text)
-            
-            # Check if text should be offloaded
+            # Check if text should be offloaded (before truncation!)
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(
                 text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
             )
             
             if stub_text:
-                # Text was offloaded - update both raw output and LLM summary
+                # Text was offloaded - use stub text (already has preview)
                 data['text/plain'] = stub_text
                 
                 # Ensure metadata exists in out_dict
@@ -468,6 +465,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                 clean_raw['metadata'].update(asset_metadata)
                 llm_summary.append(stub_text)
             else:
+                # Text NOT offloaded - apply truncation for inline display
+                text = truncate_output(text)
                 # Text is small enough to keep inline
                 llm_summary.append(text)
         
@@ -516,16 +515,13 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             # [SECRET REDACTION]
             text = _redact_text(text)
             
-            # [OUTPUT TRUNCATION] Apply before offloading decision
-            text = truncate_output(text)
-            
-            # Check if text should be offloaded
+            # Check if text should be offloaded (before truncation!)
             stub_text, asset_path, asset_metadata = _offload_text_to_asset(
                 text, asset_dir, MAX_INLINE_CHARS, MAX_INLINE_LINES
             )
             
             if stub_text:
-                # Text was offloaded - update both raw output and LLM summary
+                # Text was offloaded - use stub text (already has preview)
                 out_dict['text'] = stub_text
                 if 'metadata' not in out_dict:
                     out_dict['metadata'] = {}
@@ -534,6 +530,8 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                 clean_raw['metadata'].update(asset_metadata)
                 llm_summary.append(stub_text)
             else:
+                # Text NOT offloaded - apply truncation for inline display
+                text = truncate_output(text)
                 # Text is small enough to keep inline
                 llm_summary.append(text)
             

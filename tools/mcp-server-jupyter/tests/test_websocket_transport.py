@@ -4,6 +4,7 @@ import sys
 import json
 import socket
 import logging
+import os
 from subprocess import PIPE
 from pathlib import Path
 import websockets
@@ -23,39 +24,68 @@ class MCPWebSocketHarness:
         self.cwd = cwd
         self.port = get_free_port()
         self.ws = None
+        self.token = None
         self.base_url = f"ws://127.0.0.1:{self.port}/ws"
 
     async def start(self):
         # Spawn the server process in WebSocket mode
+        if not self.token:
+            self.token = "test-token"
+            from urllib.parse import quote
+            token_q = quote(self.token, safe="")
+            self.base_url = f"ws://127.0.0.1:{self.port}/ws?token={token_q}"
+
         cmd = [
             sys.executable, "-u", "-m", "src.main",
             "--transport", "websocket",
             "--port", str(self.port)
         ]
         logger.info(f"Starting server with command: {' '.join(cmd)}")
+        print("[WS HARNESS] launching server")
         
-        self.proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=PIPE,
-            stderr=PIPE, # Capture stderr to check for startup/errors
-            cwd=self.cwd
+        env = dict(os.environ)
+        env["MCP_SESSION_TOKEN"] = self.token
+
+        self.proc = await asyncio.wait_for(
+            asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=PIPE,
+                stderr=PIPE, # Capture stderr to check for startup/errors
+                cwd=self.cwd,
+                env=env
+            ),
+            timeout=10.0
         )
+        print("[WS HARNESS] server process started")
 
         try:
             # Wait for server to start listening
+            print("[WS HARNESS] waiting for port")
             await self._wait_for_port(10.0)
+            print("[WS HARNESS] port open")
             
             # Connect WebSocket
             logger.info(f"Connecting to {self.base_url}")
-            self.ws = await websockets.connect(self.base_url, subprotocols=['mcp'])
+            self.ws = await asyncio.wait_for(
+                websockets.connect(self.base_url, subprotocols=['mcp']),
+                timeout=10.0
+            )
+            logger.info("WebSocket connected")
+            print("[WS HARNESS] websocket connected")
             
             # Perform Handshake
-            await self._handshake()
+            await asyncio.wait_for(self._handshake(), timeout=30.0)
+            logger.info("Handshake completed")
+            print("[WS HARNESS] handshake completed")
         except Exception as e:
+            # Capture output before stopping the process to aid debugging
+            if self.proc:
+                try:
+                    # Best-effort drain of stderr/stdout without blocking
+                    await self._drain_process_output(timeout=1.0)
+                except Exception:
+                    pass
             await self.stop()
-            stdout, stderr = await self.proc.communicate()
-            logger.error(f"Server stdout: {stdout.decode()}")
-            logger.error(f"Server stderr: {stderr.decode()}")
             raise e
 
     async def _wait_for_port(self, timeout):
@@ -68,6 +98,54 @@ class MCPWebSocketHarness:
                 if asyncio.get_event_loop().time() - start_time > timeout:
                     raise TimeoutError(f"Port {self.port} did not open within {timeout}s")
                 await asyncio.sleep(0.1)
+
+    async def _wait_for_token(self, timeout):
+        if not self.proc or not self.proc.stderr:
+            return
+
+        start_time = asyncio.get_event_loop().time()
+        while True:
+            if asyncio.get_event_loop().time() - start_time > timeout:
+                return
+            try:
+                line = await asyncio.wait_for(self.proc.stderr.readline(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            if not line:
+                return
+            decoded = line.decode().strip()
+            if decoded.startswith("[MCP_PORT]:"):
+                try:
+                    self.port = int(decoded.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            if self.port:
+                return
+
+    async def _drain_process_output(self, timeout: float = 1.0):
+        if not self.proc:
+            return
+        start_time = asyncio.get_event_loop().time()
+        while asyncio.get_event_loop().time() - start_time < timeout:
+            drained = False
+            if self.proc.stdout:
+                try:
+                    line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=0.1)
+                    if line:
+                        logger.error(f"Server stdout: {line.decode().strip()}")
+                        drained = True
+                except asyncio.TimeoutError:
+                    pass
+            if self.proc.stderr:
+                try:
+                    line = await asyncio.wait_for(self.proc.stderr.readline(), timeout=0.1)
+                    if line:
+                        logger.error(f"Server stderr: {line.decode().strip()}")
+                        drained = True
+                except asyncio.TimeoutError:
+                    pass
+            if not drained:
+                await asyncio.sleep(0.05)
 
     async def _handshake(self):
         # 1. Send Initialize
@@ -116,14 +194,21 @@ class MCPWebSocketHarness:
 
     async def stop(self):
         if self.ws:
-            await self.ws.close()
-        if self.proc:
-            self.proc.terminate()
             try:
-                await asyncio.wait_for(self.proc.wait(), timeout=2.0)
+                await asyncio.wait_for(self.ws.close(), timeout=2.0)
             except asyncio.TimeoutError:
-                self.proc.kill()
-                await self.proc.wait()
+                pass
+        if self.proc:
+            try:
+                if self.proc.returncode is None:
+                    self.proc.terminate()
+                    try:
+                        await asyncio.wait_for(self.proc.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        self.proc.kill()
+                        await self.proc.wait()
+            except ProcessLookupError:
+                pass
             
             # [FIX] Yield to event loop to allow transport cleanup callbacks to run
             await asyncio.sleep(0.1)

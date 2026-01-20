@@ -15,10 +15,33 @@ import sys
 
 
 def _cleanup_all_kernels():
-    """Kill all ipykernel processes - called at test session end."""
+    """
+    Kill all ipykernel processes - called at test session end.
+    
+    WARNING: In parallel execution (pytest-xdist), this can kill kernels from 
+    other test workers. Only use at session end, not before each test.
+    """
+    # Only run cleanup if NOT in a xdist worker (to avoid killing other workers' kernels)
+    import os
+    if os.environ.get('PYTEST_XDIST_WORKER'):
+        # In parallel mode, don't kill other workers' kernels
+        return
+    
     try:
+        # First try pkill
         subprocess.run(['pkill', '-9', '-f', 'ipykernel_launcher'], 
-                      capture_output=True, check=False)
+                      capture_output=True, check=False, timeout=3)
+        # Also try killing by pattern match on ps output
+        result = subprocess.run(['ps', 'aux'], capture_output=True, text=True, timeout=3)
+        for line in result.stdout.splitlines():
+            if 'ipykernel_launcher' in line or 'jupyter-kernel' in line:
+                parts = line.split()
+                if len(parts) > 1:
+                    try:
+                        pid = int(parts[1])
+                        subprocess.run(['kill', '-9', str(pid)], capture_output=True, timeout=1)
+                    except (ValueError, subprocess.TimeoutExpired):
+                        pass
     except Exception:
         pass
 
@@ -32,6 +55,32 @@ def cleanup_kernels_at_session_end():
     """Session-scoped fixture to clean up all kernels when test session ends."""
     yield
     _cleanup_all_kernels()
+
+
+@pytest.fixture(scope="function", autouse=True)
+def cleanup_kernels_before_test():
+    """
+    Function-scoped fixture to clean up kernels before each test.
+    
+    DISABLED IN PARALLEL MODE: In pytest-xdist parallel execution, killing
+    all kernels would affect other test workers. Instead, each test should
+    properly clean up its own resources.
+    """
+    import os
+    import time
+    
+    # Skip aggressive cleanup in parallel mode
+    if os.environ.get('PYTEST_XDIST_WORKER'):
+        yield
+        return
+    
+    # Only in sequential mode: Run cleanup
+    _cleanup_all_kernels()
+    time.sleep(0.5)
+    _cleanup_all_kernels()
+    # Give more time for ports to be released
+    time.sleep(1.5)
+    yield
 
 
 @pytest.fixture
@@ -475,7 +524,10 @@ async def auto_cleanup_session_managers(monkeypatch):
                     # Close kernel client channels
                     if 'kc' in session and hasattr(session['kc'], 'stop_channels'):
                         try:
-                            session['kc'].stop_channels()
+                            result = session['kc'].stop_channels()
+                            # Handle AsyncMock which returns a coroutine
+                            if asyncio.iscoroutine(result):
+                                await result
                         except Exception:
                             pass
                     
@@ -551,4 +603,74 @@ async def clean_session_manager():
     
     # Give event loop time to clean up
     await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def mock_async_kernel_manager():
+    """
+    Creates a fully-mocked AsyncKernelManager for parallel-safe testing.
+    
+    This fixture provides a mock that doesn't start real Jupyter kernels,
+    making it safe for parallel execution with pytest-xdist.
+    
+    Usage:
+        def test_something(mock_async_kernel_manager, monkeypatch):
+            monkeypatch.setattr("src.session.AsyncKernelManager", 
+                              lambda: mock_async_kernel_manager)
+            # Now SessionManager will use the mock instead of real kernels
+    """
+    mock_km = AsyncMock()
+    mock_km.kernel_id = "test-kernel-id-12345"
+    mock_km.has_kernel = True
+    mock_km.is_alive = Mock(return_value=True)
+    mock_km.kernel = Mock()
+    mock_km.kernel.pid = 99999
+    mock_km.kernel_cmd = [sys.executable, '-m', 'ipykernel_launcher', '-f', '{connection_file}']
+    mock_km.connection_file = "/tmp/kernel-test.json"
+    
+    # Create a mock kernel client
+    mock_kc = AsyncMock()
+    mock_kc.start_channels = Mock()
+    mock_kc.stop_channels = Mock()  # Return a regular Mock, not AsyncMock
+    mock_kc.wait_for_ready = AsyncMock()
+    mock_kc.execute = Mock(return_value="msg-12345")
+    mock_kc.is_alive = Mock(return_value=True)
+    mock_kc.get_iopub_msg = AsyncMock(side_effect=asyncio.TimeoutError())
+    mock_kc.get_shell_msg = AsyncMock(return_value={
+        'content': {'status': 'ok'},
+        'parent_header': {'msg_id': 'msg-12345'}
+    })
+    
+    mock_km.client = Mock(return_value=mock_kc)
+    
+    return mock_km
+
+
+@pytest.fixture
+def patch_kernel_managers(mock_async_kernel_manager, monkeypatch):
+    """
+    Patches AsyncKernelManager in BOTH locations to prevent real kernel creation.
+    
+    This is essential for parallel test execution - without this patch, tests
+    will try to start real Jupyter kernels which causes:
+    1. Port contention when multiple tests run simultaneously
+    2. "Kernel died before replying" errors
+    3. Resource exhaustion
+    
+    Usage:
+        async def test_something(patch_kernel_managers):
+            # AsyncKernelManager is now mocked everywhere
+            from src.session import SessionManager
+            manager = SessionManager()
+            await manager.start_kernel("test.ipynb")  # Uses mock, no real kernel
+    """
+    # Create a factory that returns the mock
+    def mock_km_factory(*args, **kwargs):
+        return mock_async_kernel_manager
+    
+    # Patch in BOTH locations where AsyncKernelManager might be imported
+    monkeypatch.setattr("src.session.AsyncKernelManager", mock_km_factory)
+    monkeypatch.setattr("src.kernel_lifecycle.AsyncKernelManager", mock_km_factory)
+    
+    return mock_async_kernel_manager
 
