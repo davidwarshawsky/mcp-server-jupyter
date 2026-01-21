@@ -7,48 +7,33 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: demo-code-server:latest
+    image: demo-code-server-custom
     container_name: demo-code-server
-    restart: "no"  # Don't auto-restart for recordings
-    
-    # Port mapping
-    ports:
-      - "8443:8443"  # linuxserver image uses 8443
-    
-    # Environment
     environment:
-      - PUID=${DOCKER_UID:-1000}
-      - PGID=${DOCKER_GID:-1000}
-      - TZ=America/New_York
-      # Disable password for automated testing
-      - PASSWORD=
-      - SUDO_PASSWORD=
-      # Telemetry
-      - DISABLE_TELEMETRY=true
-      # Default workspace folder
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - PASSWORD=demo123
       - DEFAULT_WORKSPACE=/config/workspace
-    
-    # Volume mounts
     volumes:
-      # Workspace with notebooks to demo
-      - ../../:/config/workspace:rw
-      
-      # Pre-configured settings to disable welcome dialogs
+      # Mount the settings we defined above directly into User settings
       - ./automation-config/settings.json:/config/data/User/settings.json:ro
-      
-      # Extension install script
-      - ./automation-config/install-extensions.sh:/config/custom-cont-init.d/install-extensions.sh:ro
-      
-      # Persistent extensions
+      # Mount demo notebook
+      - ../../demo.ipynb:/config/workspace/demo.ipynb:ro
+      # Persist extensions
       - code-server-extensions:/config/extensions
-    
+      # Persist VS Code data
+      - code-server-data:/config/data
+    ports:
+      - "8443:8443"
     # Resource limits
     mem_limit: 4g
     cpus: 2.0
-    
     # Recommended Docker settings for browser-based apps
     shm_size: 2gb  # Larger shared memory for video playback
 
 volumes:
   code-server-extensions:
     name: demo-code-server-extensions
+  code-server-data:
+    name: demo-code-server-data

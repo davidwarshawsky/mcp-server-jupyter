@@ -13,3 +13,7 @@ vscode-extension/python_server/wheels/
 .coverage
 **/playwright-report/*
 **/dummy/*
+
+# Temporary diff and digest files
+diff.txt
+digest.txt

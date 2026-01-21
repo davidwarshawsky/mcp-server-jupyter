@@ -1,42 +1,26 @@
 {
     "workbench.startupEditor": "none",
-    "workbench.welcomePage.walkthroughs.openOnInstall": false,
-    "workbench.settings.applyToAllProfiles": [
-        "workbench.startupEditor"
-    ],
     "security.workspace.trust.enabled": false,
     "security.workspace.trust.startupPrompt": "never",
     "security.workspace.trust.banner": "never",
     "security.workspace.trust.emptyWindow": false,
     "workbench.tips.enabled": false,
-    "workbench.colorTheme": "Default Dark+",
-    "update.showReleaseNotes": false,
+    "update.mode": "none",
     "extensions.ignoreRecommendations": true,
-    "extensions.autoCheckUpdates": false,
-    "extensions.autoUpdate": false,
-    "telemetry.telemetryLevel": "off",
-    "git.openRepositoryInParentFolders": "never",
-    "git.confirmSync": false,
-    "git.enableSmartCommit": true,
-    "terminal.integrated.gpuAcceleration": "off",
     "python.defaultInterpreterPath": "/usr/bin/python3",
     "jupyter.askForKernelRestart": false,
-    "jupyter.interactiveWindow.creationMode": "perFile",
     "notebook.cellToolbarVisibility": "hover",
-    "notebook.showCellStatusBar": "visible",
-    "jupyter.runStartupCommands": [],
-    "jupyter.widgetScriptSources": ["jsdelivr.com", "unpkg.com"],
-    "python.analysis.autoImportCompletions": false,
-    "python.analysis.diagnosticMode": "openFilesOnly",
+    "notebook.compactView": false,
+    "editor.minimap.enabled": false,
+    "workbench.activityBar.visible": true,
+    "window.zoomLevel": 1, 
+    "notebook.globalToolbar": true,
     
+    // CRITICAL: Force Kernel Selection behavior
     "jupyter.kernels.filter": [
         {
             "path": "/usr/bin/python3",
             "type": "pythonEnvironment"
         }
-    ],
-    "notebook.kernelPickerType": "mru",
-    
-    "mcp-jupyter.pythonPath": "/usr/bin/python3",
-    "mcp-jupyter.serverPath": ""
+    ]
 }

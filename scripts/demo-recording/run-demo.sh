@@ -42,6 +42,23 @@ log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
+generate_gif() {
+    local input_video=$1
+    local output_gif=$2
+    local temp_palette="/tmp/palette.png"
+
+    echo "🎨 Generating high-quality GIF for $input_video..."
+
+    # Create a color palette for better quality
+    ffmpeg -i "$input_video" -vf "fps=10,scale=1280:-1:flags=lanczos,palettegen" -y "$temp_palette"
+
+    # Generate the GIF using the palette
+    ffmpeg -i "$input_video" -i "$temp_palette" -lavfi "fps=10,scale=1280:-1:flags=lanczos [x]; [x][1:v] paletteuse" -y "$output_gif"
+
+    rm "$temp_palette"
+    echo "✅ GIF saved to $output_gif"
+}
+
 # Export UID/GID for docker-compose (use different var names since UID is readonly in bash)
 export DOCKER_UID=$(id -u)
 export DOCKER_GID=$(id -g)
@@ -96,6 +113,16 @@ run_recordings() {
     npx playwright test --config="$SCRIPT_DIR/playwright.demo.config.ts" "$@"
     
     log_success "Demo recordings saved to: $SCRIPT_DIR/demo-recordings/"
+
+    # --- Post-Recording GIF Generation ---
+    log_info "Converting recordings to GIFs..."
+    for video in "$SCRIPT_DIR"/demo-recordings/videos/*.webm; do
+        if [ -f "$video" ]; then
+            filename=$(basename "$video" .webm)
+            generate_gif "$video" "$SCRIPT_DIR/demo-recordings/videos/${filename}.gif"
+        fi
+    done
+    log_success "GIF generation complete."
 }
 
 cleanup() {
