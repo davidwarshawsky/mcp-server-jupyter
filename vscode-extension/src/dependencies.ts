@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
+import { getProxyAwareEnv } from './envUtils';
 
 /**
  * Check if Python dependencies are installed
@@ -96,7 +97,11 @@ except ImportError as e:
     }
 
     // Only set cwd if we have a valid path, otherwise run from anywhere (testing global site-packages)
-    const spawnOpts = serverPath ? { cwd: serverPath } : {};
+    // [DUH FIX #3] Inherit proxy settings for corporate environments
+    const spawnOpts = {
+      ...(serverPath && { cwd: serverPath }),
+      env: getProxyAwareEnv()
+    };
     
     const proc = spawn(pythonPath, ['-c', testImports], spawnOpts);
 
@@ -148,8 +153,10 @@ export async function installPythonDependencies(
   outputChannel.show();
 
   return new Promise((resolve) => {
+    // [DUH FIX #3] Inherit proxy settings for corporate environments (Zscaler, etc.)
     const proc = spawn(pythonPath, ['-m', 'pip', 'install', '-r', 'requirements.txt'], {
       cwd: serverPath,
+      env: getProxyAwareEnv()
     });
 
     proc.stdout.on('data', (data) => {

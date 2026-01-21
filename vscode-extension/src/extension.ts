@@ -383,6 +383,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       })
     );
 
+    // [DUH FIX #4] Emergency Stop command with escalation
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.forceStop', async () => {
+        await forceStopExecution();
+      })
+    );
+
     // Show success message
     vscode.window.showInformationMessage('MCP Agent Kernel is ready!');
     console.log('MCP Agent Kernel extension activated successfully');
@@ -592,5 +599,75 @@ async function restartServer(): Promise<void> {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`Failed to restart server: ${errorMessage}`);
+  }
+}
+
+/**
+ * [DUH FIX #4] Emergency Stop command
+ * 
+ * Escalation strategy:
+ * - Click 1: Send interrupt (SIGINT/KeyboardInterrupt) to kernel
+ * - Click 2 within 5s: Force kill kernel process + cancel MCP requests
+ */
+let lastForceStopTime = 0;
+async function forceStopExecution(): Promise<void> {
+  const now = Date.now();
+  const timeSinceLastStop = now - lastForceStopTime;
+  const escalate = timeSinceLastStop < 5000; // Double-click within 5s
+  
+  lastForceStopTime = now;
+  
+  try {
+    if (!escalate) {
+      // First click: Graceful interrupt
+      vscode.window.showWarningMessage(
+        '🛑 Interrupting execution... Click again within 5s to force kill.',
+        { modal: false }
+      );
+      
+      // Get active notebook
+      const activeNotebook = vscode.window.activeNotebookEditor?.notebook;
+      if (activeNotebook) {
+        // Send interrupt via cancelExecution (sends SIGINT to kernel)
+        try {
+          await mcpClient.cancelExecution(activeNotebook.uri.fsPath);
+          vscode.window.showInformationMessage('✓ Kernel interrupted');
+        } catch {
+          vscode.window.showWarningMessage('Could not interrupt. Click again to force kill.');
+        }
+      } else {
+        vscode.window.showWarningMessage('No active notebook. Click again to kill server.');
+      }
+    } else {
+      // Second click (escalation): Force kill
+      const confirm = await vscode.window.showWarningMessage(
+        '⚠️ Force kill kernel and restart server?',
+        { modal: true },
+        'Kill & Restart',
+        'Cancel'
+      );
+      
+      if (confirm === 'Kill & Restart') {
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Force stopping...',
+            cancellable: false,
+          },
+          async () => {
+            // Kill the server process (this kills the kernel too)
+            await mcpClient.forceKill();
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            // Restart fresh
+            await mcpClient.start();
+          }
+        );
+        
+        vscode.window.showInformationMessage('🔄 Server restarted. All kernels reset.');
+      }
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    vscode.window.showErrorMessage(`Emergency stop failed: ${errorMessage}`);
   }
 }

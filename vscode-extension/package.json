@@ -10,7 +10,7 @@
     "url": "https://github.com/warshawsky-research/mcp-agent-kernel"
   },
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.108.0"
   },
   "categories": [
     "Notebooks",
@@ -172,6 +172,12 @@
         "command": "mcp-jupyter.refreshVariables",
         "title": "MCP Jupyter: Refresh Variables",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "mcp-jupyter.forceStop",
+        "title": "MCP Jupyter: Emergency Stop (Kill Kernel)",
+        "category": "MCP Jupyter",
+        "icon": "$(stop-circle)"
       }
     ],
     "viewsContainers": {
@@ -223,7 +229,7 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run bundle-python && npm run bundle-wheels && npm run compile && npm run build:renderer",
+    "vscode:prepublish": "npm run bundle-python && npm run compile && npm run build:renderer",
     "bundle-python": "node scripts/copy-python-server.js",
     "bundle-wheels": "bash scripts/bundle_wheels.sh",
     "bundle-wheels:skip": "echo 'Skipping wheel bundling (online mode)'",
@@ -236,7 +242,6 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@opentelemetry/api": "^1.9.0",
     "@playwright/test": "^1.40.1",
     "@types/mocha": "^10.x",
     "@types/node": "^20.x",
@@ -256,6 +261,7 @@
     "vscode-notebook-renderer": "^0.0.1-security"
   },
   "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
     "ws": "^8.19.0"
   }
 }

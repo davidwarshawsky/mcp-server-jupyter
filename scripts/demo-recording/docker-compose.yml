@@ -1,0 +1,54 @@
+# Demo Recording Environment - Docker Compose
+# Runs code-server in isolation for Playwright demo recordings
+# Last Updated: 2026-01-21
+
+services:
+  code-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: demo-code-server:latest
+    container_name: demo-code-server
+    restart: "no"  # Don't auto-restart for recordings
+    
+    # Port mapping
+    ports:
+      - "8443:8443"  # linuxserver image uses 8443
+    
+    # Environment
+    environment:
+      - PUID=${DOCKER_UID:-1000}
+      - PGID=${DOCKER_GID:-1000}
+      - TZ=America/New_York
+      # Disable password for automated testing
+      - PASSWORD=
+      - SUDO_PASSWORD=
+      # Telemetry
+      - DISABLE_TELEMETRY=true
+      # Default workspace folder
+      - DEFAULT_WORKSPACE=/config/workspace
+    
+    # Volume mounts
+    volumes:
+      # Workspace with notebooks to demo
+      - ../../:/config/workspace:rw
+      
+      # Pre-configured settings to disable welcome dialogs
+      - ./automation-config/settings.json:/config/data/User/settings.json:ro
+      
+      # Extension install script
+      - ./automation-config/install-extensions.sh:/config/custom-cont-init.d/install-extensions.sh:ro
+      
+      # Persistent extensions
+      - code-server-extensions:/config/extensions
+    
+    # Resource limits
+    mem_limit: 4g
+    cpus: 2.0
+    
+    # Recommended Docker settings for browser-based apps
+    shm_size: 2gb  # Larger shared memory for video playback
+
+volumes:
+  code-server-extensions:
+    name: demo-code-server-extensions

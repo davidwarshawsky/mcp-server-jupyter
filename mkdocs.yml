@@ -130,7 +130,8 @@ nav:
     - VS Code Extension: getting-started/vscode.md
   - Superpowers:
     - Overview: superpowers/index.md
-    - DuckDB SQL: superpowers/sql.md
+    - SQL Magic (%%duckdb): superpowers/sql-magic.md
+    - Asset Rendering: superpowers/asset-rendering.md
     - Auto-EDA: superpowers/auto-eda.md
     - Time Travel: superpowers/time-travel.md
   - Architecture:

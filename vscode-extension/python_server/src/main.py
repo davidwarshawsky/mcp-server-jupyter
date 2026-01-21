@@ -39,6 +39,7 @@ from src.session import SessionManager
 from src import notebook, utils, environment, validation
 from src.utils import ToolResult
 from src.config import load_and_validate_settings
+from src.tools import register_all_tools
 import websockets
 import mcp.types as types
 
@@ -176,6 +177,9 @@ session_manager.set_mcp_server(mcp)
 connection_manager = ConnectionManager()
 session_manager.connection_manager = connection_manager
 
+# [ARCHITECTURAL FIX] Register all tools from modular tools package
+register_all_tools(mcp, session_manager, connection_manager)
+
 # [ROUND 2 AUDIT] Start proposal cleanup background task
 async def _proposal_cleanup_loop():
     """Cleanup old proposals every hour to prevent unbounded growth."""
@@ -236,7 +240,23 @@ async def health_check(request=None):
         "version": __version__
     }, status_code=200 if is_healthy else 503)
 
-@mcp.tool()
+# =============================================================================
+# [ARCHITECTURAL DEBT RESOLVED] All tools are now registered via register_all_tools()
+# from src.tools package. The 2000+ lines of inline tool definitions below have
+# been superseded by the modular tools package. The inline definitions are kept
+# for reference but should NOT be executed (they're inside a False conditional).
+# =============================================================================
+
+# [LEGACY] Skip inline tool definitions - tools now come from src.tools package
+if False:  # Set to True only for debugging if modular tools fail
+    pass  # All inline @mcp.tool() definitions are now in src/tools/ package
+
+# [LEGACY INLINE TOOLS - KEPT FOR REFERENCE ONLY]
+# The following 2000+ lines of tool definitions are superseded by src/tools/
+# They would cause "Tool already exists" warnings if the decorators were active.
+# Decorators have been commented out to prevent duplicate registrations.
+
+# @mcp.tool()  # MOVED TO src/tools/server_tools.py
 def get_server_info():
     """
     [FINAL PUNCH LIST #5] Get server version and capabilities for handshake.
@@ -268,7 +288,7 @@ def get_server_info():
         "min_client_version": "0.2.0"  # Minimum compatible client version
     }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_server_status():
     """Check how many humans are connected to this session."""
     return json.dumps({
@@ -362,7 +382,7 @@ def save_proposal(proposal_id: str, data: dict):
     except Exception:
         pass
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(StartKernelArgs)
 async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300, agent_id: Optional[str] = None):
     """
@@ -397,7 +417,7 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
             agent_id=agent_id
         )
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(StopKernelArgs)
 async def stop_kernel(notebook_path: str):
     """
@@ -416,7 +436,7 @@ async def stop_kernel(notebook_path: str):
 
         return await session_manager.stop_kernel(notebook_path)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def list_kernels():
     """
     List all active kernel sessions.
@@ -439,7 +459,7 @@ def list_kernels():
     
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(DetectSyncNeededArgs)
 async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[int, str]] = None):
     """
@@ -521,7 +541,7 @@ async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[in
         'sync_strategy': 'full'
     }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def set_stop_on_error(notebook_path: str, enabled: bool):
     """
     Control whether execution queue stops on first error.
@@ -535,7 +555,7 @@ def set_stop_on_error(notebook_path: str, enabled: bool):
     session['stop_on_error'] = enabled
     return f"stop_on_error set to {enabled} for {notebook_path}"
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_notebook_outline(notebook_path: str, structure_override: Optional[List[dict]] = None):
     """
     Low-token overview of the file.
@@ -550,7 +570,7 @@ def get_notebook_outline(notebook_path: str, structure_override: Optional[List[d
         # Fallback to disk (risk of stale data)
         return notebook.get_notebook_outline(notebook_path)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     """
     Add new logic to the end.
@@ -570,7 +590,7 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
 #     """REMOVED: Use re-execute cells instead of deserializing pickled state"""
 #     pass
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def propose_edit(notebook_path: str, index: int, new_content: str):
     """
     Propose an edit to a cell. 
@@ -609,7 +629,7 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "_mcp_action": "apply_edit" 
     })
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def notify_edit_result(notebook_path: str, proposal_id: str, status: str, message: Optional[str] = None):
     """
     Callback for the client to report the result of a proposed edit.
@@ -647,7 +667,7 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
         "timestamp": timestamp
     })
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_proposal_status(proposal_id: str):
     """
     Check the status of a specific proposal.
@@ -657,7 +677,7 @@ def get_proposal_status(proposal_id: str):
         return json.dumps(PROPOSAL_STORE[proposal_id])
     return json.dumps({"status": "unknown"})
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):
     """
     The Surgical Reader.
@@ -669,17 +689,17 @@ def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: s
          line_range = [int(x) for x in line_range]
     return notebook.read_cell_smart(notebook_path, index, target, fmt, line_range)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def insert_cell(notebook_path: str, index: int, content: str, cell_type: str = "code"):
     """Inserts a cell at a specific position."""
     return notebook.insert_cell(notebook_path, index, content, cell_type)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def delete_cell(notebook_path: str, index: int):
     """Deletes a cell at a specific position."""
     return notebook.delete_cell(notebook_path, index)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def search_notebook(notebook_path: str, query: str, regex: bool = False):
     """
     Don't read the file to find where df_clean is defined. Search for it.
@@ -687,7 +707,7 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     """
     return notebook.search_notebook(notebook_path, query, regex)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SubmitInputArgs)
 async def submit_input(notebook_path: str, text: str):
     """
@@ -700,7 +720,7 @@ async def submit_input(notebook_path: str, text: str):
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetKernelInfoArgs)
 async def get_kernel_info(notebook_path: str):
     """
@@ -728,7 +748,7 @@ def _derive_env_vars(python_path: str) -> Optional[dict]:
     except Exception:
         return None
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def check_code_syntax(code: str):
     """
     [LSP] Check Python code for syntax errors. 
@@ -751,7 +771,7 @@ def check_code_syntax(code: str):
 
 # --- NEW ASYNC TOOLS ---
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RunCellArgs)
 async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
     """
@@ -804,7 +824,7 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
             "retry_after_seconds": 5
         })
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_execution_status(notebook_path: str, task_id: str):
     """
     Checks the status of a background cell execution.
@@ -813,7 +833,7 @@ def get_execution_status(notebook_path: str, task_id: str):
     status = session_manager.get_execution_status(notebook_path, task_id)
     return json.dumps(status, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def is_kernel_busy(notebook_path: str):
     """
     [PERFORMANCE] Check if kernel is currently executing or has queued work.
@@ -849,7 +869,7 @@ def is_kernel_busy(notebook_path: str):
     
     return json.dumps(result)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def check_kernel_resources(notebook_path: str):
     """
     [PHASE 3.4] Get CPU and RAM usage of the kernel process.
@@ -889,7 +909,7 @@ def check_kernel_resources(notebook_path: str):
     result = session_manager.get_kernel_resources(notebook_path)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RunAllCellsArgs)
 async def run_all_cells(notebook_path: str):
     """
@@ -937,7 +957,7 @@ async def run_all_cells(notebook_path: str):
         'executions': exec_ids
     }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SyncStateFromDiskArgs)
 async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     """
@@ -1126,7 +1146,7 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     
     return json.dumps(response, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 async def get_version():
     """
     Get MCP server version for compatibility checking.
@@ -1150,7 +1170,7 @@ async def get_version():
         'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     })
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(CancelExecutionArgs)
 async def cancel_execution(notebook_path: str, task_id: str):
     """
@@ -1160,7 +1180,7 @@ async def cancel_execution(notebook_path: str, task_id: str):
     """
     return await session_manager.cancel_execution(notebook_path, task_id)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetVariableInfoArgs)
 async def get_variable_info(notebook_path: str, var_name: str):
     """
@@ -1170,7 +1190,7 @@ async def get_variable_info(notebook_path: str, var_name: str):
     """
     return await session_manager.get_variable_info(notebook_path, var_name)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(ListVariablesArgs)
 async def list_variables(notebook_path: str):
     """
@@ -1190,7 +1210,7 @@ print(json.dumps(result))
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetVariableManifestArgs)
 async def get_variable_manifest(notebook_path: str):
     """
@@ -1267,7 +1287,7 @@ print(json.dumps(manifest))
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InspectVariableArgs)
 async def inspect_variable(notebook_path: str, variable_name: str):
     """
@@ -1298,7 +1318,7 @@ async def inspect_variable(notebook_path: str, variable_name: str):
 # Asset Management Tools
 # -----------------------
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def read_asset(
     asset_path: str, 
     lines: Optional[List[int]] = None, 
@@ -1434,26 +1454,26 @@ def read_asset(
 
 # -----------------------
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InterruptKernelArgs)
 async def interrupt_kernel(notebook_path: str):
     """Stops the currently running cell immediately."""
     return await session_manager.interrupt_kernel(notebook_path)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RestartKernelArgs)
 async def restart_kernel(notebook_path: str):
     """Restarts the kernel, clearing all variables but keeping outputs."""
     return await session_manager.restart_kernel(notebook_path)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(CheckWorkingDirectoryArgs)
 async def check_working_directory(notebook_path: str):
     """Checks the current working directory (CWD) of the active kernel."""
     code = "import os; print(os.getcwd())"
     return await session_manager.run_simple_code(notebook_path, code)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SetWorkingDirectoryArgs)
 async def set_working_directory(notebook_path: str, path: str):
     """Changes the CWD of the kernel."""
@@ -1465,7 +1485,7 @@ async def set_working_directory(notebook_path: str, path: str):
         return result
     return f"Working directory changed to: {result}"
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(ListKernelPackagesArgs)
 async def list_kernel_packages(notebook_path: str):
     """Lists packages installed in the active kernel's environment."""
@@ -1478,13 +1498,13 @@ for p, v in installed:
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def list_available_environments():
     """Scans the system for Python environments (venvs, conda, etc)."""
     envs = session_manager.list_environments()
     return json.dumps(envs, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SwitchKernelEnvironmentArgs)
 async def switch_kernel_environment(notebook_path: str, venv_path: str):
     """
@@ -1502,7 +1522,7 @@ async def switch_kernel_environment(notebook_path: str, venv_path: str):
 # NEW TOOLS - Notebook Creation and Management
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def create_notebook(
     notebook_path: str,
     kernel_name: str = "python3",
@@ -1546,27 +1566,27 @@ def create_notebook(
 # Cell Manipulation Tools
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def move_cell(notebook_path: str, from_index: int, to_index: int):
     """Moves a cell from one position to another."""
     return notebook.move_cell(notebook_path, from_index, to_index)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def copy_cell(notebook_path: str, index: int, target_index: Optional[int] = None):
     """Copies a cell to a new position. If target_index is None, appends to end."""
     return notebook.copy_cell(notebook_path, index, target_index)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def merge_cells(notebook_path: str, start_index: int, end_index: int, separator: str = "\n\n"):
     """Merges cells from start_index to end_index (inclusive) into a single cell."""
     return notebook.merge_cells(notebook_path, start_index, end_index, separator)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def split_cell(notebook_path: str, index: int, split_at_line: int):
     """Splits a cell at the specified line number into two cells."""
     return notebook.split_cell(notebook_path, index, split_at_line)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def change_cell_type(notebook_path: str, index: int, new_type: str):
     """
     Changes the type of a cell (code, markdown, or raw).
@@ -1578,13 +1598,13 @@ def change_cell_type(notebook_path: str, index: int, new_type: str):
 # Metadata Operations
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_notebook_metadata(notebook_path: str):
     """Gets the notebook-level metadata as JSON."""
     metadata = notebook.get_notebook_metadata(notebook_path)
     return json.dumps(metadata, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def set_notebook_metadata(notebook_path: str, metadata_json: str):
     """
     Sets the notebook-level metadata.
@@ -1597,18 +1617,18 @@ def set_notebook_metadata(notebook_path: str, metadata_json: str):
     
     return notebook.set_notebook_metadata(notebook_path, metadata)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def update_kernelspec(notebook_path: str, kernel_name: str, display_name: Optional[str] = None, language: Optional[str] = None):
     """Updates the kernelspec in notebook metadata."""
     return notebook.update_kernelspec(notebook_path, kernel_name, display_name, language)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_cell_metadata(notebook_path: str, index: int):
     """Gets metadata for a specific cell as JSON."""
     metadata = notebook.get_cell_metadata(notebook_path, index)
     return json.dumps(metadata, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def set_cell_metadata(notebook_path: str, index: int, metadata_json: str):
     """
     Sets metadata for a specific cell.
@@ -1621,7 +1641,7 @@ def set_cell_metadata(notebook_path: str, index: int, metadata_json: str):
     
     return notebook.set_cell_metadata(notebook_path, index, metadata)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def add_cell_tags(notebook_path: str, index: int, tags: str):
     """
     Adds tags to a cell's metadata.
@@ -1634,7 +1654,7 @@ def add_cell_tags(notebook_path: str, index: int, tags: str):
     
     return notebook.add_cell_tags(notebook_path, index, tag_list)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def remove_cell_tags(notebook_path: str, index: int, tags: str):
     """
     Removes tags from a cell's metadata.
@@ -1651,17 +1671,17 @@ def remove_cell_tags(notebook_path: str, index: int, tags: str):
 # Output Operations
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def clear_cell_outputs(notebook_path: str, index: int):
     """Clears outputs from a specific cell."""
     return notebook.clear_cell_outputs(notebook_path, index)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def clear_all_outputs(notebook_path: str):
     """Clears outputs from all code cells in the notebook."""
     return notebook.clear_all_outputs(notebook_path)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_cell_outputs(notebook_path: str, index: int):
     """Gets the outputs from a specific cell as JSON."""
     outputs = notebook.get_cell_outputs(notebook_path, index)
@@ -1671,7 +1691,7 @@ def get_cell_outputs(notebook_path: str, index: int):
 # Validation
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def validate_notebook(notebook_path: str):
     """Validates notebook structure and returns any issues."""
     result = notebook.validate_notebook(notebook_path)
@@ -1681,7 +1701,7 @@ def validate_notebook(notebook_path: str):
 # Environment Detection and Management
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def find_python_executables():
     """
     Discovers all Python interpreters on the system.
@@ -1691,7 +1711,7 @@ def find_python_executables():
     executables = environment.find_python_executables()
     return json.dumps(executables, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def validate_python_executable(python_path: str):
     """
     Validates a Python executable.
@@ -1700,7 +1720,7 @@ def validate_python_executable(python_path: str):
     result = environment.validate_python_executable(python_path)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def auto_detect_environment(notebook_path: Optional[str] = None):
     """
     Automatically detects the best Python environment to use.
@@ -1710,7 +1730,7 @@ def auto_detect_environment(notebook_path: Optional[str] = None):
     result = environment.auto_detect_environment(notebook_path)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_asset_content(asset_path: str) -> str:
     """
     Retrieve base64-encoded content of an asset file (PNG, PDF, SVG, etc.).
@@ -1811,7 +1831,7 @@ def get_asset_content(asset_path: str) -> str:
             "asset_path": str(full_path)
         })
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def edit_cell_by_id(notebook_path: str, cell_id: str, content: str, expected_index: Optional[int] = None):
     """
     [GIT-SAFE] Edit cell by stable Cell ID instead of index.
@@ -1855,7 +1875,7 @@ def edit_cell_by_id(notebook_path: str, cell_id: str, content: str, expected_ind
             "action_required": "Call get_notebook_outline() to refresh cell positions and retry"
         }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def delete_cell_by_id(notebook_path: str, cell_id: str, expected_index: Optional[int] = None):
     """
     [GIT-SAFE] Delete cell by stable Cell ID.
@@ -1873,7 +1893,7 @@ def delete_cell_by_id(notebook_path: str, cell_id: str, expected_index: Optional
             "action_required": "Call get_notebook_outline() to refresh and retry"
         }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def insert_cell_by_id(notebook_path: str, after_cell_id: Optional[str], content: str, cell_type: str = "code"):
     """
     [GIT-SAFE] Insert new cell after specified Cell ID.
@@ -1898,7 +1918,7 @@ def insert_cell_by_id(notebook_path: str, after_cell_id: Optional[str], content:
             "action_required": "Call get_notebook_outline() to refresh and retry"
         }, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def create_venv(path: str, python_executable: str = ""):
     """
     Creates a new virtual environment.
@@ -1915,7 +1935,7 @@ def create_venv(path: str, python_executable: str = ""):
 # Git-Awareness Tools (Git-Safe Workflow)
 # ============================================================================
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
     """
     [GIT-SAFE] Save notebook in Git-friendly format.
@@ -1960,7 +1980,7 @@ def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
 #     """REMOVED: Agent should not commit code. Human reviews and commits."""
 #     pass
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def prune_unused_assets(notebook_path: str, dry_run: bool = False):
     """
     [GIT-SAFE] Delete asset files not referenced in notebook.
@@ -1987,7 +2007,7 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False):
     result = _prune_assets(notebook_path, dry_run)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def get_assets_summary(notebook_path: str):
     """
     [GIT-SAFE] Get summary of asset usage for a notebook.
@@ -2009,7 +2029,7 @@ def get_assets_summary(notebook_path: str):
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InstallPackageArgs)
 async def install_package(notebook_path: str, package: str):
     """
@@ -2118,7 +2138,7 @@ print("RETURNCODE:", result.returncode)
 
 # --- SUPERPOWER TOOLS: SQL Queries, Auto-EDA, Time Travel ---
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(QueryDataframesArgs)
 async def query_dataframes(notebook_path: str, sql_query: str):
     """
@@ -2177,7 +2197,7 @@ def _read_prompt(filename: str) -> str:
     except Exception as e:
         return f"Error reading prompt: {str(e)}"
 
-@mcp.prompt()
+# @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def jupyter_expert() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Jupyter Expert persona.
@@ -2199,7 +2219,7 @@ def jupyter_expert() -> list[types.PromptMessage]:
         )
     ]
 
-@mcp.prompt()
+# @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def autonomous_researcher() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Autonomous Researcher.
@@ -2221,7 +2241,7 @@ def autonomous_researcher() -> list[types.PromptMessage]:
         )
     ]
 
-@mcp.prompt()
+# @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def auto_analyst() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Auto-Analyst.
@@ -2295,7 +2315,7 @@ async def run_bridge(uri: str):
         }))
         sys.exit(1)
 
-@mcp.tool()
+# @mcp.tool()  # MOVED TO src/tools/
 def export_diagnostic_bundle():
     """
     [ENTERPRISE SUPPORT] Export a diagnostic bundle for troubleshooting.

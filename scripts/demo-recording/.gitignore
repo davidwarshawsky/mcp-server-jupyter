@@ -1,0 +1,7 @@
+# Demo recordings output
+demo-recordings/
+!demo-recordings/.gitkeep
+
+# Playwright artifacts
+test-results/
+playwright-report/

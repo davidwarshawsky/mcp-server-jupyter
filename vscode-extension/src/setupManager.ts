@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn } from 'child_process';
+import { getProxyAwareEnv } from './envUtils';
 
 export class SetupManager {
   constructor(private context: vscode.ExtensionContext) {}
@@ -194,11 +195,13 @@ export class SetupManager {
   /**
    * [FRICTION FIX #3] Run pip command silently in background
    * No scary terminal output for non-developers
+   * [DUH FIX #3] Inherits proxy settings for corporate environments
    */
   private runPipCommand(pythonExe: string, args: string[]): Promise<string> {
     return new Promise((resolve, reject) => {
       const proc = spawn(pythonExe, ['-m', 'pip', ...args], {
-        stdio: ['pipe', 'pipe', 'pipe']
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env: getProxyAwareEnv()  // [DUH FIX #3] Inherit proxy for corporate networks
       });
       
       let stdout = '';
@@ -221,7 +224,10 @@ export class SetupManager {
 
   private runShellCommand(command: string, args: string[]): Promise<void> {
     return new Promise((resolve, reject) => {
-      const proc = spawn(command, args, { stdio: 'ignore' });
+      const proc = spawn(command, args, { 
+        stdio: 'ignore',
+        env: getProxyAwareEnv()  // [DUH FIX #3] Inherit proxy
+      });
       proc.on('close', (code) => (code === 0 ? resolve() : reject(new Error(`Exit code ${code}`))));
       proc.on('error', (err) => reject(err));
     });

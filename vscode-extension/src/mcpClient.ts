@@ -8,6 +8,7 @@ import WebSocket from 'ws';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 import { trace, context } from '@opentelemetry/api';
 import { ErrorClassifier } from './errorClassifier';
+import { getProxyAwareEnv, logProxyConfig } from './envUtils';
 
 export class McpClient {
   private process?: ChildProcess;
@@ -129,11 +130,15 @@ export class McpClient {
 
         const spawnOptions: any = {
           stdio: ['pipe', 'pipe', 'pipe'],
+          env: getProxyAwareEnv(),  // [DUH FIX #3] Inherit proxy settings for corporate environments
         };
         
         if (serverPath) {
              spawnOptions.cwd = serverPath;
         }
+        
+        // Log proxy config for debugging
+        logProxyConfig(this.outputChannel);
 
         // Spawn server with port 0 so OS assigns a free port, then read actual port from stderr [MCP_PORT]: 45231
         // NEW: Idle timeout (seconds) default to 600 (10 minutes) to avoid zombie processes if VS Code crashes
@@ -464,6 +469,50 @@ export class McpClient {
     }
 
     this.rejectAllPending(new Error('MCP server stopped'));
+  }
+
+  /**
+   * [DUH FIX #4] Force kill the MCP server process immediately
+   * 
+   * Sends SIGKILL (cannot be caught) to terminate the process.
+   * Used for emergency stops when SIGINT/SIGTERM don't work.
+   */
+  async forceKill(): Promise<void> {
+    this.isShuttingDown = true;
+    this.autoRestart = false;
+    
+    // Close WebSocket immediately
+    if (this.ws) {
+      try {
+        this.ws.terminate(); // Immediate close, no handshake
+      } catch {
+        // Ignore errors during force close
+      }
+      this.ws = undefined;
+    }
+    
+    // Force kill process with SIGKILL
+    if (this.process) {
+      try {
+        // First try SIGTERM
+        this.process.kill('SIGTERM');
+        
+        // Wait 500ms, then SIGKILL if still running
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
+        if (this.process && !this.process.killed) {
+          this.process.kill('SIGKILL');
+        }
+      } catch {
+        // Ignore errors - process may already be dead
+      }
+      this.process = undefined;
+    }
+    
+    // Reject all pending requests
+    this.rejectAllPending(new Error('MCP server force killed'));
+    
+    this.outputChannel.appendLine('[FORCE KILL] Server terminated');
   }
 
   /**
@@ -1422,7 +1471,8 @@ export class McpClient {
 
     // When packaged, Python server is bundled in extension root at python_server/
     // When in development, look for sibling directory
-    const extensionPath = path.dirname(__dirname);  // out/ -> vscode-extension/
+    // __dirname is out/src/, so we need to go up twice to get to extension root
+    const extensionPath = path.dirname(path.dirname(__dirname));  // out/src/ -> out/ -> extension root
     
     // Try bundled location first (production)
     const bundledPath = path.join(extensionPath, 'python_server');

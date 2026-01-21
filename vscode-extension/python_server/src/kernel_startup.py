@@ -41,16 +41,34 @@ def _mcp_inspect(var_name):
 
         elif is_pd_df:
             output.append(f"- Shape: {obj.shape}")
-            output.append(f"- Columns: {list(obj.columns)}")
+            n_cols = len(obj.columns)
+            
+            # [DUH FIX #5] Smart schema for wide DataFrames
+            if n_cols <= 50:
+                output.append(f"- Columns: {list(obj.columns)}")
+            else:
+                # Wide DataFrame - show summary instead of all 5000 columns
+                output.append(f"- Columns: ({n_cols} total - too many to list)")
+                output.append(f"  First 10: {list(obj.columns[:10])}")
+                output.append(f"  Last 10: {list(obj.columns[-10:])}")
+                # Group by dtype for quick overview
+                dtype_counts = obj.dtypes.value_counts().to_dict()
+                output.append(f"  By dtype: {dict(dtype_counts)}")
+                output.append("  💡 Use search_dataframe_columns(df_name, 'pattern') to find specific columns")
+            
             output.append("\\n#### Head (3 rows):")
-            # to_markdown requires tabulate, fallback to string if fails
+            # For wide DFs, only show first 10 columns in preview
+            preview_df = obj.head(3)
+            if n_cols > 10:
+                preview_df = preview_df.iloc[:, :10]
+                output.append(f"(Showing first 10 of {n_cols} columns)")
             try:
                 import io
                 md_buf = io.StringIO()
-                obj.head(3).to_markdown(buf=md_buf, index=False)
+                preview_df.to_markdown(buf=md_buf, index=False)
                 output.append(md_buf.getvalue())
             except:
-                output.append(str(obj.head(3)))
+                output.append(str(preview_df))
             
         elif is_pd_series:
             output.append(f"- Length: {len(obj)}")
@@ -84,6 +102,51 @@ def _mcp_inspect(var_name):
         return "\\n".join(output)
     except Exception as e:
         return f"Error inspecting {var_name}: {str(e)}"
+
+def _mcp_search_columns(df_name, pattern):
+    '''
+    [DUH FIX #5] Search DataFrame columns by regex pattern.
+    
+    For wide DataFrames (5000+ columns like genomics data),
+    this lets the agent find specific columns without hallucinating.
+    '''
+    import sys
+    import re
+    
+    ns = globals()
+    if df_name not in ns:
+        return f"DataFrame '{df_name}' not found."
+    
+    df = ns[df_name]
+    
+    if 'pandas' not in sys.modules:
+        return "pandas not available"
+    
+    pd = sys.modules['pandas']
+    if not isinstance(df, pd.DataFrame):
+        return f"'{df_name}' is not a DataFrame (type: {type(df).__name__})"
+    
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+        matches = [col for col in df.columns if regex.search(str(col))]
+        
+        if not matches:
+            return f"No columns matching '{pattern}' in {df_name} ({len(df.columns)} columns)"
+        
+        result = [f"### Columns matching '{pattern}' in {df_name}"]
+        result.append(f"Found {len(matches)} matches:")
+        
+        # Show matches with their dtype
+        for col in matches[:50]:  # Limit to 50 results
+            dtype = str(df[col].dtype)
+            result.append(f"- `{col}` ({dtype})")
+        
+        if len(matches) > 50:
+            result.append(f"... and {len(matches) - 50} more")
+        
+        return "\\n".join(result)
+    except Exception as e:
+        return f"Error searching columns: {str(e)}"
 """
 
 # [DS UX FIX] %%duckdb and %%sql Magic Commands

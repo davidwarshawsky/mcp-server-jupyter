@@ -147,7 +147,7 @@ async function recordDemo(config: DemoConfig): Promise<void> {
   }
 
   const browser: Browser = await chromium.launch({
-    headless: false,  // Set to true for CI/CD
+    headless: true,  // Set to true for CI/CD or WSL
     slowMo: 50  // Slightly slow down for visibility
   });
 
@@ -164,7 +164,7 @@ async function recordDemo(config: DemoConfig): Promise<void> {
   try {
     // Navigate to code-server
     console.log('🌐 Opening code-server...');
-    await page.goto('http://127.0.0.1:8080');
+    await page.goto('http://127.0.0.1:9091');
     await page.waitForLoadState('networkidle');
 
     // Open demo notebook
@@ -244,7 +244,7 @@ async function main() {
   
   // Check if code-server is running
   console.log('⚠️  Prerequisite: code-server must be running');
-  console.log('   Run: code-server --bind-addr 127.0.0.1:8080 --auth none .');
+  console.log('   Run: VSCODE_IPC_HOOK_CLI= code-server --bind-addr 127.0.0.1:9091 --auth none .');
   console.log('');
   
   const demos = [zeroFrictionDemo, duckdbMagicDemo, autoEdaDemo, sqlDemo];
@@ -266,5 +266,3 @@ async function main() {
 if (require.main === module) {
   main().catch(console.error);
 }
-
-export { recordDemo, DemoConfig };

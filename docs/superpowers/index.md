@@ -1,16 +1,24 @@
 # Superpowers Overview
 
-MCP Jupyter Server includes three **Superpower Features** that transform Jupyter from a basic notebook into a data science power tool.
+MCP Jupyter Server includes powerful features that transform Jupyter from a basic notebook into a data science power tool.
 
 <div class="grid cards" markdown>
 
--   :material-database:{ .lg .middle } __DuckDB SQL__
+-   :material-database:{ .lg .middle } __SQL Magic (%%duckdb)__
 
     ---
 
-    Query DataFrames with SQL. Zero-copy in-memory analytics. 10x easier than pandas.
+    Write native SQL in notebook cells. Query DataFrames with zero-copy in-memory analytics.
 
-    [:octicons-arrow-right-24: Learn SQL Queries](sql.md)
+    [:octicons-arrow-right-24: SQL Magic Guide](sql-magic.md)
+
+-   :material-image:{ .lg .middle } __Asset Rendering__
+
+    ---
+
+    Plots appear inline automatically. Git-safe asset management with auto-cleanup.
+
+    [:octicons-arrow-right-24: Asset Rendering](asset-rendering.md)
 
 -   :material-chart-line:{ .lg .middle } __Auto-EDA__
 
