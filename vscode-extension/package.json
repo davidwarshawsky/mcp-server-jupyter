@@ -187,7 +187,7 @@
       "mcp-jupyter": [
         {
           "id": "mcpVariables",
-          "name": "Variable Dashboard",
+          "name": "Agent Context (Memory)",
           "when": "true"
         },
         {
@@ -256,6 +256,7 @@
     "vscode-notebook-renderer": "^0.0.1-security"
   },
   "dependencies": {
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "https-proxy-agent": "^7.0.2"
   }
 }

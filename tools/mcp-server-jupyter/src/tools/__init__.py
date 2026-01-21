@@ -30,6 +30,7 @@ from src.tools.sync_tools import register_sync_tools
 from src.tools.data_tools import register_data_tools
 from src.tools.diagnostic_tools import register_diagnostic_tools
 from src.tools.prompts_tools import register_prompts
+from src.tools.filesystem_tools import register_filesystem_tools
 
 
 def register_all_tools(mcp, session_manager, connection_manager):
@@ -47,3 +48,4 @@ def register_all_tools(mcp, session_manager, connection_manager):
     register_data_tools(mcp, session_manager)
     register_diagnostic_tools(mcp, session_manager)
     register_prompts(mcp)
+    register_filesystem_tools(mcp)

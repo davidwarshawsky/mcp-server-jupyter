@@ -346,7 +346,7 @@ class SessionManager:
                             # Restore session structure
                             abs_path = str(Path(nb_path).resolve())
                             # [SECURITY] Bounded queue prevents DoS from runaway executions
-                            max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '100'))
+                            max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '1000'))
                             
                             # [SMART SYNC FIX] Restore executed_indices from persisted state
                             restored_indices = set(session_data.get('executed_indices', []))
@@ -524,6 +524,7 @@ class SessionManager:
         
         abs_path = str(Path(nb_path).resolve())
         execution_timeout = timeout if timeout is not None else self.default_execution_timeout
+        container_name = None
         
         # Check for Dill (UX Fix)
         if not dill:
@@ -589,6 +590,7 @@ class SessionManager:
              
              # [FINAL PUNCH LIST #1] Inject unique UUID for 100% reliable reaping
              kernel_uuid = str(uuid.uuid4())
+             container_name = f"mcp-kernel-{kernel_uuid}"
              logger.info(f"[KERNEL] Assigning UUID (Docker): {kernel_uuid}")
              
              # Locate workspace root for proper relative imports
@@ -613,6 +615,7 @@ class SessionManager:
              cmd = [
                  'docker', 'run', 
                  '--rm',                     # Cleanup container on exit
+                 f'--name={container_name}', # Explicit name for reaper
                  '-i',                       # Interactive (keeps stdin open)
                  '--init',                   # Ensure PID 1 forwards signals to children
                  '--network', 'none',        # [SECURITY] Disable networking
@@ -730,7 +733,7 @@ class SessionManager:
         
         # Create session structure
         import time
-        max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '100'))
+        max_queue_size = int(os.environ.get('MCP_MAX_QUEUE_SIZE', '1000'))
         session_data = {
             'km': km,
             'kc': kc,
@@ -748,7 +751,8 @@ class SessionManager:
             'env_info': {
                 'python_path': py_exe,
                 'env_name': env_name,
-                'start_time': datetime.datetime.now().isoformat()
+                'start_time': datetime.datetime.now().isoformat(),
+                'container_name': container_name
             }
         }
         

@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     MCP_DEV_MODE: bool = Field(default=False, description="Development mode flag")
     
     # Security
-    MCP_STRICT_MODE: bool = Field(default=False, description="Enforce strict security policies")
+    MCP_STRICT_MODE: bool = Field(default=True, description="Enforce strict security policies")
     MCP_ALLOW_PRIVILEGE_ESCALATION: bool = Field(default=False, description="Allow SETUID/SETGID capabilities")
     
     @field_validator("LOG_LEVEL")

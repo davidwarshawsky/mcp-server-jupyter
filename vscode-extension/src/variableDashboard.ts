@@ -10,21 +10,21 @@ interface VariableInfo {
 export class VariableDashboardProvider implements vscode.TreeDataProvider<VariableItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<VariableItem | undefined | null | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-  
+
   private variables: VariableInfo[] = [];
   private currentNotebook?: string;
   private pollInterval?: NodeJS.Timeout;
   private isPolling = false;
   private suspended = false;
 
-  constructor(private mcpClient: McpClient) {}
+  constructor(private mcpClient: McpClient) { }
 
   /**
    * Start polling for variables when kernel is idle
    */
   startPolling(notebookPath: string): void {
     this.currentNotebook = notebookPath;
-    
+
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
     }
@@ -75,11 +75,22 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     if (this.mcpClient.getStatus() !== 'running') {
       return;
     }
-    
+
     // [PERFORMANCE FIX] Check if kernel is busy executing user code
     // If busy, skip this poll cycle to avoid flooding the execution queue
     // This prevents the dashboard from hanging during long-running operations like model.fit()
     try {
+      // [STATE CONTAMINATION] Check for CWD changes here
+      // We check resources first, which now includes CWD
+      const resources = await this.mcpClient.checkKernelResources(this.currentNotebook);
+
+      // Update status bar if CWD changed
+      if (resources && resources.cwd) {
+        this.updateCwdStatusBar(resources.cwd);
+      }
+
+      // We can also assume busy status from resources if implemented, 
+      // but let's stick to isKernelBusy for busy check as it is more explicit
       const busyStatus = await this.mcpClient.isKernelBusy(this.currentNotebook);
       if (busyStatus && busyStatus.is_busy) {
         // Kernel is busy, skip this poll cycle
@@ -93,7 +104,7 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     try {
       this.isPolling = true;
       const result = await this.mcpClient.getVariableManifest(this.currentNotebook);
-      
+
       if (Array.isArray(result)) {
         this.variables = result;
         this._onDidChangeTreeData.fire();
@@ -107,6 +118,35 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       }
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  // [STATE CONTAMINATION] Status bar item for CWD warnings
+  private cwdStatusBarItem: vscode.StatusBarItem | undefined;
+
+  private updateCwdStatusBar(cwd: string) {
+    if (!this.currentNotebook) return;
+
+    // Get notebook root
+    const notebookDir = vscode.Uri.file(this.currentNotebook).path.split('/').slice(0, -1).join('/');
+    // Evaluate if CWD is different from notebook dir
+    // Normalize paths for comparison (remove trailing slashes, etc)
+    // This is a naive check; realpath would be better but requires async fs
+    const normalizedCwd = cwd.replace(/\\/g, '/').replace(/\/$/, '');
+    const normalizedNbDir = notebookDir.replace(/\\/g, '/').replace(/\/$/, '');
+
+    if (normalizedCwd !== normalizedNbDir) {
+      if (!this.cwdStatusBarItem) {
+        this.cwdStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+      }
+      this.cwdStatusBarItem.text = `$(folder-opened) CWD: ${normalizedCwd.split('/').pop()}`;
+      this.cwdStatusBarItem.tooltip = `Agent changed working directory to: ${cwd}`;
+      this.cwdStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      this.cwdStatusBarItem.show();
+    } else {
+      if (this.cwdStatusBarItem) {
+        this.cwdStatusBarItem.hide();
+      }
     }
   }
 
@@ -149,20 +189,20 @@ class VariableItem extends vscode.TreeItem {
     public readonly size: string
   ) {
     super(name, vscode.TreeItemCollapsibleState.None);
-    
+
     this.description = `${type}`;
     this.tooltip = `${name}: ${type} (${size})`;
-    
+
     // Use different icons based on type
     this.iconPath = new vscode.ThemeIcon(this.getIconForType(type));
-    
+
     // Add size as context value for large objects
     this.contextValue = this.isLargeObject() ? 'largeVariable' : 'variable';
   }
 
   private getIconForType(type: string): string {
     const typeLower = type.toLowerCase();
-    
+
     if (typeLower.includes('dataframe')) return 'table';
     if (typeLower.includes('list') || typeLower.includes('array')) return 'list-unordered';
     if (typeLower.includes('dict')) return 'symbol-namespace';
@@ -172,7 +212,7 @@ class VariableItem extends vscode.TreeItem {
     if (typeLower.includes('function')) return 'symbol-function';
     if (typeLower.includes('class') || typeLower.includes('object')) return 'symbol-class';
     if (typeLower.includes('module')) return 'package';
-    
+
     return 'symbol-variable';
   }
 
@@ -180,13 +220,13 @@ class VariableItem extends vscode.TreeItem {
     // Parse size string (e.g., "2.3 MB", "128 KB")
     const match = this.size.match(/^([\d.]+)\s*([KMG]?B)/);
     if (!match) return false;
-    
+
     const value = parseFloat(match[1]);
     const unit = match[2];
-    
+
     if (unit === 'MB' && value > 10) return true;
     if (unit === 'GB') return true;
-    
+
     return false;
   }
 }

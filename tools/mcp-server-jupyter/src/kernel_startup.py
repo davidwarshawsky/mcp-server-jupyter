@@ -207,40 +207,33 @@ try:
 except Exception:
     pass
 
-# [PHASE 3.3] Force static rendering for interactive visualization libraries
-# This allows AI agents to "see" plots that would otherwise be JavaScript-based
-import os
+# [PHASE 3.3] Visualization Rendering
+# We no longer force static backends globally.
+# Agents should set renderers to PNG/SVG at the start of their session if needed.
+# Humans can enjoy interactive plots (HTML/JS).
 try:
     import matplotlib
-    matplotlib.use('Agg')  # Headless backend for matplotlib
-    # Inline backend is still useful for png display
+    # matplotlib.use('Agg')  # [DISABLED] Allow interactive backends
     try:
         get_ipython().run_line_magic('matplotlib', 'inline')
     except:
         pass
 except ImportError:
-    pass  # matplotlib not installed, skip
+    pass
 
-# Force Plotly to render as static PNG
-# NOTE: Requires kaleido installed in kernel environment: pip install kaleido
+# Plotly: Default to interactive (HTML). Agent should set os.environ['PLOTLY_RENDERER'] = 'png' if needed.
 try:
     import plotly
-    try:
-        import kaleido
-        os.environ['PLOTLY_RENDERER'] = 'png'
-    except ImportError:
-        # Kaleido not installed - Plotly will fall back to HTML output
-        # which will be sanitized to text by the asset extraction pipeline
-        pass
+    # os.environ['PLOTLY_RENDERER'] = 'png' # [DISABLED]
 except ImportError:
-    pass  # plotly not installed, skip
+    pass
 
-# Force Bokeh to use static SVG backend
+# Bokeh: Default to interactive. Agent should set os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg' if needed.
 try:
     import bokeh
-    os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg'
+    # os.environ['BOKEH_OUTPUT_BACKEND'] = 'svg' # [DISABLED]
 except ImportError:
-    pass  # bokeh not installed, skip
+    pass
 """
 
 

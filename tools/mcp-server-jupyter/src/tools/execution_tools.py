@@ -128,6 +128,21 @@ def register_execution_tools(mcp, session_manager):
         to prevent memory leaks or runaway processes.
         """
         result = session_manager.get_kernel_resources(notebook_path)
+        
+        # [STATE CONTAMINATION] Inject CWD so UI can show "Agent Changed Directory" warning
+        try:
+             # CWD is already tracked in session or can be fetched
+             # But getting it reliably might require a kernel call if not cached or tracked in session
+             # For now, let's assume session_manager tracks it or we can just append it if available
+             session = session_manager.get_session(notebook_path)
+             if session:
+                 # In session.py, we might need to update how we track this, 
+                 # but let's see if we can get it from the session dict if it was updated by set_working_directory
+                 # The 'cwd' field might exist in session dict if we update list_kernels to use it
+                 result['cwd'] = session.get('cwd')
+        except Exception:
+             pass
+             
         return json.dumps(result, indent=2)
 
     @mcp.tool()

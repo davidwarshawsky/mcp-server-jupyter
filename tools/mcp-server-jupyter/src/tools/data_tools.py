@@ -119,9 +119,22 @@ print("RETURNCODE:", result.returncode)
                 
                 # Parse output for return code
                 if 'RETURNCODE: 0' in output:
+                    # [HIDDEN DEPENDENCY TRAP] Check for requirements.txt to prompt user
+                    from pathlib import Path
+                    from src.utils import get_project_root
+                    
+                    project_root = get_project_root(Path(notebook_path).parent)
+                    req_path = project_root / "requirements.txt"
+                    requirements_found = req_path.exists()
+
                     return ToolResult(
                         success=True,
-                        data={"package": package, "output": output},
+                        data={
+                            "package": package, 
+                            "output": output, 
+                            "requires_restart": True,
+                            "requirements_path": str(req_path) if requirements_found else None
+                        },
                         user_message=f"✅ Package '{package}' installed successfully. Restart kernel if the package was already imported."
                     ).to_json()
                 else:

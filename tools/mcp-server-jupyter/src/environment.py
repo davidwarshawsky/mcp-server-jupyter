@@ -553,7 +553,7 @@ def install_package(package_name: str, python_path: str = None, env_vars: Option
     else:
         allowed_packages = set(p.strip().lower() for p in allowlist_str.split(','))
         if base_package.lower() not in allowed_packages:
-            return False, f"Package '{base_package}' is not in the allowlist. Contact IT to add it or set MCP_PACKAGE_ALLOWLIST=* to disable."
+            return False, f"Package '{base_package}' is blocked by policy. To allow this package, ask your admin to add '{base_package}' to MCP_PACKAGE_ALLOWLIST in the server config."
     
     # Use provided env vars or current environment
     run_env = env_vars if env_vars else os.environ.copy()
