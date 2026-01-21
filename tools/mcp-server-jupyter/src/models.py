@@ -128,6 +128,7 @@ class RunCellArgs(SecureBaseModel):
 class RunAllCellsArgs(SecureBaseModel):
     """Arguments for run_all_cells tool."""
     notebook_path: str = Field(..., description="Path to notebook")
+    force: bool = Field(default=False, description="Force run even if cell is tagged as frozen/expensive")
 
     @field_validator('notebook_path')
     @classmethod

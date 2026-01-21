@@ -17,6 +17,12 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
   private isPolling = false;
   private suspended = false;
 
+  // [CONTEXT AMNESIA] Warning state
+  private hasWarnedOfAmnesia = false;
+
+  // [STATE CONTAMINATION] Status bar item for CWD warnings
+  private cwdStatusBarItem: vscode.StatusBarItem | undefined;
+
   constructor(private mcpClient: McpClient) { }
 
   /**
@@ -24,6 +30,7 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
    */
   startPolling(notebookPath: string): void {
     this.currentNotebook = notebookPath;
+    this.hasWarnedOfAmnesia = false;
 
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
@@ -85,8 +92,8 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       const resources = await this.mcpClient.checkKernelResources(this.currentNotebook);
 
       // Update status bar if CWD changed
-      if (resources && resources.cwd) {
-        this.updateCwdStatusBar(resources.cwd);
+      if (resources && (resources as any).cwd) {
+        this.updateCwdStatusBar((resources as any).cwd);
       }
 
       // We can also assume busy status from resources if implemented, 
@@ -108,6 +115,14 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       if (Array.isArray(result)) {
         this.variables = result;
         this._onDidChangeTreeData.fire();
+
+        // [CONTEXT AMNESIA] Check if kernel is fresh despite notebook having history
+        if (this.variables.length === 0) {
+          this.checkContextAmnesia();
+        } else {
+          // If we have variables, we are not amnesiac
+          this.hasWarnedOfAmnesia = true; // Suppress future warnings for this session
+        }
       }
     } catch (error) {
       // Silent fail - kernel/server might not be ready yet (or connection is transiently down)
@@ -121,10 +136,37 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     }
   }
 
-  // [STATE CONTAMINATION] Status bar item for CWD warnings
-  private cwdStatusBarItem: vscode.StatusBarItem | undefined;
+  private async checkContextAmnesia(): Promise<void> {
+    if (this.hasWarnedOfAmnesia || !this.currentNotebook) return;
 
-  private updateCwdStatusBar(cwd: string) {
+    const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === this.currentNotebook);
+    if (!notebook) return;
+
+    // Check if notebook has heavily executed code cells (proxy for "history")
+    // If executionSummary is present, it means the cell was run previously (either in this session or saved from before)
+    // VS Code clears executionSummary on restart depending on settings, but usually it persists in metadata if saved.
+    // Ideally we check if executionSummary exists AND we have 0 variables.
+
+    // We only care if there are *multiple* executed cells, implying a lost session.
+    const executedCells = notebook.getCells().filter(cell =>
+      cell.kind === vscode.NotebookCellKind.Code &&
+      (cell.executionSummary?.executionOrder !== undefined || cell.outputs.length > 0)
+    );
+
+    if (executedCells.length > 0) {
+      this.hasWarnedOfAmnesia = true;
+      const selection = await vscode.window.showWarningMessage(
+        "⚠️ Context Amnesia: Kernel is fresh but notebook has execution history. Variables are lost.",
+        "Re-run All Cells", "Ignore"
+      );
+
+      if (selection === "Re-run All Cells") {
+        vscode.commands.executeCommand('notebook.execute');
+      }
+    }
+  }
+
+  private updateCwdStatusBar(cwd: string): void {
     if (!this.currentNotebook) return;
 
     // Get notebook root

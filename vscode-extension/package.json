@@ -172,6 +172,11 @@
         "command": "mcp-jupyter.refreshVariables",
         "title": "MCP Jupyter: Refresh Variables",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "mcp-jupyter.uploadToKernel",
+        "title": "MCP Jupyter: Upload to Kernel Workspace",
+        "category": "MCP Jupyter"
       }
     ],
     "viewsContainers": {
@@ -208,6 +213,13 @@
           "command": "mcp-jupyter.refreshExecutions",
           "when": "view == mcpExecutions",
           "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "mcp-jupyter.uploadToKernel",
+          "group": "mcp-jupyter",
+          "when": "!explorerResourceIsFolder"
         }
       ]
     },

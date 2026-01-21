@@ -438,7 +438,7 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                     if mime_type in data:
                         del data[mime_type]
 
-                    llm_summary.append(f"[{ext.upper()} ASSET RENDERED INLINE]")
+                    llm_summary.append(f"[{ext.upper()} ASSET SAVED TO: {save_path}]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 

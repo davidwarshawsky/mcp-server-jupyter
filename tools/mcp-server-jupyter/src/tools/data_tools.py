@@ -135,7 +135,8 @@ print("RETURNCODE:", result.returncode)
                             "requires_restart": True,
                             "requirements_path": str(req_path) if requirements_found else None
                         },
-                        user_message=f"✅ Package '{package}' installed successfully. Restart kernel if the package was already imported."
+                        # [UX] Stronger warning about Restart "Wipeout"
+                        user_message=f"✅ Package '{package}' installed successfully.\n\n⚠️ **RESTART REQUIRED**: Restarting kernel will **CLEAR ALL MEMORY** (variables, loaded data). Save intermediate results/checkpoints first if needed."
                     ).to_json()
                 else:
                     return ToolResult(

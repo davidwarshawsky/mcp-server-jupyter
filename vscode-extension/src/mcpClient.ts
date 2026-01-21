@@ -1551,6 +1551,50 @@ export class McpClient {
   }
 
   /**
+   * Upload a local file to the kernel's workspace
+   */
+  async uploadFile(notebookPath: string, localFilePath: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+
+      const filename = path.basename(localFilePath);
+      const fileContent = fs.readFileSync(localFilePath);
+      const base64Content = fileContent.toString('base64');
+
+      // Call the tool
+      const result = await this.callTool('upload_file', {
+        server_path: filename, // Upload to current working directory
+        content_base64: base64Content
+      });
+
+      // Parse result
+      let normalized: any = null;
+      if (typeof result === 'string') {
+        try {
+          normalized = JSON.parse(result);
+        } catch {
+          // fallback
+        }
+      } else {
+        normalized = result;
+      }
+
+      if (normalized) {
+        if (normalized.success) {
+          return { success: true, message: normalized.user_message || `Successfully uploaded ${filename}` };
+        } else {
+          return { success: false, message: normalized.error_msg || normalized.message || 'Upload failed' };
+        }
+      }
+      return { success: false, message: 'Invalid tool response' };
+
+    } catch (error) {
+      return { success: false, message: `Upload error: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  }
+
+  /**
    * Get output channel for display
    */
   getOutputChannel(): vscode.OutputChannel {

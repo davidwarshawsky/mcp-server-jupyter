@@ -434,6 +434,34 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       })
     );
 
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.uploadToKernel', async (uri: vscode.Uri) => {
+        if (!uri || !uri.fsPath) {
+          vscode.window.showWarningMessage('Please right-click a file to upload.');
+          return;
+        }
+
+        const activeNotebook = vscode.window.activeNotebookEditor?.notebook;
+        if (!activeNotebook) {
+          vscode.window.showWarningMessage('No active notebook. Open a notebook to set the destination kernel.');
+          return;
+        }
+
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Uploading ${path.basename(uri.fsPath)} to kernel...`,
+          cancellable: false
+        }, async () => {
+          const result = await mcpClient.uploadFile(activeNotebook.uri.fsPath, uri.fsPath);
+          if (result.success) {
+            vscode.window.showInformationMessage(result.message || 'File uploaded successfully.');
+          } else {
+            vscode.window.showErrorMessage(`Upload failed: ${result.message}`);
+          }
+        });
+      })
+    );
+
     // Show success message
     vscode.window.showInformationMessage('MCP Agent Kernel is ready!');
     console.log('MCP Agent Kernel extension activated successfully');
