@@ -73,7 +73,7 @@ metadata:
     app: mcp-jupyter
     tier: backend
 spec:
-  replicas: 3  # High availability
+  replicas: 1  # Single instance to prevent RWO split-brain
   selector:
     matchLabels:
       app: mcp-jupyter
@@ -217,7 +217,7 @@ metadata:
   name: mcp-jupyter-pdb
   namespace: mcp-jupyter
 spec:
-  minAvailable: 2
+  minAvailable: 0
   selector:
     matchLabels:
       app: mcp-jupyter
@@ -271,7 +271,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: mcp-jupyter
-  minReplicas: 3
+  minReplicas: 1
   maxReplicas: 10
   metrics:
   - type: Resource

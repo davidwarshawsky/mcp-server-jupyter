@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as net from 'net';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 import { trace, context } from '@opentelemetry/api';
 import { ErrorClassifier } from './errorClassifier';
@@ -29,13 +30,13 @@ export class McpClient {
   private _onConnectionHealthChange = new vscode.EventEmitter<{ missedHeartbeats: number; reconnectAttempt: number }>();
   public readonly onConnectionHealthChange = this._onConnectionHealthChange.event;
   private connectionState: 'connected' | 'disconnected' | 'connecting' = 'disconnected';
-  
+
   // [PHASE 3 UX POLISH] Notification throttling to prevent spam
   private notificationQueue: Array<{ method: string, params: any }> = [];
   private lastNotificationSent = 0;
   private notificationThrottleMs = 100; // Max 10 notifications per second (100ms)
   private notificationFlushTimer: NodeJS.Timeout | null = null;
-  
+
   // [WEEK 1] Connection resilience
   private reconnectAttempt = 0;
   private maxReconnectAttempts = 10;
@@ -99,12 +100,29 @@ export class McpClient {
         const remoteHost = '127.0.0.1'; // Could make this configurable too if needed
         wsUrl = `ws://${remoteHost}:${remotePort}/ws`;
         this.outputChannel.appendLine(`Connecting to existing MCP server at ${wsUrl}...`);
-        
+
+        // [TOKEN HANDSHAKE] Try to read zero-config connection file
+        try {
+          const home = os.homedir();
+          const connFile = path.join(home, '.mcp-jupyter', 'connection.json');
+          if (fs.existsSync(connFile)) {
+            const data = JSON.parse(fs.readFileSync(connFile, 'utf8'));
+            // Prefer file config if valid
+            if (data.port && data.token) {
+              wsUrl = `ws://${data.host || '127.0.0.1'}:${data.port}/ws`;
+              this.sessionToken = data.token;
+              this.outputChannel.appendLine(`[Handshake] Using configuration from ${connFile}`);
+            }
+          }
+        } catch (e) {
+          // Ignore errors, fall back to manual config
+        }
+
         // Connect directly without spawning
         // Use the same retry strategy as spawn mode to be resilient to timing races in tests
         this.outputChannel.appendLine('Connect mode: using default retry/backoff for WebSocket connection');
         await this.connectWebSocket(wsUrl);
-        
+
       } else {
         // Mode: Spawn new server (Default)
         const pythonPath = await this.findPythonExecutable();
@@ -117,24 +135,24 @@ export class McpClient {
         this.outputChannel.appendLine(`Server: ${serverPath ? serverPath : '(Installed Package)'}`);
         this.outputChannel.appendLine(`Port: (auto)`);
         this.outputChannel.appendLine(`Mode: spawn`);
-        
+
         // Validation
         const outputChannel = this.getOutputChannel();
-        const depsOK = await import('./dependencies').then(m => 
-            m.checkPythonDependencies(pythonPath, serverPath, outputChannel)
+        const depsOK = await import('./dependencies').then(m =>
+          m.checkPythonDependencies(pythonPath, serverPath, outputChannel)
         );
-        
+
         if (!depsOK) {
-            throw new Error(`Python environment ${pythonPath} missing required packages (mcp, src.main).`);
+          throw new Error(`Python environment ${pythonPath} missing required packages (mcp, src.main).`);
         }
 
         const spawnOptions: any = {
           stdio: ['pipe', 'pipe', 'pipe'],
           env: getProxyAwareEnv(),  // [DUH FIX #3] Inherit proxy settings for corporate environments
         };
-        
+
         if (serverPath) {
-             spawnOptions.cwd = serverPath;
+          spawnOptions.cwd = serverPath;
         }
         
         // Log proxy config for debugging
@@ -147,42 +165,42 @@ export class McpClient {
 
         // Create a promise that resolves when the server writes the bound port to stderr
         const portPromise: Promise<number> = new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => reject(new Error('Timed out waiting for MCP server to report port')), 5000);
+          const timeout = setTimeout(() => reject(new Error('Timed out waiting for MCP server to report port')), 5000);
 
-            const onData = (data: any) => {
-                const txt = data.toString();
-                this.outputChannel.append(`[stderr] ${txt}`);
+          const onData = (data: any) => {
+            const txt = data.toString();
+            this.outputChannel.append(`[stderr] ${txt}`);
 
-                // Look for port
-                const portMatch = txt.match(/\[MCP_PORT\]:\s*(\d+)/);
-                if (portMatch) {
-                    clearTimeout(timeout);
-                    const p = parseInt(portMatch[1], 10);
-                    // Don't remove the listener yet, we still need the auth token
-                    resolve(p);
-                }
+            // Look for port
+            const portMatch = txt.match(/\[MCP_PORT\]:\s*(\d+)/);
+            if (portMatch) {
+              clearTimeout(timeout);
+              const p = parseInt(portMatch[1], 10);
+              // Don't remove the listener yet, we still need the auth token
+              resolve(p);
+            }
 
-                // [IIRB P0 FIX #4] Look for host (for remote dev environments)
-                const hostMatch = txt.match(/\[MCP_HOST\]:\s*([\w\.\-]+)/);
-                if (hostMatch) {
-                    this.parsedHost = hostMatch[1].trim();
-                    this.outputChannel.appendLine(`Detected server host: ${this.parsedHost}`);
-                }
+            // [IIRB P0 FIX #4] Look for host (for remote dev environments)
+            const hostMatch = txt.match(/\[MCP_HOST\]:\s*([\w\.\-]+)/);
+            if (hostMatch) {
+              this.parsedHost = hostMatch[1].trim();
+              this.outputChannel.appendLine(`Detected server host: ${this.parsedHost}`);
+            }
 
-                // Look for auth token via environment variable
-                const tokenMatch = txt.match(/\[MCP_SESSION_TOKEN\]:\s*(.*)/);
-                if (tokenMatch) {
-                    this.sessionToken = tokenMatch[1].trim();
-                    this.outputChannel.appendLine('Successfully received auth token.');
-                }
-            };
+            // Look for auth token via environment variable
+            const tokenMatch = txt.match(/\[MCP_SESSION_TOKEN\]:\s*(.*)/);
+            if (tokenMatch) {
+              this.sessionToken = tokenMatch[1].trim();
+              this.outputChannel.appendLine('Successfully received auth token.');
+            }
+          };
 
-            const proc = this.process!;
-            proc.stderr?.on('data', onData);
-            proc.on('error', (err) => {
-                clearTimeout(timeout);
-                reject(err);
-            });
+          const proc = this.process!;
+          proc.stderr?.on('data', onData);
+          proc.on('error', (err) => {
+            clearTimeout(timeout);
+            reject(err);
+          });
         });
 
         this.process.stdout?.on('data', (data) => {
@@ -219,32 +237,32 @@ export class McpClient {
 
       // Initialize MCP Protocol
       try {
-          // [HANDOFF] We must initialize to register this client session
-          const initResult = await this.sendRequest('initialize', {
-            protocolVersion: '2024-11-05',
-            capabilities: {},
-            clientInfo: { name: 'vscode-mcp-jupyter', version: '0.1.0' }
-          });
-          
-          this.sendNotification('notifications/initialized', {});
-          this.outputChannel.appendLine('MCP protocol initialized');
+        // [HANDOFF] We must initialize to register this client session
+        const initResult = await this.sendRequest('initialize', {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'vscode-mcp-jupyter', version: '0.1.0' }
+        });
+
+        this.sendNotification('notifications/initialized', {});
+        this.outputChannel.appendLine('MCP protocol initialized');
       } catch (e) {
-          this.outputChannel.appendLine(`MCP Initialization failed: ${e}`);
-          throw e;
+        this.outputChannel.appendLine(`MCP Initialization failed: ${e}`);
+        throw e;
       }
 
       // Wait for server to initialize
       await this.waitForReady();
       this.outputChannel.appendLine('MCP server ready');
       this.setConnectionState('connected');
-      
+
       // [WEEK 3] Log successful connection
       if (this.errorClassifier) {
         await this.errorClassifier.logTelemetry({ type: 'connection_success' });
       }
     } catch (error) {
       this.setConnectionState('disconnected');
-      
+
       // [WEEK 3] Classify error and log telemetry
       if (this.errorClassifier) {
         const classified = this.errorClassifier.classify(error as Error);
@@ -292,14 +310,14 @@ export class McpClient {
   private async connectWebSocket(url: string, retries = 20, delay = 500): Promise<void> {
     // [WEEK 1] Store URL for automatic reconnection
     this.lastWsUrl = url;
-    
+
     for (let i = 0; i < retries; i++) {
-        try {
-            await new Promise<void>((resolve, reject) => {
+      try {
+        await new Promise<void>((resolve, reject) => {
           // MCP WebSocket servers negotiate the 'mcp' subprotocol.
           // If we don't request it, servers may reject the upgrade or select a protocol
           // we didn't offer, causing clients (and VS Code activation) to fail.
-          
+
           // [SECURITY] Include auth token in headers if available
           const headers: { [key: string]: string } = {};
           if (this.sessionToken) {
@@ -315,103 +333,110 @@ export class McpClient {
             const spanId = trace.getSpan(activeContext)?.spanContext().spanId;
             const traceFlags = trace.getSpan(activeContext)?.spanContext().traceFlags;
             if (spanId && traceFlags !== undefined) {
-                headers['traceparent'] = `00-${traceParent}-${spanId}-0${traceFlags}`;
+              headers['traceparent'] = `00-${traceParent}-${spanId}-0${traceFlags}`;
             }
           }
 
-          this.ws = new WebSocket(url, ['mcp'], { headers });
-                
-                this.ws.on('open', async () => {
-                    this.outputChannel.appendLine('WebSocket connected');
-                    this.setConnectionState('connected');
-                    
-                    // [WEEK 1] Reset reconnection state on successful connection
-                    this.reconnectAttempt = 0;
-                    this.lastPongReceived = Date.now();
-                    this.missedHeartbeats = 0;
-                    
-                    // [WEEK 1] Start heartbeat monitoring
-                    this.startHeartbeat();
-                    
-                    // Check version compatibility
-                    try {
-                        await this.checkVersionCompatibility();
-                    } catch (error) {
-                        this.outputChannel.appendLine(`Version check warning: ${error}`);
-                        // Don't fail connection on version mismatch, just warn
-                    }
-                    
-                    // Emit an internal reconnection notification so higher-level
-                    // controllers can reconcile any active executions that may
-                    // have completed while we were disconnected.
-                    this._onNotification.fire({ method: 'internal/reconnected', params: {} });
-                    resolve();
-                });
+          // [PROXY SUPPORT] Respect VS Code HTTP proxy settings
+          const proxy = vscode.workspace.getConfiguration('http').get<string>('proxy');
+          const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+          if (proxy) {
+            this.outputChannel.appendLine(`Using proxy: ${proxy}`);
+          }
 
-                this.ws.on('error', (err) => {
-                    // Only reject if we haven't opened yet
-                    if (this.ws?.readyState !== WebSocket.OPEN) {
-                         reject(err);
-                    } else {
-                         this.outputChannel.appendLine(`WebSocket error: ${err.message}`);
-                    }
-                });
+          this.ws = new WebSocket(url, ['mcp'], { headers, agent });
 
-                this.ws.on('message', (data) => {
-                    try {
-                        const response = JSON.parse(data.toString());
-                        this.handleResponse(response);
-                    } catch (e) {
-                        this.outputChannel.appendLine(`Failed to parse WebSocket message: ${e}`);
-                    }
-                });
+          this.ws.on('open', async () => {
+            this.outputChannel.appendLine('WebSocket connected');
+            this.setConnectionState('connected');
 
-                // [WEEK 1] Handle pong for heartbeat monitoring
-                this.ws.on('pong', () => {
-                    this.lastPongReceived = Date.now();
-                    this.missedHeartbeats = 0;
-                    // Emit health change to update status bar
-                    this._onConnectionHealthChange.fire({ 
-                      missedHeartbeats: 0, 
-                      reconnectAttempt: this.reconnectAttempt 
-                    });
-                });
-                
-                this.ws.on('close', (code, reason) => {
-                     this.outputChannel.appendLine(`WebSocket closed: ${code} ${reason}`);
-                     
-                     // [WEEK 1] Stop heartbeat monitoring
-                     this.stopHeartbeat();
-                     
-                     this.ws = undefined;
-                     this.setConnectionState('disconnected');
-                     
-                     // [WEEK 1] Attempt automatic reconnection for unexpected disconnects
-                     if (!this.isShuttingDown && this.lastWsUrl) {
-                       this.outputChannel.appendLine('Connection lost. Attempting automatic reconnection...');
-                       this.attemptReconnection();
-                     } else if (!this.isShuttingDown) {
-                       // Only show notification if not auto-reconnecting
-                       vscode.window.showWarningMessage(
-                         'MCP server disconnected',
-                         'Show Logs',
-                         'Restart Server'
-                       ).then(choice => {
-                         if (choice === 'Show Logs') {
-                           this.outputChannel.show();
-                         } else if (choice === 'Restart Server') {
-                           vscode.commands.executeCommand('mcp-jupyter.restartServer');
-                         }
-                       });
-                     }
-                });
+            // [WEEK 1] Reset reconnection state on successful connection
+            this.reconnectAttempt = 0;
+            this.lastPongReceived = Date.now();
+            this.missedHeartbeats = 0;
+
+            // [WEEK 1] Start heartbeat monitoring
+            this.startHeartbeat();
+
+            // Check version compatibility
+            try {
+              await this.checkVersionCompatibility();
+            } catch (error) {
+              this.outputChannel.appendLine(`Version check warning: ${error}`);
+              // Don't fail connection on version mismatch, just warn
+            }
+
+            // Emit an internal reconnection notification so higher-level
+            // controllers can reconcile any active executions that may
+            // have completed while we were disconnected.
+            this._onNotification.fire({ method: 'internal/reconnected', params: {} });
+            resolve();
+          });
+
+          this.ws.on('error', (err) => {
+            // Only reject if we haven't opened yet
+            if (this.ws?.readyState !== WebSocket.OPEN) {
+              reject(err);
+            } else {
+              this.outputChannel.appendLine(`WebSocket error: ${err.message}`);
+            }
+          });
+
+          this.ws.on('message', (data) => {
+            try {
+              const response = JSON.parse(data.toString());
+              this.handleResponse(response);
+            } catch (e) {
+              this.outputChannel.appendLine(`Failed to parse WebSocket message: ${e}`);
+            }
+          });
+
+          // [WEEK 1] Handle pong for heartbeat monitoring
+          this.ws.on('pong', () => {
+            this.lastPongReceived = Date.now();
+            this.missedHeartbeats = 0;
+            // Emit health change to update status bar
+            this._onConnectionHealthChange.fire({
+              missedHeartbeats: 0,
+              reconnectAttempt: this.reconnectAttempt
             });
-            return; // Connected successfully
-        } catch (e) {
-            this.ws = undefined; // Cleanup failed socket
-            if (i === retries - 1) throw e;
-            await new Promise(r => setTimeout(r, delay));
-        }
+          });
+
+          this.ws.on('close', (code, reason) => {
+            this.outputChannel.appendLine(`WebSocket closed: ${code} ${reason}`);
+
+            // [WEEK 1] Stop heartbeat monitoring
+            this.stopHeartbeat();
+
+            this.ws = undefined;
+            this.setConnectionState('disconnected');
+
+            // [WEEK 1] Attempt automatic reconnection for unexpected disconnects
+            if (!this.isShuttingDown && this.lastWsUrl) {
+              this.outputChannel.appendLine('Connection lost. Attempting automatic reconnection...');
+              this.attemptReconnection();
+            } else if (!this.isShuttingDown) {
+              // Only show notification if not auto-reconnecting
+              vscode.window.showWarningMessage(
+                'MCP server disconnected',
+                'Show Logs',
+                'Restart Server'
+              ).then(choice => {
+                if (choice === 'Show Logs') {
+                  this.outputChannel.show();
+                } else if (choice === 'Restart Server') {
+                  vscode.commands.executeCommand('mcp-jupyter.restartServer');
+                }
+              });
+            }
+          });
+        });
+        return; // Connected successfully
+      } catch (e) {
+        this.ws = undefined; // Cleanup failed socket
+        if (i === retries - 1) throw e;
+        await new Promise(r => setTimeout(r, delay));
+      }
     }
   }
 
@@ -423,17 +448,17 @@ export class McpClient {
     try {
       const response = await this.callTool('get_version', {});
       const serverInfo = JSON.parse(response.content[0].text);
-      
+
       // Extension version (from package.json)
       const extensionVersion = '0.2.0'; // TODO: Read from package.json
-      
+
       // Parse versions
       const serverMajor = parseInt(serverInfo.version.split('.')[0], 10);
       const clientMajor = parseInt(extensionVersion.split('.')[0], 10);
-      
+
       this.outputChannel.appendLine(`Server version: ${serverInfo.version}`);
       this.outputChannel.appendLine(`Client version: ${extensionVersion}`);
-      
+
       if (serverMajor !== clientMajor) {
         vscode.window.showWarningMessage(
           `MCP server version mismatch: server=${serverInfo.version}, client=${extensionVersion}. ` +
@@ -459,8 +484,8 @@ export class McpClient {
     this.autoRestart = false;
 
     if (this.ws) {
-        this.ws.close();
-        this.ws = undefined;
+      this.ws.close();
+      this.ws = undefined;
     }
 
     if (this.process) {
@@ -553,12 +578,12 @@ export class McpClient {
     const result = await this.callTool('run_cell_async', params);
     // Handle both new JSON return and legacy string return
     if (typeof result === 'string') {
-        try {
-            const parsed = JSON.parse(result);
-            return parsed.task_id || result;
-        } catch {
-            return result;
-        }
+      try {
+        const parsed = JSON.parse(result);
+        return parsed.task_id || result;
+      } catch {
+        return result;
+      }
     }
     return result.task_id;
   }
@@ -591,6 +616,25 @@ export class McpClient {
     return this.callTool('is_kernel_busy', {
       notebook_path: notebookPath,
     });
+  }
+
+  /**
+   * Check kernel resources (CPU/RAM)
+   */
+  async checkKernelResources(notebookPath: string): Promise<{ cpu_percent: number; memory_mb: number }> {
+    const result = await this.callTool('check_kernel_resources', {
+      notebook_path: notebookPath,
+    });
+    // Handle potential string return
+    if (typeof result === 'string') {
+      try {
+        return JSON.parse(result);
+      } catch {
+        // Fallback
+        return { cpu_percent: 0, memory_mb: 0 };
+      }
+    }
+    return result;
   }
 
   /**
@@ -665,7 +709,7 @@ export class McpClient {
   /**
    * Fetch asset content from server as base64. Public wrapper for tools.
    */
-  public async getAssetContent(assetPath: string): Promise<{data: string}> {
+  public async getAssetContent(assetPath: string): Promise<{ data: string }> {
     const result = await this.callTool('get_asset_content', { asset_path: assetPath });
     // Tool returns wrapper or raw; normalize to object
     if (typeof result === 'string') {
@@ -692,12 +736,12 @@ export class McpClient {
    */
   async listEnvironments(): Promise<PythonEnvironment[]> {
     const result = await this.callTool('list_available_environments', {});
-    
+
     // Result might be the array directly (if server returns list) or wrapped
     if (Array.isArray(result)) {
       return result;
     }
-    
+
     // Legacy/Wrapper fallback
     return result.environments || [];
   }
@@ -824,13 +868,13 @@ export class McpClient {
    * Send a JSON-RPC notification to the MCP server
    */
   private sendNotification(method: string, params: any): void {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
-      const notification = {
-          jsonrpc: '2.0',
-          method,
-          params
-      };
-      this.ws.send(JSON.stringify(notification));
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const notification = {
+      jsonrpc: '2.0',
+      method,
+      params
+    };
+    this.ws.send(JSON.stringify(notification));
   }
 
   /**
@@ -840,82 +884,82 @@ export class McpClient {
     // --- INTEROCEPTOR: Argument Injection ---
     // Fix "Index Blindness" by injecting the VS Code buffer structure into get_notebook_outline
     if (toolName === 'get_notebook_outline' && args.notebook_path && !args.structure_override) {
-        try {
-            // Find the active notebook document
-            const nbDoc = vscode.workspace.notebookDocuments.find(
-                nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
-            );
-            
-            if (nbDoc) {
-                // Construct structure_override from the buffer
-                const structure = nbDoc.getCells().map((cell, index) => ({
-                    index: index,
-                    id: (cell.metadata as any)?.custom?.id || `buffer-${index}`,
-                    cell_type: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
-                    source: cell.document.getText(),
-                    state: (cell as any).executionSummary?.executionOrder ? 'executed' : 'fresh'
-                }));
-                
-                args.structure_override = structure;
-            }
-        } catch (e) {
-            console.error('Failed to inject structure:', e);
+      try {
+        // Find the active notebook document
+        const nbDoc = vscode.workspace.notebookDocuments.find(
+          nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
+        );
+
+        if (nbDoc) {
+          // Construct structure_override from the buffer
+          const structure = nbDoc.getCells().map((cell, index) => ({
+            index: index,
+            id: (cell.metadata as any)?.custom?.id || `buffer-${index}`,
+            cell_type: cell.kind === vscode.NotebookCellKind.Markup ? 'markdown' : 'code',
+            source: cell.document.getText(),
+            state: (cell as any).executionSummary?.executionOrder ? 'executed' : 'fresh'
+          }));
+
+          args.structure_override = structure;
         }
+      } catch (e) {
+        console.error('Failed to inject structure:', e);
+      }
     }
-    
+
     // [FIX #2] Inject buffer hashes for detect_sync_needed to prevent split-brain race condition
     if (toolName === 'detect_sync_needed' && args.notebook_path) {
-        try {
-            const nbDoc = vscode.workspace.notebookDocuments.find(
-                nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
-            );
-            
-            if (nbDoc) {
-                // Calculate SHA-256 hashes for all code cells in the buffer
-                const crypto = await import('crypto');
-                const hashes: Record<number, string> = {};
-                
-                nbDoc.getCells().forEach((cell, index) => {
-                    if (cell.kind === vscode.NotebookCellKind.Code) {
-                        const source = cell.document.getText();
-                        const hash = crypto.createHash('sha256').update(source).digest('hex');
-                        hashes[index] = hash;
-                    }
-                });
-                
-                // Inject buffer hashes as source of truth
-                args.buffer_hashes = hashes;
+      try {
+        const nbDoc = vscode.workspace.notebookDocuments.find(
+          nb => nb.uri.fsPath === vscode.Uri.file(args.notebook_path).fsPath
+        );
+
+        if (nbDoc) {
+          // Calculate SHA-256 hashes for all code cells in the buffer
+          const crypto = await import('crypto');
+          const hashes: Record<number, string> = {};
+
+          nbDoc.getCells().forEach((cell, index) => {
+            if (cell.kind === vscode.NotebookCellKind.Code) {
+              const source = cell.document.getText();
+              const hash = crypto.createHash('sha256').update(source).digest('hex');
+              hashes[index] = hash;
             }
-        } catch (e) {
-            console.error('Failed to inject buffer hashes:', e);
+          });
+
+          // Inject buffer hashes as source of truth
+          args.buffer_hashes = hashes;
         }
+      } catch (e) {
+        console.error('Failed to inject buffer hashes:', e);
+      }
     }
     // ----------------------------------------
 
     // Use general request mechanism
     return this.sendRequest('tools/call', {
-        name: toolName,
-        arguments: args
+      name: toolName,
+      arguments: args
     }).then(result => {
-        // FastMCP might wrap the result in { content: [...] }
-        if (result && result.content && Array.isArray(result.content)) {
-            // If it's a text response, extract it
-            const textContent = result.content.find((c: any) => c.type === 'text');
-            if (textContent) {
-                try {
-                     // Try to see if it's JSON inside text string
-                     return JSON.parse(textContent.text);
-                } catch {
-                     // Note: Legacy tools might return plain strings or objects
-                     // If it's not JSON, return the raw text if that's what caller expects?
-                     // Or return the original structure?
-                     // Let's assume non-JSON text output is valid for some tools.
-                     return textContent.text;
-                }
-            }
+      // FastMCP might wrap the result in { content: [...] }
+      if (result && result.content && Array.isArray(result.content)) {
+        // If it's a text response, extract it
+        const textContent = result.content.find((c: any) => c.type === 'text');
+        if (textContent) {
+          try {
+            // Try to see if it's JSON inside text string
+            return JSON.parse(textContent.text);
+          } catch {
+            // Note: Legacy tools might return plain strings or objects
+            // If it's not JSON, return the raw text if that's what caller expects?
+            // Or return the original structure?
+            // Let's assume non-JSON text output is valid for some tools.
+            return textContent.text;
+          }
         }
-        // If result is directly returned (legacy?)
-        return result; 
+      }
+      // If result is directly returned (legacy?)
+      return result;
     });
   }
 
@@ -933,7 +977,7 @@ export class McpClient {
 
     // Queue lower-priority notifications
     this.notificationQueue.push(notification);
-    
+
     // Clear existing timer if any
     if (this.notificationFlushTimer) {
       clearTimeout(this.notificationFlushTimer);
@@ -960,7 +1004,7 @@ export class McpClient {
 
     // Aggregate intermediate log lines (optional optimization)
     const toSend = this.notificationQueue.splice(0, 5); // Send up to 5 at a time
-    
+
     toSend.forEach(n => {
       this._onNotification.fire(n);
     });
@@ -982,14 +1026,14 @@ export class McpClient {
   private handleResponse(response: McpResponse): void {
     // Check for Notification
     if (response.method && (response.id === undefined || response.id === null)) {
-        this._fireNotificationThrottled({ method: response.method, params: response.params });
-        return;
+      this._fireNotificationThrottled({ method: response.method, params: response.params });
+      return;
     }
 
     // It must be a response to a request if we are here (or invalid)
     if (response.id === undefined || response.id === null) {
-        // Technically this is an error in JSON-RPC if it's not a notification
-        return; 
+      // Technically this is an error in JSON-RPC if it's not a notification
+      return;
     }
 
     const pending = this.pendingRequests.get(response.id);
@@ -1006,17 +1050,17 @@ export class McpClient {
       // INTERCEPT PROTOCOL: Check for action signals
       try {
         if (response.result && typeof response.result === 'string') {
-           try {
-              const parsed = JSON.parse(response.result);
-               if (parsed._mcp_action === 'apply_edit' && parsed.proposal) {
-                   this.handleApplyEdit(parsed.proposal);
-               }
-           } catch (e) { /* Not JSON */ }
+          try {
+            const parsed = JSON.parse(response.result);
+            if (parsed._mcp_action === 'apply_edit' && parsed.proposal) {
+              this.handleApplyEdit(parsed.proposal);
+            }
+          } catch (e) { /* Not JSON */ }
         }
       } catch (e) {
-         console.error('Error handling edit action:', e);
+        console.error('Error handling edit action:', e);
       }
-      
+
       pending.resolve(response.result);
     }
   }
@@ -1025,101 +1069,101 @@ export class McpClient {
     if (proposal.action !== 'edit_cell') return;
 
     const uri = vscode.Uri.file(proposal.notebook_path);
-    
+
     // We need to find the notebook document
     const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === uri.fsPath);
     if (!notebook) return;
 
     const cell = notebook.cellAt(proposal.index);
     if (!cell) return;
-    
+
     // Phase 2: Trust (The Diff View)
     // Instead of auto-applying, we show a diff and ask for confirmation.
-    
+
     const currentContent = cell.document.getText();
     const newContent = proposal.new_content;
-    
+
     // Create temporary files for diffing
     // We use temp files to ensure the diff editor has compatible resources
     const tempDir = os.tmpdir();
     const leftPath = path.join(tempDir, `cell_${proposal.index}_current.py`);
     const rightPath = path.join(tempDir, `cell_${proposal.index}_proposal.py`);
-    
+
     try {
-        fs.writeFileSync(leftPath, currentContent);
-        fs.writeFileSync(rightPath, newContent);
-        
-        const leftUri = vscode.Uri.file(leftPath);
-        const rightUri = vscode.Uri.file(rightPath);
-        
-        // Show Diff Editor (Background)
-        await vscode.commands.executeCommand(
-            'vscode.diff', 
-            leftUri, 
-            rightUri, 
-            `Review Agent Proposal (Cell ${proposal.index + 1})`
-        );
-        
-        // Modal Confirmation
-        const selection = await vscode.window.showInformationMessage(
-            `Agent wants to edit Cell ${proposal.index + 1}.`,
-            { modal: true, detail: "Review the changes in the diff view." },
-            'Accept Changes',
-            'Reject'
-        );
-        
-        // Close the diff editor (best effort - by reverting focus or closing active editor? Hard to do reliably via API)
-        // We will just leave it open or let the user close it.
-        
-        if (selection === 'Accept Changes') {
-            const edit = new vscode.WorkspaceEdit();
-            // Replace the cell content
-            const range = new vscode.Range(0, 0, cell.document.lineCount, 0);
-            edit.replace(cell.document.uri, range, newContent);
-            
-            // Apply the edit
-            const success = await vscode.workspace.applyEdit(edit);
-            if (success) {
-                vscode.window.showInformationMessage(`Updated Cell ${proposal.index + 1}`);
-                if (proposal.id) {
-                    this.callTool('notify_edit_result', {
-                        notebook_path: proposal.notebook_path,
-                        proposal_id: proposal.id,
-                        status: 'accepted',
-                        message: 'User accepted edit'
-                    }).catch(err => console.error('Failed to notify edit result:', err));
-                }
-            } else {
-                vscode.window.showErrorMessage('Failed to apply edit.');
-                if (proposal.id) {
-                     this.callTool('notify_edit_result', {
-                        notebook_path: proposal.notebook_path,
-                        proposal_id: proposal.id,
-                        status: 'failed',
-                        message: 'VS Code failed to apply edit'
-                    }).catch(err => console.error('Failed to notify edit result:', err));
-                }
-            }
+      fs.writeFileSync(leftPath, currentContent);
+      fs.writeFileSync(rightPath, newContent);
+
+      const leftUri = vscode.Uri.file(leftPath);
+      const rightUri = vscode.Uri.file(rightPath);
+
+      // Show Diff Editor (Background)
+      await vscode.commands.executeCommand(
+        'vscode.diff',
+        leftUri,
+        rightUri,
+        `Review Agent Proposal (Cell ${proposal.index + 1})`
+      );
+
+      // Modal Confirmation
+      const selection = await vscode.window.showInformationMessage(
+        `Agent wants to edit Cell ${proposal.index + 1}.`,
+        { modal: true, detail: "Review the changes in the diff view." },
+        'Accept Changes',
+        'Reject'
+      );
+
+      // Close the diff editor (best effort - by reverting focus or closing active editor? Hard to do reliably via API)
+      // We will just leave it open or let the user close it.
+
+      if (selection === 'Accept Changes') {
+        const edit = new vscode.WorkspaceEdit();
+        // Replace the cell content
+        const range = new vscode.Range(0, 0, cell.document.lineCount, 0);
+        edit.replace(cell.document.uri, range, newContent);
+
+        // Apply the edit
+        const success = await vscode.workspace.applyEdit(edit);
+        if (success) {
+          vscode.window.showInformationMessage(`Updated Cell ${proposal.index + 1}`);
+          if (proposal.id) {
+            this.callTool('notify_edit_result', {
+              notebook_path: proposal.notebook_path,
+              proposal_id: proposal.id,
+              status: 'accepted',
+              message: 'User accepted edit'
+            }).catch(err => console.error('Failed to notify edit result:', err));
+          }
         } else {
-             vscode.window.showInformationMessage('Edit rejected.');
-             if (proposal.id) {
-                 this.callTool('notify_edit_result', {
-                    notebook_path: proposal.notebook_path,
-                    proposal_id: proposal.id,
-                    status: 'rejected',
-                    message: 'User rejected edit'
-                }).catch(err => console.error('Failed to notify edit result:', err));
-             }
+          vscode.window.showErrorMessage('Failed to apply edit.');
+          if (proposal.id) {
+            this.callTool('notify_edit_result', {
+              notebook_path: proposal.notebook_path,
+              proposal_id: proposal.id,
+              status: 'failed',
+              message: 'VS Code failed to apply edit'
+            }).catch(err => console.error('Failed to notify edit result:', err));
+          }
         }
-        
+      } else {
+        vscode.window.showInformationMessage('Edit rejected.');
+        if (proposal.id) {
+          this.callTool('notify_edit_result', {
+            notebook_path: proposal.notebook_path,
+            proposal_id: proposal.id,
+            status: 'rejected',
+            message: 'User rejected edit'
+          }).catch(err => console.error('Failed to notify edit result:', err));
+        }
+      }
+
     } catch (e) {
-        vscode.window.showErrorMessage(`Failed to present diff: ${e}`);
+      vscode.window.showErrorMessage(`Failed to present diff: ${e}`);
     } finally {
-        // cleanup temp files after a short delay to allow editor to close
-        setTimeout(() => {
-            if (fs.existsSync(leftPath)) fs.unlinkSync(leftPath);
-            if (fs.existsSync(rightPath)) fs.unlinkSync(rightPath);
-        }, 5000); 
+      // cleanup temp files after a short delay to allow editor to close
+      setTimeout(() => {
+        if (fs.existsSync(leftPath)) fs.unlinkSync(leftPath);
+        if (fs.existsSync(rightPath)) fs.unlinkSync(rightPath);
+      }, 5000);
     }
   }
 
@@ -1130,31 +1174,31 @@ export class McpClient {
    */
   private startHeartbeat(): void {
     this.stopHeartbeat(); // Clear any existing interval
-    
+
     this.heartbeatInterval = setInterval(() => {
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         return;
       }
-      
+
       // Check if we've missed too many heartbeats
       const timeSinceLastPong = Date.now() - this.lastPongReceived;
       if (timeSinceLastPong > this.heartbeatTimeoutMs * this.maxMissedHeartbeats) {
         this.missedHeartbeats++;
         this.outputChannel.appendLine(`⚠️ Connection unstable (${this.missedHeartbeats} missed heartbeats)`);
-        
+
         // [WEEK 1] Emit health change for status bar update
-        this._onConnectionHealthChange.fire({ 
-          missedHeartbeats: this.missedHeartbeats, 
-          reconnectAttempt: this.reconnectAttempt 
+        this._onConnectionHealthChange.fire({
+          missedHeartbeats: this.missedHeartbeats,
+          reconnectAttempt: this.reconnectAttempt
         });
-        
+
         if (this.missedHeartbeats >= this.maxMissedHeartbeats) {
           this.outputChannel.appendLine('❌ Too many missed heartbeats. Closing connection.');
           this.ws.close(1000, 'Heartbeat timeout');
           return;
         }
       }
-      
+
       // Send ping
       try {
         this.ws.ping();
@@ -1163,7 +1207,7 @@ export class McpClient {
       }
     }, this.heartbeatTimeoutMs);
   }
-  
+
   /**
    * [WEEK 1] Stop heartbeat monitoring
    */
@@ -1173,7 +1217,7 @@ export class McpClient {
       this.heartbeatInterval = null;
     }
   }
-  
+
   /**
    * [WEEK 1] Attempt automatic reconnection with exponential backoff
    */
@@ -1183,9 +1227,9 @@ export class McpClient {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    
+
     this.reconnectAttempt++;
-    
+
     if (this.reconnectAttempt > this.maxReconnectAttempts) {
       this.outputChannel.appendLine(`❌ Max reconnection attempts (${this.maxReconnectAttempts}) reached`);
       vscode.window.showErrorMessage(
@@ -1202,7 +1246,7 @@ export class McpClient {
       });
       return;
     }
-    
+
     // Calculate exponential backoff delay with jitter
     const baseDelay = Math.min(
       this.baseReconnectDelay * Math.pow(2, this.reconnectAttempt - 1),
@@ -1210,29 +1254,29 @@ export class McpClient {
     );
     const jitter = Math.random() * 0.3 * baseDelay; // ±30% jitter
     const delay = baseDelay + jitter;
-    
+
     this.outputChannel.appendLine(
       `🔄 Reconnection attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts} in ${Math.round(delay)}ms...`
     );
-    
+
     // [WEEK 1] Emit health change for status bar update
-    this._onConnectionHealthChange.fire({ 
-      missedHeartbeats: this.missedHeartbeats, 
-      reconnectAttempt: this.reconnectAttempt 
+    this._onConnectionHealthChange.fire({
+      missedHeartbeats: this.missedHeartbeats,
+      reconnectAttempt: this.reconnectAttempt
     });
-    
+
     this.reconnectTimer = setTimeout(async () => {
       if (this.isShuttingDown || !this.lastWsUrl) {
         return;
       }
-      
+
       try {
         this.setConnectionState('connecting');
         const startTime = Date.now();
         await this.connectWebSocket(this.lastWsUrl, 1, 0); // Single attempt per reconnection cycle
         const duration = Date.now() - startTime;
         this.outputChannel.appendLine('✅ Reconnection successful');
-        
+
         // [WEEK 3] Log successful reconnection
         if (this.errorClassifier) {
           await this.errorClassifier.logTelemetry({
@@ -1248,7 +1292,7 @@ export class McpClient {
       }
     }, delay);
   }
-  
+
   /**
    * [WEEK 1] Get persisted execution state from workspace
    */
@@ -1257,9 +1301,9 @@ export class McpClient {
     if (!workspaceFolder) {
       return {};
     }
-    
+
     const stateFilePath = path.join(workspaceFolder.uri.fsPath, '.vscode', 'mcp-state.json');
-    
+
     try {
       if (fs.existsSync(stateFilePath)) {
         const stateData = fs.readFileSync(stateFilePath, 'utf-8');
@@ -1268,10 +1312,10 @@ export class McpClient {
     } catch (error) {
       this.outputChannel.appendLine(`Failed to load execution state: ${error}`);
     }
-    
+
     return {};
   }
-  
+
   /**
    * [WEEK 1] Save execution state to workspace
    */
@@ -1280,36 +1324,36 @@ export class McpClient {
     if (!workspaceFolder) {
       return;
     }
-    
+
     const vscodeDir = path.join(workspaceFolder.uri.fsPath, '.vscode');
     const stateFilePath = path.join(vscodeDir, 'mcp-state.json');
-    
+
     try {
       // Ensure .vscode directory exists
       if (!fs.existsSync(vscodeDir)) {
         fs.mkdirSync(vscodeDir, { recursive: true });
       }
-      
+
       // Load existing state
       const state = await this.loadExecutionState();
-      
+
       // Update with new completed cells
       state[notebookPath] = completedCellIds;
-      
+
       // Save to file
       fs.writeFileSync(stateFilePath, JSON.stringify(state, null, 2), 'utf-8');
     } catch (error) {
       this.outputChannel.appendLine(`Failed to save execution state: ${error}`);
     }
   }
-  
+
   /**
    * [WEEK 1] Public method to save execution state (called by kernel provider)
    */
   public async persistExecutionState(notebookPath: string, completedCellIds: string[]): Promise<void> {
     return this.saveExecutionState(notebookPath, completedCellIds);
   }
-  
+
   /**
    * [WEEK 1] Public method to load execution state (called by kernel provider)
    */
@@ -1392,12 +1436,12 @@ export class McpClient {
     // 1. Check for local .venv in usage workspace (convenient for dev/test)
     const serverPath = this.findServerPath();
     const venvPython = process.platform === 'win32'
-        ? path.join(serverPath, '.venv', 'Scripts', 'python.exe')
-        : path.join(serverPath, '.venv', 'bin', 'python');
-    
+      ? path.join(serverPath, '.venv', 'Scripts', 'python.exe')
+      : path.join(serverPath, '.venv', 'bin', 'python');
+
     if (require('fs').existsSync(venvPython)) {
-        this.outputChannel.appendLine(`Using local .venv Python: ${venvPython}`);
-        return venvPython;
+      this.outputChannel.appendLine(`Using local .venv Python: ${venvPython}`);
+      return venvPython;
     }
 
     // 2. Check Python extension
@@ -1405,18 +1449,18 @@ export class McpClient {
       const pythonExtension = vscode.extensions.getExtension('ms-python.python');
       if (pythonExtension) {
         if (!pythonExtension.isActive) {
-           await pythonExtension.activate();
+          await pythonExtension.activate();
         }
-        
+
         // Use the API properly
         // Note: The API shape depends on version, checking commonly available API
         // This is a simplified check
         const pythonApi = pythonExtension.exports;
         if (pythonApi.settings && pythonApi.settings.getExecutionDetails) {
-            const details = pythonApi.settings.getExecutionDetails();
-            if (details && details.execCommand && details.execCommand[0]) {
-                 return details.execCommand[0];
-            }
+          const details = pythonApi.settings.getExecutionDetails();
+          if (details && details.execCommand && details.execCommand[0]) {
+            return details.execCommand[0];
+          }
         }
       }
     } catch (e) {
@@ -1447,19 +1491,19 @@ export class McpClient {
     try {
       const { execSync } = require('child_process');
       const pythonPath = config.get<string>('pythonPath') || 'python3';
-      
+
       // Try to find the package installation location
-      const showOutput = execSync(`${pythonPath} -m pip show mcp-server-jupyter`, { 
+      const showOutput = execSync(`${pythonPath} -m pip show mcp-server-jupyter`, {
         encoding: 'utf-8',
         stdio: ['pipe', 'pipe', 'pipe']  // Suppress stderr
       });
-      
+
       // Parse Location: line from pip show output
       const match = showOutput.match(/Location:\s*(.+)/i);
       if (match && match[1]) {
         const sitePackages = match[1].trim();
         const installedPath = path.join(sitePackages, 'mcp_server_jupyter');
-        
+
         if (fs.existsSync(path.join(installedPath, 'src', 'main.py'))) {
           this.outputChannel.appendLine(`Found pip-installed server at: ${installedPath}`);
           return installedPath;
@@ -1471,24 +1515,132 @@ export class McpClient {
 
     // When packaged, Python server is bundled in extension root at python_server/
     // When in development, look for sibling directory
-    // __dirname is out/src/, so we need to go up twice to get to extension root
-    const extensionPath = path.dirname(path.dirname(__dirname));  // out/src/ -> out/ -> extension root
-    
+    const extensionPath = path.dirname(__dirname);  // out/ -> vscode-extension/
+
     // Try bundled location first (production)
     const bundledPath = path.join(extensionPath, 'python_server');
     if (require('fs').existsSync(path.join(bundledPath, 'src', 'main.py'))) {
       return bundledPath;
     }
-    
+
     // Fall back to development location
     const devPath = path.join(extensionPath, '..', 'tools', 'mcp-server-jupyter');
     if (require('fs').existsSync(path.join(devPath, 'src', 'main.py'))) {
       return devPath;
     }
-    
+
     // Fallback: Return empty string.
     // This tells start() to assume the package is installed in the python environment.
-    return ''; 
+    return '';
+  }
+
+  /**
+   * Install a package
+   */
+  async installPackage(notebookPath: string, packageSpec: string): Promise<{ success: boolean; message?: string, requires_restart?: boolean }> {
+    const result = await this.callTool('install_package', {
+      notebook_path: notebookPath,
+      package: packageSpec,
+    });
+
+    // Handle JSON result
+    // Normalize ToolResult (which comes as {success: bool, data: {...}, ...})
+    // If successful, data contains requires_restart
+    let normalized: any = null;
+
+    if (typeof result === 'string') {
+      try {
+        normalized = JSON.parse(result);
+      } catch {
+        // fallback
+      }
+    } else {
+      normalized = result;
+    }
+
+    if (normalized && typeof normalized === 'object') {
+      const data = normalized.data || {};
+
+      // [HIDDEN DEPENDENCY TRAP] Check if user wants to add to requirements.txt
+      if (normalized.success && data.requirements_path) {
+        const reqPath = data.requirements_path;
+        const pkgName = data.package || packageSpec;
+
+        // Prompt user: "Added 'pandas' to kernel. Add to requirements.txt?"
+        vscode.window.showInformationMessage(
+          `Package '${pkgName}' installed. Add to requirements.txt?`,
+          'Yes', 'No'
+        ).then(choice => {
+          if (choice === 'Yes') {
+            try {
+              // Read existing
+              const content = fs.readFileSync(reqPath, 'utf8');
+              if (!content.includes(pkgName)) {
+                // Append
+                const newContent = content.endsWith('\n') ? `${content}${pkgName}\n` : `${content}\n${pkgName}\n`;
+                fs.writeFileSync(reqPath, newContent);
+                vscode.window.showInformationMessage(`Added ${pkgName} to requirements.txt`);
+              } else {
+                vscode.window.showInformationMessage(`${pkgName} is already in requirements.txt`);
+              }
+            } catch (e) {
+              vscode.window.showErrorMessage(`Failed to update requirements.txt: ${e}`);
+            }
+          }
+        });
+      }
+
+      if (normalized.success && data.requires_restart) {
+        return { success: true, requires_restart: true, message: normalized.user_message };
+      }
+      return { success: normalized.success, message: normalized.error_msg || normalized.user_message };
+    }
+
+    return { success: false, message: 'Unknown error' };
+  }
+
+  /**
+   * Upload a local file to the kernel's workspace
+   */
+  async uploadFile(notebookPath: string, localFilePath: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const fs = require('fs');
+      const path = require('path');
+
+      const filename = path.basename(localFilePath);
+      const fileContent = fs.readFileSync(localFilePath);
+      const base64Content = fileContent.toString('base64');
+
+      // Call the tool
+      const result = await this.callTool('upload_file', {
+        server_path: filename, // Upload to current working directory
+        content_base64: base64Content
+      });
+
+      // Parse result
+      let normalized: any = null;
+      if (typeof result === 'string') {
+        try {
+          normalized = JSON.parse(result);
+        } catch {
+          // fallback
+        }
+      } else {
+        normalized = result;
+      }
+
+      if (normalized) {
+        if (normalized.success) {
+          return { success: true, message: normalized.user_message || `Successfully uploaded ${filename}` };
+        } else {
+          return { success: false, message: normalized.error_msg || normalized.message || 'Upload failed' };
+        }
+      }
+      return { success: false, message: 'Invalid tool response' };
+
+    } catch (error) {
+      return { success: false, message: `Upload error: ${error instanceof Error ? error.message : String(error)}` };
+    }
   }
 
   /**
@@ -1515,7 +1667,7 @@ export class McpClient {
       this.reconnectTimer = null;
     }
     this.stopHeartbeat();
-    
+
     this.outputChannel.dispose();
   }
 }

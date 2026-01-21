@@ -18,13 +18,13 @@ export class McpNotebookController {
   private activeExecutions = new Map<string, vscode.NotebookCellExecution>(); // taskId -> execution
   private statusBar: vscode.StatusBarItem;
   private currentEnvironment?: { name: string; path: string; type: 'venv' | 'conda' | 'global' };
-  
+
   // [WEEK 1] Track completed cells per notebook for state persistence
   private completedCells = new Map<string, Set<string>>();
 
   constructor(mcpClient: McpClient) {
     this.mcpClient = mcpClient;
-    
+
     // Subscribe to MCP notifications (Event-Driven Architecture)
     this.mcpClient.onNotification(event => this.handleNotification(event));
 
@@ -64,7 +64,7 @@ export class McpNotebookController {
     if (event.method === 'notebook/output') {
       const { exec_id, type, content } = event.params;
       const execution = this.activeExecutions.get(exec_id);
-      
+
       if (execution) {
         let output: NotebookOutput | undefined;
 
@@ -75,7 +75,7 @@ export class McpNotebookController {
         } else if (type === 'execute_result') {
           output = { output_type: 'execute_result', data: content.data, metadata: content.metadata, execution_count: content.execution_count };
           if (content.execution_count) {
-             execution.executionOrder = content.execution_count;
+            execution.executionOrder = content.execution_count;
           }
         } else if (type === 'error') {
           output = { output_type: 'error', ename: content.ename, evalue: content.evalue, traceback: content.traceback };
@@ -89,21 +89,21 @@ export class McpNotebookController {
     } else if (event.method === 'notebook/status') {
       const { exec_id, status } = event.params;
       const resolver = this.completionResolvers.get(exec_id);
-      
+
       if (resolver) {
         if (status === 'completed') {
           resolver(true);
         } else if (status === 'error' || status === 'cancelled') {
           resolver(false);
         }
-        
+
         if (status !== 'running' && status !== 'queued') {
-            this.completionResolvers.delete(exec_id);
+          this.completionResolvers.delete(exec_id);
         }
       }
     } else if (event.method === 'notebook/input_request') {
       const { notebook_path, prompt, password } = event.params;
-      
+
       // Use VS Code input box
       const value = await vscode.window.showInputBox({
         prompt: prompt || 'Input requested by kernel',
@@ -111,7 +111,7 @@ export class McpNotebookController {
         ignoreFocusOut: true,
         placeHolder: 'Enter value for input() request'
       });
-      
+
       // Submit back to kernel
       await this.mcpClient.submitInput(notebook_path, value || '');
     } else if (event.method === 'internal/reconnected') {
@@ -181,6 +181,17 @@ export class McpNotebookController {
         this.completionResolvers.set(taskId, resolve);
       });
 
+      // Start resource polling
+      const resourceTimer = setInterval(async () => {
+        try {
+          const stats = await this.mcpClient.checkKernelResources(notebook.uri.fsPath);
+          this.statusBar.text = `$(pulse) Running (CPU: ${stats.cpu_percent}%, RAM: ${Math.round(stats.memory_mb)}MB)`;
+          this.statusBar.show();
+        } catch (e) {
+          // Ignore polling errors
+        }
+      }, 5000);
+
       // Start async execution with explicit ID
       // Suspend variable polling while kernel is busy
       if (this.variableDashboard) {
@@ -201,55 +212,57 @@ export class McpNotebookController {
 
       // Wait for completion (Event-Driven) or safety timeout
       try {
-          const success = await Promise.race([completionPromise, timeoutPromise]);
-    
-          if (success) {
-             await this.addExecutionMetadata(cell, 'human', Date.now());
-             
-             // [WEEK 1] Track completed cell and persist state
-             const notebookPath = notebook.uri.fsPath;
-             if (!this.completedCells.has(notebookPath)) {
-               this.completedCells.set(notebookPath, new Set());
-             }
-             this.completedCells.get(notebookPath)!.add(`cell-${cell.index}`);
-             
-             // Persist to disk (fire-and-forget)
-             const completedCellIds = Array.from(this.completedCells.get(notebookPath)!);
-             this.mcpClient.persistExecutionState(notebookPath, completedCellIds)
-               .catch(err => console.error('Failed to persist execution state:', err));
-             
-             execution.end(true, Date.now());
-          } else {
-             execution.end(false, Date.now());
-          }
-      } catch (error) {
-          // Handle timeout or other errors
-          const msg = error instanceof Error ? error.message : String(error);
+        const success = await Promise.race([completionPromise, timeoutPromise]);
 
-          // [FIX START] Kill the zombie process on client-side timeout: send
-          // a cancel request to the server to make sure the kernel does not
-          // keep executing the timed-out task in the background.
-          try {
-            console.warn(`Execution timed out locally. Sending cancel signal for ${taskId}`);
-            // Fire-and-forget: we don't want this to block UI cleanup
-            this.mcpClient.cancelExecution(notebook.uri.fsPath, taskId).catch(e => console.error("Failed to cancel zombie task:", e));
-          } catch (e) {
-            console.error('Failed to invoke cancelExecution:', e);
-          }
-          // [FIX END]
+        if (success) {
+          await this.addExecutionMetadata(cell, 'human', Date.now());
 
-          await execution.replaceOutput([
-              new vscode.NotebookCellOutput([
-                  vscode.NotebookCellOutputItem.error({ name: 'TimeoutError', message: msg })
-              ])
-          ]);
+          // [WEEK 1] Track completed cell and persist state
+          const notebookPath = notebook.uri.fsPath;
+          if (!this.completedCells.has(notebookPath)) {
+            this.completedCells.set(notebookPath, new Set());
+          }
+          this.completedCells.get(notebookPath)!.add(`cell-${cell.index}`);
+
+          // Persist to disk (fire-and-forget)
+          const completedCellIds = Array.from(this.completedCells.get(notebookPath)!);
+          this.mcpClient.persistExecutionState(notebookPath, completedCellIds)
+            .catch(err => console.error('Failed to persist execution state:', err));
+
+          execution.end(true, Date.now());
+        } else {
           execution.end(false, Date.now());
+        }
+      } catch (error) {
+        // Handle timeout or other errors
+        const msg = error instanceof Error ? error.message : String(error);
+
+        // [FIX START] Kill the zombie process on client-side timeout: send
+        // a cancel request to the server to make sure the kernel does not
+        // keep executing the timed-out task in the background.
+        try {
+          console.warn(`Execution timed out locally. Sending cancel signal for ${taskId}`);
+          // Fire-and-forget: we don't want this to block UI cleanup
+          this.mcpClient.cancelExecution(notebook.uri.fsPath, taskId).catch(e => console.error("Failed to cancel zombie task:", e));
+        } catch (e) {
+          console.error('Failed to invoke cancelExecution:', e);
+        }
+        // [FIX END]
+
+        await execution.replaceOutput([
+          new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.error({ name: 'TimeoutError', message: msg })
+          ])
+        ]);
+        execution.end(false, Date.now());
       } finally {
-          this.completionResolvers.delete(taskId);
-          // Resume variable polling when kernel returns to idle
-          if (this.variableDashboard) {
-            this.variableDashboard.setBusy(false);
-          }
+        clearInterval(resourceTimer);
+        this.updateStatusBar(); // Reset status bar
+        this.completionResolvers.delete(taskId);
+        // Resume variable polling when kernel returns to idle
+        if (this.variableDashboard) {
+          this.variableDashboard.setBusy(false);
+        }
       }
 
     } catch (error) {
@@ -274,11 +287,11 @@ export class McpNotebookController {
    */
   private async interruptHandler(notebook: vscode.NotebookDocument): Promise<void> {
     const notebookPath = notebook.uri.fsPath;
-    
+
     try {
       // Interrupt kernel via MCP
       await this.mcpClient.cancelExecution(notebookPath);
-      
+
       // Clean up local state
       for (const [key, execution] of this.executionQueue.entries()) {
         if (key.startsWith(notebookPath)) {
@@ -287,7 +300,7 @@ export class McpNotebookController {
           this.activeTaskIds.delete(key);
         }
       }
-      
+
       vscode.window.showInformationMessage('Cell execution interrupted');
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
@@ -334,42 +347,42 @@ export class McpNotebookController {
       const syncResult = await this.mcpClient.detectSyncNeeded(notebookPath);
       let syncNeeded = false;
       let reason = '';
-      
+
       if (typeof syncResult === 'boolean') {
-          syncNeeded = syncResult;
+        syncNeeded = syncResult;
       } else if (typeof syncResult === 'string') {
-          const parsed = JSON.parse(syncResult);
-          syncNeeded = parsed.sync_needed;
-          reason = parsed.reason;
+        const parsed = JSON.parse(syncResult);
+        syncNeeded = parsed.sync_needed;
+        reason = parsed.reason;
       } else {
-          syncNeeded = syncResult.sync_needed;
-          reason = syncResult.reason;
+        syncNeeded = syncResult.sync_needed;
+        reason = syncResult.reason;
       }
-      
+
       // If no kernel is active, we don't need to ask user to sync, we just start fresh
       if (syncNeeded && reason === 'no_active_kernel') {
-          syncNeeded = false;
+        syncNeeded = false;
       }
-      
+
       if (syncNeeded) {
-         const selection = await vscode.window.showWarningMessage(
-             "Notebook State Sync Required: The Agent's kernel state is older than the disk/buffer.",
-             "Sync State Now",
-             "Ignore"
-         );
-         
-         if (selection === "Sync State Now") {
-            await vscode.window.withProgress(
-              {
-                location: vscode.ProgressLocation.Notification,
-                title: 'Syncing notebook state...',
-                cancellable: false,
-              },
-              async () => {
-                await this.mcpClient.syncStateFromDisk(notebookPath);
-              }
-            );
-         }
+        const selection = await vscode.window.showWarningMessage(
+          "Notebook State Sync Required: The Agent's kernel state is older than the disk/buffer.",
+          "Sync State Now",
+          "Ignore"
+        );
+
+        if (selection === "Sync State Now") {
+          await vscode.window.withProgress(
+            {
+              location: vscode.ProgressLocation.Notification,
+              title: 'Syncing notebook state...',
+              cancellable: false,
+            },
+            async () => {
+              await this.mcpClient.syncStateFromDisk(notebookPath);
+            }
+          );
+        }
       }
     } catch (error) {
       // Sync detection failed, but we shouldn't block startup
@@ -387,11 +400,11 @@ export class McpNotebookController {
         // Check if notebook has saved environment preference
         let venvPath: string | undefined;
         const metadata = notebook.metadata as any;
-        
+
         if (metadata && metadata['mcp-jupyter']?.environment) {
           const savedEnv = metadata['mcp-jupyter'].environment;
           venvPath = savedEnv.path;
-          
+
           // Update status bar with saved environment
           this.currentEnvironment = {
             name: savedEnv.name,
@@ -400,7 +413,7 @@ export class McpNotebookController {
           };
           this.updateStatusBar();
         }
-        
+
         await this.mcpClient.startKernel(notebookPath, venvPath);
       }
     );
@@ -419,7 +432,7 @@ export class McpNotebookController {
         if (this.variableDashboard) {
           this.variableDashboard.stopPolling();
         }
-        
+
         await this.mcpClient.stopKernel(notebookPath);
         this.notebookKernels.delete(notebookPath);
         disposable.dispose();
@@ -477,16 +490,16 @@ export class McpNotebookController {
       // Phase 2: Rich Visualization Support
       // Prioritize interactive types (Plotly, Widgets)
       if (output.data['application/vnd.plotly.v1+json']) {
-          items.push(vscode.NotebookCellOutputItem.json(
-              output.data['application/vnd.plotly.v1+json'], 
-              'application/vnd.plotly.v1+json'
-          ));
+        items.push(vscode.NotebookCellOutputItem.json(
+          output.data['application/vnd.plotly.v1+json'],
+          'application/vnd.plotly.v1+json'
+        ));
       }
       if (output.data['application/vnd.jupyter.widget-view+json']) {
-          items.push(vscode.NotebookCellOutputItem.json(
-              output.data['application/vnd.jupyter.widget-view+json'], 
-              'application/vnd.jupyter.widget-view+json'
-          ));
+        items.push(vscode.NotebookCellOutputItem.json(
+          output.data['application/vnd.jupyter.widget-view+json'],
+          'application/vnd.jupyter.widget-view+json'
+        ));
       }
 
       // Handle different MIME types
@@ -501,7 +514,7 @@ export class McpNotebookController {
             const dataStr = this.normalizeText(data);
             // NORMALIZE SLASHES: Handle Windows paths coming from Python or user input
             const dataStrNormalized = dataStr.replace(/\\/g, '/');
-            
+
             // Check if data is a file path (e.g., "assets/plot_123.png")
             if (dataStrNormalized.startsWith('assets/') || dataStrNormalized.startsWith('./assets/')) {
               try {
@@ -509,13 +522,13 @@ export class McpNotebookController {
                 let bufferPromise: Promise<Buffer> | null = null;
 
                 if (!path.isAbsolute(dataStr)) {
-                    const workspaceFolders = vscode.workspace.workspaceFolders;
-                    if (workspaceFolders && workspaceFolders.length > 0) {
-                        // Use the first workspace folder as a best-effort base
-                        const notebookDir = workspaceFolders[0].uri.fsPath;
-                        const assetPath = path.join(notebookDir, dataStrNormalized);
-                        bufferPromise = fs.promises.readFile(assetPath).then(b => Buffer.from(b));
-                    }
+                  const workspaceFolders = vscode.workspace.workspaceFolders;
+                  if (workspaceFolders && workspaceFolders.length > 0) {
+                    // Use the first workspace folder as a best-effort base
+                    const notebookDir = workspaceFolders[0].uri.fsPath;
+                    const assetPath = path.join(notebookDir, dataStrNormalized);
+                    bufferPromise = fs.promises.readFile(assetPath).then(b => Buffer.from(b));
+                  }
                 }
 
                 // If we're in connect (remote) mode, fetch the asset via the server tool
@@ -523,33 +536,33 @@ export class McpNotebookController {
                 const serverMode = config.get<string>('serverMode');
 
                 if (serverMode === 'connect') {
-                    try {
-                        const assetData = await this.mcpClient.getAssetContent(dataStrNormalized);
-                        const b64 = typeof assetData === 'string' ? JSON.parse(assetData).data : assetData.data;
-                        buffer = Buffer.from(b64, 'base64');
-                    } catch (e) {
-                        items.push(vscode.NotebookCellOutputItem.text(`Remote asset load failed: ${e}`, 'text/plain'));
-                        continue;
-                    }
+                  try {
+                    const assetData = await this.mcpClient.getAssetContent(dataStrNormalized);
+                    const b64 = typeof assetData === 'string' ? JSON.parse(assetData).data : assetData.data;
+                    buffer = Buffer.from(b64, 'base64');
+                  } catch (e) {
+                    items.push(vscode.NotebookCellOutputItem.text(`Remote asset load failed: ${e}`, 'text/plain'));
+                    continue;
+                  }
                 } else {
-                    // Local mode: either use workspace-resolved path or fallback to configured serverPath
-                    if (!bufferPromise) {
-                        const serverPath = config.get<string>('serverPath') || '';
-                        const assetPath = path.join(serverPath, dataStrNormalized);
-                        if (fs.existsSync(assetPath)) {
-                            buffer = fs.readFileSync(assetPath);
-                        } else {
-                            items.push(vscode.NotebookCellOutputItem.text(`⚠️ Asset file not found: ${dataStr}`, 'text/plain'));
-                            continue;
-                        }
+                  // Local mode: either use workspace-resolved path or fallback to configured serverPath
+                  if (!bufferPromise) {
+                    const serverPath = config.get<string>('serverPath') || '';
+                    const assetPath = path.join(serverPath, dataStrNormalized);
+                    if (fs.existsSync(assetPath)) {
+                      buffer = fs.readFileSync(assetPath);
                     } else {
-                        try {
-                            buffer = await bufferPromise;
-                        } catch (e) {
-                            items.push(vscode.NotebookCellOutputItem.text(`⚠️ Failed to load asset: ${dataStr} - ${e}`, 'text/plain'));
-                            continue;
-                        }
+                      items.push(vscode.NotebookCellOutputItem.text(`⚠️ Asset file not found: ${dataStr}`, 'text/plain'));
+                      continue;
                     }
+                  } else {
+                    try {
+                      buffer = await bufferPromise;
+                    } catch (e) {
+                      items.push(vscode.NotebookCellOutputItem.text(`⚠️ Failed to load asset: ${dataStr} - ${e}`, 'text/plain'));
+                      continue;
+                    }
+                  }
                 }
               } catch (fileError) {
                 // Failed to read file, show error
@@ -563,7 +576,7 @@ export class McpNotebookController {
               // Base64 encoded image
               buffer = Buffer.from(dataStr, 'base64');
             }
-            
+
             items.push(new vscode.NotebookCellOutputItem(buffer, mimeType));
           } else if (mimeType === 'application/json') {
             items.push(
@@ -642,18 +655,18 @@ export class McpNotebookController {
     try {
       const edit = new vscode.WorkspaceEdit();
       const metadata = { ...cell.metadata };
-      
+
       // Add mcp_execution metadata (separate from mcp_trace which is for agent executions)
       if (!metadata.mcp_execution) {
         metadata.mcp_execution = {};
       }
-      
+
       metadata.mcp_execution = {
         executed_by: executedBy,
         timestamp: new Date(timestamp).toISOString(),
         extension_version: '0.1.0'
       };
-      
+
       const cellMetadataEdit = vscode.NotebookEdit.updateCellMetadata(cell.index, metadata);
       edit.set(cell.notebook.uri, [cellMetadataEdit]);
       await vscode.workspace.applyEdit(edit);
@@ -661,19 +674,19 @@ export class McpNotebookController {
       console.error('Failed to add execution metadata:', error);
     }
   }
-  
+
   /**
    * [WEEK 1] Restore execution state from persisted storage
    */
   private async restoreExecutionState(): Promise<void> {
     try {
       const state = await this.mcpClient.restoreExecutionState();
-      
+
       // Load completed cells into memory
       for (const [notebookPath, cellIds] of Object.entries(state)) {
         this.completedCells.set(notebookPath, new Set(cellIds));
       }
-      
+
       if (Object.keys(state).length > 0) {
         console.log(`Restored execution state for ${Object.keys(state).length} notebook(s)`);
       }

@@ -2479,6 +2479,34 @@ def main():
             os.environ["MCP_SESSION_TOKEN"] = token
         print(f"[MCP_SESSION_TOKEN]: {token}", file=sys.stderr)
 
+        # [TOKEN HANDSHAKE] Persist connection info file for "Zero-Config" localhost
+        try:
+            home = Path.home()
+            config_dir = home / ".mcp-jupyter"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            conn_file = config_dir / "connection.json"
+            
+            # Write with restricted permissions (0600)
+            # Create file first to set permissions
+            if not conn_file.exists():
+                conn_file.touch(mode=0o600)
+            else:
+                 os.chmod(conn_file, 0o600)
+            
+            # Use actual port or args.port (might be 0, updated later if socket bound)
+            # We will update this again after binding the socket if port is 0
+            # But here we just write the token primarily
+            conn_info = {
+                "token": token,
+                "port": args.port,
+                "host": args.host,
+                "pid": os.getpid(),
+                "updated_at": datetime.datetime.now().isoformat()
+            }
+            conn_file.write_text(json.dumps(conn_info, indent=2))
+        except Exception as e:
+            logger.warning(f"Failed to write connection file: {e}")
+
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
         if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:
             connection_manager.set_idle_timeout(args.idle_timeout)
@@ -2597,6 +2625,17 @@ def main():
             # Print port to stderr so parent process can parse it if needed
             print(f"[MCP_PORT]: {actual_port}", file=sys.stderr)
             print(f"MCP Server listening on ws://{args.host}:{actual_port}/ws", file=sys.stderr)
+            
+            # [TOKEN HANDSHAKE] Update connection file with actual bound port
+            try:
+                home = Path.home()
+                conn_file = home / ".mcp-jupyter" / "connection.json"
+                if conn_file.exists():
+                    data = json.loads(conn_file.read_text())
+                    data['port'] = actual_port
+                    conn_file.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
             
             host = args.host if args.host != "0.0.0.0" else "localhost"
             print(f"\n🚀 MCP Server Running.")

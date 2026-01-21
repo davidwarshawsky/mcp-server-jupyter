@@ -10,21 +10,28 @@ interface VariableInfo {
 export class VariableDashboardProvider implements vscode.TreeDataProvider<VariableItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<VariableItem | undefined | null | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
-  
+
   private variables: VariableInfo[] = [];
   private currentNotebook?: string;
   private pollInterval?: NodeJS.Timeout;
   private isPolling = false;
   private suspended = false;
 
-  constructor(private mcpClient: McpClient) {}
+  // [CONTEXT AMNESIA] Warning state
+  private hasWarnedOfAmnesia = false;
+
+  // [STATE CONTAMINATION] Status bar item for CWD warnings
+  private cwdStatusBarItem: vscode.StatusBarItem | undefined;
+
+  constructor(private mcpClient: McpClient) { }
 
   /**
    * Start polling for variables when kernel is idle
    */
   startPolling(notebookPath: string): void {
     this.currentNotebook = notebookPath;
-    
+    this.hasWarnedOfAmnesia = false;
+
     if (this.pollInterval) {
       clearInterval(this.pollInterval);
     }
@@ -75,11 +82,22 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     if (this.mcpClient.getStatus() !== 'running') {
       return;
     }
-    
+
     // [PERFORMANCE FIX] Check if kernel is busy executing user code
     // If busy, skip this poll cycle to avoid flooding the execution queue
     // This prevents the dashboard from hanging during long-running operations like model.fit()
     try {
+      // [STATE CONTAMINATION] Check for CWD changes here
+      // We check resources first, which now includes CWD
+      const resources = await this.mcpClient.checkKernelResources(this.currentNotebook);
+
+      // Update status bar if CWD changed
+      if (resources && (resources as any).cwd) {
+        this.updateCwdStatusBar((resources as any).cwd);
+      }
+
+      // We can also assume busy status from resources if implemented, 
+      // but let's stick to isKernelBusy for busy check as it is more explicit
       const busyStatus = await this.mcpClient.isKernelBusy(this.currentNotebook);
       if (busyStatus && busyStatus.is_busy) {
         // Kernel is busy, skip this poll cycle
@@ -93,10 +111,18 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
     try {
       this.isPolling = true;
       const result = await this.mcpClient.getVariableManifest(this.currentNotebook);
-      
+
       if (Array.isArray(result)) {
         this.variables = result;
         this._onDidChangeTreeData.fire();
+
+        // [CONTEXT AMNESIA] Check if kernel is fresh despite notebook having history
+        if (this.variables.length === 0) {
+          this.checkContextAmnesia();
+        } else {
+          // If we have variables, we are not amnesiac
+          this.hasWarnedOfAmnesia = true; // Suppress future warnings for this session
+        }
       }
     } catch (error) {
       // Silent fail - kernel/server might not be ready yet (or connection is transiently down)
@@ -107,6 +133,62 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       }
     } finally {
       this.isPolling = false;
+    }
+  }
+
+  private async checkContextAmnesia(): Promise<void> {
+    if (this.hasWarnedOfAmnesia || !this.currentNotebook) return;
+
+    const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === this.currentNotebook);
+    if (!notebook) return;
+
+    // Check if notebook has heavily executed code cells (proxy for "history")
+    // If executionSummary is present, it means the cell was run previously (either in this session or saved from before)
+    // VS Code clears executionSummary on restart depending on settings, but usually it persists in metadata if saved.
+    // Ideally we check if executionSummary exists AND we have 0 variables.
+
+    // We only care if there are *multiple* executed cells, implying a lost session.
+    const executedCells = notebook.getCells().filter(cell =>
+      cell.kind === vscode.NotebookCellKind.Code &&
+      (cell.executionSummary?.executionOrder !== undefined || cell.outputs.length > 0)
+    );
+
+    if (executedCells.length > 0) {
+      this.hasWarnedOfAmnesia = true;
+      const selection = await vscode.window.showWarningMessage(
+        "⚠️ Context Amnesia: Kernel is fresh but notebook has execution history. Variables are lost.",
+        "Re-run All Cells", "Ignore"
+      );
+
+      if (selection === "Re-run All Cells") {
+        vscode.commands.executeCommand('notebook.execute');
+      }
+    }
+  }
+
+  private updateCwdStatusBar(cwd: string): void {
+    if (!this.currentNotebook) return;
+
+    // Get notebook root
+    const notebookDir = vscode.Uri.file(this.currentNotebook).path.split('/').slice(0, -1).join('/');
+    // Evaluate if CWD is different from notebook dir
+    // Normalize paths for comparison (remove trailing slashes, etc)
+    // This is a naive check; realpath would be better but requires async fs
+    const normalizedCwd = cwd.replace(/\\/g, '/').replace(/\/$/, '');
+    const normalizedNbDir = notebookDir.replace(/\\/g, '/').replace(/\/$/, '');
+
+    if (normalizedCwd !== normalizedNbDir) {
+      if (!this.cwdStatusBarItem) {
+        this.cwdStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+      }
+      this.cwdStatusBarItem.text = `$(folder-opened) CWD: ${normalizedCwd.split('/').pop()}`;
+      this.cwdStatusBarItem.tooltip = `Agent changed working directory to: ${cwd}`;
+      this.cwdStatusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
+      this.cwdStatusBarItem.show();
+    } else {
+      if (this.cwdStatusBarItem) {
+        this.cwdStatusBarItem.hide();
+      }
     }
   }
 
@@ -149,20 +231,20 @@ class VariableItem extends vscode.TreeItem {
     public readonly size: string
   ) {
     super(name, vscode.TreeItemCollapsibleState.None);
-    
+
     this.description = `${type}`;
     this.tooltip = `${name}: ${type} (${size})`;
-    
+
     // Use different icons based on type
     this.iconPath = new vscode.ThemeIcon(this.getIconForType(type));
-    
+
     // Add size as context value for large objects
     this.contextValue = this.isLargeObject() ? 'largeVariable' : 'variable';
   }
 
   private getIconForType(type: string): string {
     const typeLower = type.toLowerCase();
-    
+
     if (typeLower.includes('dataframe')) return 'table';
     if (typeLower.includes('list') || typeLower.includes('array')) return 'list-unordered';
     if (typeLower.includes('dict')) return 'symbol-namespace';
@@ -172,7 +254,7 @@ class VariableItem extends vscode.TreeItem {
     if (typeLower.includes('function')) return 'symbol-function';
     if (typeLower.includes('class') || typeLower.includes('object')) return 'symbol-class';
     if (typeLower.includes('module')) return 'package';
-    
+
     return 'symbol-variable';
   }
 
@@ -180,13 +262,13 @@ class VariableItem extends vscode.TreeItem {
     // Parse size string (e.g., "2.3 MB", "128 KB")
     const match = this.size.match(/^([\d.]+)\s*([KMG]?B)/);
     if (!match) return false;
-    
+
     const value = parseFloat(match[1]);
     const unit = match[2];
-    
+
     if (unit === 'MB' && value > 10) return true;
     if (unit === 'GB') return true;
-    
+
     return false;
   }
 }

@@ -83,3 +83,46 @@ def test_prlimit_injected_for_system_python(monkeypatch):
     km = manager.sessions[list(manager.sessions.keys())[0]]['km']
     assert km.kernel_cmd[0] == 'prlimit'
     assert any(arg.startswith('--as=') for arg in km.kernel_cmd)
+
+
+def test_reaper_docker_cleanup(tmp_path, monkeypatch):
+    """
+    Test that the reaper correctly invokes 'docker rm -f' for zombie containers.
+    """
+    from unittest.mock import Mock
+    from src.session import SessionManager
+    
+    # Mock subprocess.run
+    mock_run = Mock()
+    monkeypatch.setattr(subprocess, "run", mock_run)
+    
+    manager = SessionManager()
+    manager.persistence_dir = tmp_path
+    manager.state_manager.persistence_dir = tmp_path
+    
+    # Create fake session file with container_name
+    # Use a unique name to avoid conflicts
+    session_file = tmp_path / "session_docker_zombie.json"
+    with open(session_file, 'w') as f:
+        json.dump({
+            'notebook_path': '/tmp/docker_zombie.ipynb',
+            'connection_file': '/tmp/fake',
+            'pid': 12345, 
+            'server_pid': 99999999, # Dead server
+            'env_info': {'container_name': 'mcp-kernel-test-uuid'},
+            'created_at': 'now'
+        }, f)
+     
+    # Run reaper logic directly
+    manager.state_manager.reconcile_zombies()
+    
+    # Assert docker rm was called with timeout
+    mock_run.assert_called_with(
+        ["docker", "rm", "-f", "mcp-kernel-test-uuid"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=5
+    )
+    
+    # Session file should be cleaned up
+    assert not session_file.exists()

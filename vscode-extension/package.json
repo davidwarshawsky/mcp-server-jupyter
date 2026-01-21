@@ -178,6 +178,11 @@
         "title": "MCP Jupyter: Emergency Stop (Kill Kernel)",
         "category": "MCP Jupyter",
         "icon": "$(stop-circle)"
+      },
+      {
+        "command": "mcp-jupyter.uploadToKernel",
+        "title": "MCP Jupyter: Upload to Kernel Workspace",
+        "category": "MCP Jupyter"
       }
     ],
     "viewsContainers": {
@@ -193,7 +198,7 @@
       "mcp-jupyter": [
         {
           "id": "mcpVariables",
-          "name": "Variable Dashboard",
+          "name": "Agent Context (Memory)",
           "when": "true"
         },
         {
@@ -214,6 +219,13 @@
           "command": "mcp-jupyter.refreshExecutions",
           "when": "view == mcpExecutions",
           "group": "navigation"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "mcp-jupyter.uploadToKernel",
+          "group": "mcp-jupyter",
+          "when": "!explorerResourceIsFolder"
         }
       ]
     },
@@ -262,6 +274,7 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "ws": "^8.19.0"
+    "ws": "^8.19.0",
+    "https-proxy-agent": "^7.0.2"
   }
 }

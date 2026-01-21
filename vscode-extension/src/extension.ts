@@ -42,7 +42,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     connectionStatusBar.command = 'mcp-jupyter.showServerLogs';
     connectionStatusBar.tooltip = 'MCP Server Connection Status (click to view logs)';
     context.subscriptions.push(connectionStatusBar);
-    
+
     // Subscribe to connection state changes
     mcpClient.onConnectionStateChange((state) => {
       switch (state) {
@@ -64,7 +64,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       }
       connectionStatusBar.show();
     });
-    
+
     // [WEEK 1] Subscribe to connection health changes (heartbeat & reconnection)
     mcpClient.onConnectionHealthChange((health) => {
       if (health.missedHeartbeats > 0) {
@@ -83,19 +83,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       }
       connectionStatusBar.show();
     });
-    
+
     // Setup manager for managed environment (First-Run flow)
     setupManager = new SetupManager(context);
-    
+
     // [WEEK 2] Quick Start wizard for one-click setup
     quickStartWizard = new QuickStartWizard(context, setupManager, mcpClient);
     quickStartWizard.showIfNeeded();
     context.subscriptions.push(quickStartWizard);
-    
+
     // [WEEK 2] Health check dashboard
     healthCheckDashboard = new HealthCheckDashboard(mcpClient);
     context.subscriptions.push(healthCheckDashboard);
-    
+
     // [WEEK 4] Execution view provider
     executionViewProvider = new ExecutionViewProvider(mcpClient);
     const executionView = vscode.window.createTreeView('mcpExecutions', {
@@ -104,7 +104,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     });
     context.subscriptions.push(executionView);
     context.subscriptions.push(executionViewProvider);
-    
+
     // [WEEK 4] Audit log viewer
     auditLogViewer = new AuditLogViewer(mcpClient);
     context.subscriptions.push(auditLogViewer);
@@ -117,7 +117,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');
       }, 500);
     }
-    
+
     // Get auto-restart setting
     const config = vscode.workspace.getConfiguration('mcp-jupyter');
     const autoRestart = config.get<boolean>('autoRestart', true);
@@ -232,7 +232,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
     // Setup file watcher for notebook changes
     const notebookWatcher = vscode.workspace.createFileSystemWatcher('**/*.ipynb');
-    
+
     notebookWatcher.onDidChange(async (uri) => {
       // Check if this notebook has an active kernel
       const notebook = vscode.workspace.notebookDocuments.find(nb => nb.uri.fsPath === uri.fsPath);
@@ -260,6 +260,57 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
 
     context.subscriptions.push(notebookWatcher);
 
+    // [METADATA HYGIENE] Strip noisy MCP metadata before saving to disk
+    // This prevents "Git Killer" diff bloat from timestamps/trace IDs.
+    context.subscriptions.push(
+      vscode.workspace.onWillSaveNotebookDocument(event => {
+        if (event.notebook.notebookType !== 'jupyter-notebook') {
+          return;
+        }
+
+        const edit = new vscode.WorkspaceEdit();
+        let hasChanges = false;
+
+        // 1. Strip Notebook-level metadata
+        if (event.notebook.metadata.mcp_trace || event.notebook.metadata.mcp_execution) {
+          const newMetadata = { ...event.notebook.metadata };
+          delete newMetadata.mcp_trace;
+          // We might want to keep clean mcp_execution for provenance, but strip noisy parts?
+          // For now, let's assume strict hygiene.
+          delete newMetadata.mcp_execution;
+
+          edit.set(event.notebook.uri, [
+            vscode.NotebookEdit.updateNotebookMetadata(newMetadata)
+          ]);
+          hasChanges = true;
+        }
+
+        // 2. Strip Cell-level metadata
+        event.notebook.getCells().forEach(cell => {
+          if (cell.metadata.mcp_trace || cell.metadata.mcp_execution) {
+            const newMetadata = { ...cell.metadata };
+            delete newMetadata.mcp_trace;
+
+            // Strip timestamps from execution metadata to prevent diff noise, 
+            // but keep 'executed_by' for "Ghost Hunter" features?
+            // User request says: "Automatically strip metadata.mcp_trace fields... mcp_execution... timestamp... updates... noisy hellscapes"
+            if (newMetadata.mcp_execution) {
+              // Just delete the whole thing for now as per "Metadata Bloat" request
+              delete newMetadata.mcp_execution;
+            }
+
+            const cellEdit = vscode.NotebookEdit.updateCellMetadata(cell.index, newMetadata);
+            edit.set(event.notebook.uri, [cellEdit]);
+            hasChanges = true;
+          }
+        });
+
+        if (hasChanges) {
+          event.waitUntil(Promise.resolve(edit));
+        }
+      })
+    );
+
     // Register commands
     // [WEEK 2] Quick Start command - one-click setup
     context.subscriptions.push(
@@ -267,28 +318,28 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
         await quickStartWizard.run();
       })
     );
-    
+
     // [WEEK 2] Health check dashboard command
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.showHealthCheck', () => {
         healthCheckDashboard.show();
       })
     );
-    
+
     // [WEEK 4] Audit log viewer command
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.showAuditLog', async () => {
         await auditLogViewer.show();
       })
     );
-    
+
     // [WEEK 4] Refresh executions command
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.refreshExecutions', () => {
         executionViewProvider.refresh();
       })
     );
-    
+
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.openWalkthrough', async () => {
         await vscode.commands.executeCommand('workbench.action.openWalkthrough', 'warshawsky-research.mcp-agent-kernel#mcp-jupyter-setup');
@@ -342,7 +393,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
           await vscode.window.withProgress({ title: 'Testing MCP server connection...', location: vscode.ProgressLocation.Notification }, async () => {
             // Restart server to ensure config changes take effect
             if (mcpClient.getStatus() !== 'stopped') {
-              try { await mcpClient.stop(); } catch {}
+              try { await mcpClient.stop(); } catch { }
             }
             await mcpClient.start();
           });
@@ -390,10 +441,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       })
     );
 
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.uploadToKernel', async (uri: vscode.Uri) => {
+        if (!uri || !uri.fsPath) {
+          vscode.window.showWarningMessage('Please right-click a file to upload.');
+          return;
+        }
+
+        const activeNotebook = vscode.window.activeNotebookEditor?.notebook;
+        if (!activeNotebook) {
+          vscode.window.showWarningMessage('No active notebook. Open a notebook to set the destination kernel.');
+          return;
+        }
+
+        await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Uploading ${path.basename(uri.fsPath)} to kernel...`,
+          cancellable: false
+        }, async () => {
+          const result = await mcpClient.uploadFile(activeNotebook.uri.fsPath, uri.fsPath);
+          if (result.success) {
+            vscode.window.showInformationMessage(result.message || 'File uploaded successfully.');
+          } else {
+            vscode.window.showErrorMessage(`Upload failed: ${result.message}`);
+          }
+        });
+      })
+    );
+
     // Show success message
     vscode.window.showInformationMessage('MCP Agent Kernel is ready!');
     console.log('MCP Agent Kernel extension activated successfully');
-    
+
     return {
       mcpClient,
       notebookController,
@@ -533,7 +612,7 @@ async function selectEnvironment(): Promise<void> {
       },
       async () => {
         const notebookPath = activeNotebook.uri.fsPath;
-        
+
         // Stop current kernel
         try {
           await mcpClient.stopKernel(notebookPath);
@@ -543,14 +622,14 @@ async function selectEnvironment(): Promise<void> {
 
         // Start with new environment
         await mcpClient.startKernel(notebookPath, selected.env.path);
-        
+
         // Update status bar
         notebookController.updateEnvironment({
           name: selected.env.name,
           path: selected.env.path,
           type: selected.env.type,
         });
-        
+
         // Persist environment choice to notebook metadata
         const edit = new vscode.WorkspaceEdit();
         const metadata = { ...activeNotebook.metadata };
@@ -561,7 +640,7 @@ async function selectEnvironment(): Promise<void> {
             type: selected.env.type,
           },
         };
-        
+
         // Update notebook metadata
         edit.set(activeNotebook.uri, [
           vscode.NotebookEdit.updateNotebookMetadata(metadata)

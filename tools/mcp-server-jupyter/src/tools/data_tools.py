@@ -122,10 +122,24 @@ print("RETURNCODE:", result.returncode)
                     # [DUH FIX #1] Auto-update requirements.txt for portability
                     _update_requirements_txt(notebook_path, package)
                     
+                    # [HIDDEN DEPENDENCY TRAP] Check for requirements.txt to prompt user
+                    from pathlib import Path
+                    from src.utils import get_project_root
+                    
+                    project_root = get_project_root(Path(notebook_path).parent)
+                    req_path = project_root / "requirements.txt"
+                    requirements_found = req_path.exists()
+
                     return ToolResult(
                         success=True,
-                        data={"package": package, "output": output},
-                        user_message=f"✅ Package '{package}' installed successfully. Added to requirements.txt. Restart kernel if the package was already imported."
+                        data={
+                            "package": package, 
+                            "output": output, 
+                            "requires_restart": True,
+                            "requirements_path": str(req_path) if requirements_found else None
+                        },
+                        # [UX] Stronger warning about Restart "Wipeout"
+                        user_message=f"✅ Package '{package}' installed successfully. Added to requirements.txt.\n\n⚠️ **RESTART REQUIRED**: Restarting kernel will **CLEAR ALL MEMORY** (variables, loaded data). Save intermediate results/checkpoints first if needed."
                     ).to_json()
                 else:
                     return ToolResult(

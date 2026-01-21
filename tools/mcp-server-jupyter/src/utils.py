@@ -438,7 +438,7 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                     if mime_type in data:
                         del data[mime_type]
 
-                    llm_summary.append(f"[{ext.upper()} ASSET RENDERED INLINE]")
+                    llm_summary.append(f"[{ext.upper()} ASSET SAVED TO: {save_path}]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
@@ -512,6 +512,20 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             text = ansi_escape.sub('', text)
             
+            # [TQDM SUPPORT] Detect progress bars and format nicely
+            # Matches: 10%|###   | 10/100 or similar
+            if '\r' in text or 'it/s' in text:
+                # Capture the last progress line if multiple updates
+                lines = text.split('\r')
+                if len(lines) > 1:
+                    # Filter for tqdm-like lines (contain % or it/s)
+                    progress_lines = [l for l in lines if '%' in l or 'it/s' in l]
+                    if progress_lines:
+                        # Use the last meaningful progress update
+                        latest = progress_lines[-1].strip()
+                        if latest:
+                             text = f"[Progress]: {latest}"
+
             # [SECRET REDACTION]
             text = _redact_text(text)
             

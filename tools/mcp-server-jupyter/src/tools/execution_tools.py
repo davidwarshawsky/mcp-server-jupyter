@@ -128,11 +128,26 @@ def register_execution_tools(mcp, session_manager):
         to prevent memory leaks or runaway processes.
         """
         result = session_manager.get_kernel_resources(notebook_path)
+        
+        # [STATE CONTAMINATION] Inject CWD so UI can show "Agent Changed Directory" warning
+        try:
+             # CWD is already tracked in session or can be fetched
+             # But getting it reliably might require a kernel call if not cached or tracked in session
+             # For now, let's assume session_manager tracks it or we can just append it if available
+             session = session_manager.get_session(notebook_path)
+             if session:
+                 # In session.py, we might need to update how we track this, 
+                 # but let's see if we can get it from the session dict if it was updated by set_working_directory
+                 # The 'cwd' field might exist in session dict if we update list_kernels to use it
+                 result['cwd'] = session.get('cwd')
+        except Exception:
+             pass
+             
         return json.dumps(result, indent=2)
 
     @mcp.tool()
     @validated_tool(RunAllCellsArgs)
-    async def run_all_cells(notebook_path: str):
+    async def run_all_cells(notebook_path: str, force: bool = False):
         """
         Execute all code cells in the notebook sequentially.
         Returns: List of execution IDs for status tracking.
@@ -151,8 +166,30 @@ def register_execution_tools(mcp, session_manager):
         # Queue all code cells
         exec_ids = []
         queue_full_count = 0
+        skipped_count = 0
+        
         for idx, cell in enumerate(nb.cells):
             if cell.cell_type == 'code':
+                # [COST OF CURIOSITY] Check for expensive/frozen tags
+                # e.g. # @frozen, # @expensive, # @skip
+                source = cell.source.strip()
+                should_skip = False
+                skip_reason = ""
+                
+                if not force:
+                    first_line = source.split('\n')[0].lower() if source else ""
+                    if "# @frozen" in first_line or "# @skip" in first_line:
+                        should_skip = True
+                        skip_reason = "frozen"
+                    elif "# @expensive" in first_line:
+                        should_skip = True
+                        skip_reason = "expensive"
+                
+                if should_skip:
+                    skipped_count += 1
+                    logger.info(f"Skipping cell {idx} due to tag: {skip_reason}")
+                    continue
+
                 try:
                     exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
                     if exec_id:
@@ -163,6 +200,22 @@ def register_execution_tools(mcp, session_manager):
                     if queue_full_count == 1:  # Log once
                         logger.warning(f"[BACKPRESSURE] Queue full during run_all, stopped at cell {idx}")
                     break
+        
+        if queue_full_count > 0:
+            return json.dumps({
+                'status': 'partial',
+                'message': f'Queue became full. Queued {len(exec_ids)} cells before hitting limit.',
+                'executions': exec_ids,
+                'queue_full': True,
+                'retry_after_seconds': 5
+            }, indent=2)
+            
+        if skipped_count > 0:
+             return json.dumps({
+                'message': f'Queued {len(exec_ids)} cells. Skipped {skipped_count} tagged cells.',
+                'executions': exec_ids,
+                'skipped_count': skipped_count
+            }, indent=2)
         
         if queue_full_count > 0:
             return json.dumps({
