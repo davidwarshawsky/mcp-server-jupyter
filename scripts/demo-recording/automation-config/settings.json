@@ -13,14 +13,9 @@
     "notebook.compactView": false,
     "editor.minimap.enabled": false,
     "workbench.activityBar.visible": true,
-    "window.zoomLevel": 1, 
+    "window.zoomLevel": 1,
     "notebook.globalToolbar": true,
-    
-    // CRITICAL: Force Kernel Selection behavior
-    "jupyter.kernels.filter": [
-        {
-            "path": "/usr/bin/python3",
-            "type": "pythonEnvironment"
-        }
-    ]
+    "mcp-jupyter.pythonPath": "/usr/bin/python3",
+    "mcp-jupyter.showSetupWizard": false,
+    "mcp-jupyter.autoStart": false
 }

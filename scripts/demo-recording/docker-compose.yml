@@ -13,11 +13,13 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=UTC
-      - PASSWORD=demo123
+      # Disable authentication entirely for demo recording
+      - PASSWORD=
+      - HASHED_PASSWORD=
       - DEFAULT_WORKSPACE=/config/workspace
     volumes:
-      # Mount the settings we defined above directly into User settings
-      - ./automation-config/settings.json:/config/data/User/settings.json:ro
+      # Mount the settings - needs to be writable for VS Code
+      - ./automation-config/settings.json:/config/data/User/settings.json
       # Mount demo notebook
       - ../../demo.ipynb:/config/workspace/demo.ipynb:ro
       # Persist extensions
