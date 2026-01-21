@@ -255,8 +255,8 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.40.1",
-    "@types/mocha": "^10.x",
-    "@types/node": "^20.x",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.30",
     "@types/sinon": "^21.0.0",
     "@types/vscode": "^1.108.1",
     "@types/ws": "^8.18.1",
@@ -274,7 +274,7 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
-    "ws": "^8.19.0",
-    "https-proxy-agent": "^7.0.2"
+    "https-proxy-agent": "^7.0.2",
+    "ws": "^8.19.0"
   }
 }

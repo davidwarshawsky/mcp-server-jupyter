@@ -287,7 +287,29 @@ class KernelLifecycle:
         
         # Start the kernel
         await km.start_kernel(cwd=str(notebook_dir))
-        
+
+        # [WINDOWS PERMISSIONS FIX] Secure connection file on Windows
+        if sys.platform == 'win32':
+            try:
+                import win32api
+                import win32security
+                import ntsecuritycon as con
+
+                conn_file = km.connection_file
+                user, _, _ = win32security.LookupAccountName("", win32api.GetUserName())
+                
+                sd = win32security.GetFileSecurity(conn_file, win32security.DACL_SECURITY_INFORMATION)
+                dacl = win32security.ACL()
+                dacl.AddAccessAllowedAce(win32security.ACL_REVISION, con.FILE_GENERIC_READ | con.FILE_GENERIC_WRITE, user)
+                
+                sd.SetSecurityDescriptorDacl(1, dacl, 0)
+                win32security.SetFileSecurity(conn_file, win32security.DACL_SECURITY_INFORMATION, sd)
+                logger.info(f"Secured connection file for Windows: {conn_file}")
+            except ImportError:
+                logger.warning("pywin32 not installed. Cannot set specific file permissions on Windows for connection file.")
+            except Exception as e:
+                logger.error(f"Failed to set Windows file permissions for connection file: {e}")
+
         # Track kernel metadata
         self.active_kernels[kernel_id] = {
             'km': km,

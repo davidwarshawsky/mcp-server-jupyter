@@ -246,6 +246,45 @@ def _convert_small_html_table_to_markdown(html: str) -> Optional[str]:
     except Exception:
         return None  # Parsing failed, fall back to default behavior
 
+def _render_plotly_chart(html_content: str, asset_dir: str) -> Optional[str]:
+    """
+    Renders a Plotly HTML chart to a static PNG image.
+
+    Args:
+        html_content: The HTML content of the Plotly chart.
+        asset_dir: The directory to save the PNG file.
+
+    Returns:
+        The path to the saved PNG file, or None if rendering fails.
+    """
+    try:
+        import plotly.io as pio
+        from bs4 import BeautifulSoup
+        import json
+
+        # Find the script tag with the data
+        soup = BeautifulSoup(html_content, 'html.parser')
+        script_tag = soup.find('script', {'type': 'application/vnd.plotly.v1+json'})
+        if not script_tag:
+            return None
+
+        chart_json = json.loads(script_tag.string)
+        fig = pio.from_json(json.dumps(chart_json))
+
+        # Save to a file
+        content_hash = hashlib.sha256(html_content.encode()).hexdigest()[:16]
+        asset_filename = f"plot_{content_hash}.png"
+        asset_path = Path(asset_dir) / asset_filename
+        
+        pio.write_image(fig, str(asset_path), engine='kaleido')
+        
+        return str(asset_path)
+    except Exception as e:
+        # Log the error but don't crash
+        import logging
+        logging.getLogger(__name__).warning(f"Could not render Plotly chart to PNG: {e}")
+        return None
+
 async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
     """
     Internal async implementation of sanitize_outputs. Use the public wrapper `sanitize_outputs`
@@ -438,7 +477,12 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
                     if mime_type in data:
                         del data[mime_type]
 
-                    llm_summary.append(f"[{ext.upper()} ASSET SAVED TO: {save_path}]")
+                    # Add a specific message for matplotlib
+                    is_matplotlib = 'matplotlib' in str(metadata).lower()
+                    if is_matplotlib and ext == 'png':
+                        llm_summary.append(f"[Matplotlib plot saved to: {save_path.name}]")
+                    else:
+                        llm_summary.append(f"[{ext.upper()} ASSET SAVED TO: {save_path.name}]")
                 except Exception as e:
                     llm_summary.append(f"[Error saving {ext.upper()}: {str(e)}]")
                 
@@ -480,9 +524,16 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
             is_plotly = 'plotly' in html.lower() or 'plotly.js' in html.lower()
             is_bokeh = 'bokeh' in html.lower() or 'bkroot' in html.lower()
             
-            if is_plotly or is_bokeh:
+            if is_plotly:
+                # Attempt to render Plotly chart to static PNG
+                png_path = _render_plotly_chart(html, asset_dir)
+                if png_path:
+                    llm_summary.append(f"[PLOT RENDERED TO: {Path(png_path).name}]")
+                else:
+                    llm_summary.append("[Plotly Chart - Interactive View available in VS Code]")
+            elif is_bokeh:
                 # Chart detected
-                chart_type = 'Plotly' if is_plotly else 'Bokeh'
+                chart_type = 'Bokeh'
                 llm_summary.append(f"[{chart_type} Chart - Interactive View available in VS Code]")
             elif '<table' in html.lower():
                 # IMPROVEMENT: Show small tables inline, hide large ones

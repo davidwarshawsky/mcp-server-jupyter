@@ -5,7 +5,18 @@ import * as os from 'os';
 import * as net from 'net';
 import * as vscode from 'vscode';
 import WebSocket from 'ws';
-import { HttpsProxyAgent } from 'https-proxy-agent';
+
+// [WEB COMPATIBILITY] Conditionally import Node.js-specific modules
+let HttpsProxyAgent: any;
+if (typeof process !== 'undefined' && typeof process.versions !== 'undefined' && typeof process.versions.node !== 'undefined') {
+  try {
+    HttpsProxyAgent = require('https-proxy-agent').HttpsProxyAgent;
+  } catch (e) {
+    console.warn('https-proxy-agent not found, proxy support will be disabled.');
+    HttpsProxyAgent = null;
+  }
+}
+
 import { McpRequest, McpResponse, ExecutionStatus, PythonEnvironment, NotebookOutput } from './types';
 import { trace, context } from '@opentelemetry/api';
 import { ErrorClassifier } from './errorClassifier';
@@ -338,10 +349,13 @@ export class McpClient {
           }
 
           // [PROXY SUPPORT] Respect VS Code HTTP proxy settings
-          const proxy = vscode.workspace.getConfiguration('http').get<string>('proxy');
-          const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
-          if (proxy) {
-            this.outputChannel.appendLine(`Using proxy: ${proxy}`);
+          let agent: any;
+          if (HttpsProxyAgent) {
+            const proxy = vscode.workspace.getConfiguration('http').get<string>('proxy');
+            agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+            if (proxy) {
+              this.outputChannel.appendLine(`Using proxy: ${proxy}`);
+            }
           }
 
           this.ws = new WebSocket(url, ['mcp'], { headers, agent });
