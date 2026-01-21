@@ -48,13 +48,29 @@ settings = load_and_validate_settings()
 
 # Pydantic models and decorator for strict validation
 from src.models import (
-    StartKernelArgs, RunCellArgs, StopKernelArgs, InterruptKernelArgs,
-    RestartKernelArgs, GetKernelInfoArgs, RunAllCellsArgs, CancelExecutionArgs,
-    InstallPackageArgs, ListKernelPackagesArgs, GetVariableInfoArgs,
-    ListVariablesArgs, InspectVariableArgs, GetVariableManifestArgs,
-    CheckWorkingDirectoryArgs, SetWorkingDirectoryArgs, DetectSyncNeededArgs,
-    SyncStateFromDiskArgs, SubmitInputArgs, QueryDataframesArgs,
-    SaveCheckpointArgs, LoadCheckpointArgs, SwitchKernelEnvironmentArgs
+    StartKernelArgs,
+    RunCellArgs,
+    StopKernelArgs,
+    InterruptKernelArgs,
+    RestartKernelArgs,
+    GetKernelInfoArgs,
+    RunAllCellsArgs,
+    CancelExecutionArgs,
+    InstallPackageArgs,
+    ListKernelPackagesArgs,
+    GetVariableInfoArgs,
+    ListVariablesArgs,
+    InspectVariableArgs,
+    GetVariableManifestArgs,
+    CheckWorkingDirectoryArgs,
+    SetWorkingDirectoryArgs,
+    DetectSyncNeededArgs,
+    SyncStateFromDiskArgs,
+    SubmitInputArgs,
+    QueryDataframesArgs,
+    SaveCheckpointArgs,
+    LoadCheckpointArgs,
+    SwitchKernelEnvironmentArgs,
 )
 from src.validation import validated_tool
 
@@ -67,7 +83,8 @@ tracer = get_tracer(__name__)
 
 # [HEARTBEAT] Auto-shutdown configuration
 HEARTBEAT_INTERVAL = 60  # Check every minute
-IDLE_TIMEOUT = 600       # Shutdown after 10 minutes of no connections
+IDLE_TIMEOUT = 600  # Shutdown after 10 minutes of no connections
+
 
 # [BROADCASTER] Connection Manager for Multi-User Notification
 class ConnectionManager:
@@ -89,11 +106,13 @@ class ConnectionManager:
                 # If there is no running loop (e.g., starting from synchronous main),
                 # start a dedicated background thread with its own asyncio loop.
                 import threading
+
                 def _run_in_thread():
                     try:
                         asyncio.run(self._monitor_lifecycle())
                     except Exception as e:
                         logger.error(f"Heartbeat thread error: {e}")
+
                 t = threading.Thread(target=_run_in_thread, daemon=True)
                 t.start()
 
@@ -139,20 +158,21 @@ class ConnectionManager:
             # Reset clock on disconnect to give a grace period
             self.last_activity = time.time()
             logger.info(f"Client disconnected. Total: {len(self.active_connections)}")
+
     async def broadcast(self, message: dict):
         # Immediate send for status changes or errors
-        if message.get('method') != 'notebook/output':
+        if message.get("method") != "notebook/output":
             await self._send_raw(message)
             return
 
         # For outputs, throttle to ~10 messages per second (100ms delay)
         now = time.time()
-        if now - getattr(self, 'last_broadcast', 0) > 0.1:
+        if now - getattr(self, "last_broadcast", 0) > 0.1:
             await self._send_raw(message)
             self.last_broadcast = now
         else:
             # Drop or aggregate (Dropping intermediate high-frequency output is usually fine for UX)
-            pass 
+            pass
 
     async def _send_raw(self, message):
         """Send raw JSON message to all connected clients"""
@@ -165,10 +185,12 @@ class ConnectionManager:
                 logger.error(f"Broadcast error: {e}")
                 self.disconnect(connection)
 
+
 def fatal_exception_handler(loop, context):
     """Asyncio exception handler that ensures JSON logs before death."""
     msg = context.get("exception", context.get("message", ""))
     logger.critical("fatal_async_error", error=str(msg), context=context)
+
 
 mcp = FastMCP("jupyter")
 session_manager = SessionManager()
@@ -179,6 +201,7 @@ session_manager.connection_manager = connection_manager
 
 # [ARCHITECTURAL FIX] Register all tools from modular tools package
 register_all_tools(mcp, session_manager, connection_manager)
+
 
 # [ROUND 2 AUDIT] Start proposal cleanup background task
 async def _proposal_cleanup_loop():
@@ -194,8 +217,10 @@ async def _proposal_cleanup_loop():
             logger.error(f"[PROPOSALS CLEANUP] Error: {e}")
             await asyncio.sleep(3600)
 
+
 # Defer task creation to avoid "no running event loop" during import
 _proposal_cleanup_task = None
+
 
 def _ensure_proposal_cleanup_task():
     """Start the proposal cleanup task if not already running."""
@@ -207,8 +232,11 @@ def _ensure_proposal_cleanup_task():
             # No running event loop - task will be started later
             pass
 
+
 # Health endpoint used by external orchestrators (module-level so tests can import it)
 from starlette.responses import JSONResponse
+
+
 async def health_check(request=None):
     """
     [ROUND 2 AUDIT] Improved health check that validates kernel liveness.
@@ -217,28 +245,34 @@ async def health_check(request=None):
     active_sessions = len(session_manager.sessions)
     healthy_kernels = 0
     unhealthy_kernels = 0
-    
+
     # Sample check: verify a few kernels are actually responsive
     for nb_path, session in list(session_manager.sessions.items())[:3]:  # Check up to 3 kernels
         try:
-            kc = session.get('kc')
-            km = session.get('km')
+            kc = session.get("kc")
+            km = session.get("km")
             if kc and km and km.is_alive():
                 healthy_kernels += 1
             else:
                 unhealthy_kernels += 1
         except Exception:
             unhealthy_kernels += 1
-    
-    is_healthy = unhealthy_kernels == 0 or (healthy_kernels > 0 and healthy_kernels >= unhealthy_kernels)
-    
-    return JSONResponse({
-        "status": "healthy" if is_healthy else "degraded",
-        "active_kernels": active_sessions,
-        "sampled_healthy": healthy_kernels,
-        "sampled_unhealthy": unhealthy_kernels,
-        "version": __version__
-    }, status_code=200 if is_healthy else 503)
+
+    is_healthy = unhealthy_kernels == 0 or (
+        healthy_kernels > 0 and healthy_kernels >= unhealthy_kernels
+    )
+
+    return JSONResponse(
+        {
+            "status": "healthy" if is_healthy else "degraded",
+            "active_kernels": active_sessions,
+            "sampled_healthy": healthy_kernels,
+            "sampled_unhealthy": unhealthy_kernels,
+            "version": __version__,
+        },
+        status_code=200 if is_healthy else 503,
+    )
+
 
 # =============================================================================
 # [ARCHITECTURAL DEBT RESOLVED] All tools are now registered via register_all_tools()
@@ -256,45 +290,52 @@ if False:  # Set to True only for debugging if modular tools fail
 # They would cause "Tool already exists" warnings if the decorators were active.
 # Decorators have been commented out to prevent duplicate registrations.
 
+
 # @mcp.tool()  # MOVED TO src/tools/server_tools.py
 def get_server_info():
     """
     [FINAL PUNCH LIST #5] Get server version and capabilities for handshake.
-    
+
     Client should call this on connection to verify compatibility.
     Warns user if server version < client minimum required version.
-    
+
     Returns:
         JSON with version, capabilities, and feature flags
     """
-    return json.dumps({
-        "version": __version__,
-        "capabilities": [
-            "audit_logs",         # Code execution audit trail
-            "sandbox",            # DuckDB sandboxing
-            "uuid_reaper",        # UUID-based zombie reaping
-            "trace_id",           # Request tracing support
-            "resource_limits",    # Kernel resource limits
-            "asset_cleanup",      # Automatic asset TTL
-        ],
-        "features": {
-            "checkpoint": False,  # Removed for security (ROUND 2)
-            "git_integration": False,  # Removed for maintenance burden
-            "docker_kernels": True,
-            "conda_kernels": True,
-            "multiuser": True,
+    return json.dumps(
+        {
+            "version": __version__,
+            "capabilities": [
+                "audit_logs",  # Code execution audit trail
+                "sandbox",  # DuckDB sandboxing
+                "uuid_reaper",  # UUID-based zombie reaping
+                "trace_id",  # Request tracing support
+                "resource_limits",  # Kernel resource limits
+                "asset_cleanup",  # Automatic asset TTL
+            ],
+            "features": {
+                "checkpoint": False,  # Removed for security (ROUND 2)
+                "git_integration": False,  # Removed for maintenance burden
+                "docker_kernels": True,
+                "conda_kernels": True,
+                "multiuser": True,
+            },
+            "protocol_version": "1.0",
+            "min_client_version": "0.2.0",  # Minimum compatible client version
         },
-        "protocol_version": "1.0",
-        "min_client_version": "0.2.0"  # Minimum compatible client version
-    }, indent=2)
+        indent=2,
+    )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_server_status():
     """Check how many humans are connected to this session."""
-    return json.dumps({
-        "active_connections": len(connection_manager.active_connections),
-        "mode": "multi-user" if len(connection_manager.active_connections) > 1 else "solo"
-    })
+    return json.dumps(
+        {
+            "active_connections": len(connection_manager.active_connections),
+            "mode": "multi-user" if len(connection_manager.active_connections) > 1 else "solo",
+        }
+    )
 
 
 # Persistence for proposals (12-Factor compliant)
@@ -309,12 +350,12 @@ def load_proposals():
     """Load proposals from disk to survive server restarts."""
     if PROPOSAL_STORE_FILE.exists():
         try:
-            with open(PROPOSAL_STORE_FILE, 'r') as f:
+            with open(PROPOSAL_STORE_FILE, "r") as f:
                 data = json.load(f)
                 # Load history keys in insertion order if present
-                for k in data.get('_history', []):
+                for k in data.get("_history", []):
                     PROPOSAL_HISTORY.append(k)
-                return data.get('store', {})
+                return data.get("store", {})
         except Exception as e:
             logger.error(f"Failed to load proposals: {e}")
     return {}
@@ -324,8 +365,8 @@ def save_proposals():
     """Save proposals to disk along with history to survive restarts."""
     try:
         PROPOSAL_STORE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(PROPOSAL_STORE_FILE, 'w') as f:
-            json.dump({'store': PROPOSAL_STORE, '_history': list(PROPOSAL_HISTORY)}, f, indent=2)
+        with open(PROPOSAL_STORE_FILE, "w") as f:
+            json.dump({"store": PROPOSAL_STORE, "_history": list(PROPOSAL_HISTORY)}, f, indent=2)
     except Exception as e:
         logger.error(f"Failed to save proposals: {e}")
 
@@ -333,12 +374,13 @@ def save_proposals():
 def cleanup_old_proposals(max_age_hours: int = 24):
     """[ROUND 2 AUDIT] Remove proposals older than max_age_hours to prevent unbounded disk growth."""
     import time
+
     now = time.time()
     removed = []
-    
+
     for proposal_id in list(PROPOSAL_STORE.keys()):
         proposal = PROPOSAL_STORE[proposal_id]
-        timestamp = proposal.get('timestamp', 0)
+        timestamp = proposal.get("timestamp", 0)
         if now - timestamp > max_age_hours * 3600:
             PROPOSAL_STORE.pop(proposal_id)
             try:
@@ -346,11 +388,11 @@ def cleanup_old_proposals(max_age_hours: int = 24):
             except ValueError:
                 pass
             removed.append(proposal_id)
-    
+
     if removed:
         logger.info(f"[CLEANUP] Removed {len(removed)} old proposals")
         save_proposals()
-    
+
     return len(removed)
 
 
@@ -382,9 +424,16 @@ def save_proposal(proposal_id: str, data: dict):
     except Exception:
         pass
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(StartKernelArgs)
-async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: str = "", timeout: int = 300, agent_id: Optional[str] = None):
+async def start_kernel(
+    notebook_path: str,
+    venv_path: str = "",
+    docker_image: str = "",
+    timeout: int = 300,
+    agent_id: Optional[str] = None,
+):
     """
     Boot a background process.
     Windows Logic: Looks for venv_path/Scripts/python.exe.
@@ -402,20 +451,23 @@ async def start_kernel(notebook_path: str, venv_path: str = "", docker_image: st
             if ctx and ctx.request_context:
                 session_manager.register_session(ctx.request_context.session)
         except:
-             # Ignore if context not available (e.g. testing)
-             pass
+            # Ignore if context not available (e.g. testing)
+            pass
 
         # Security Check
         if not docker_image:
-            logger.warning(f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges.")
+            logger.warning(
+                f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges."
+            )
 
         return await session_manager.start_kernel(
-            notebook_path, 
+            notebook_path,
             venv_path if venv_path else None,
             docker_image if docker_image else None,
             timeout,
-            agent_id=agent_id
+            agent_id=agent_id,
         )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(StopKernelArgs)
@@ -427,6 +479,7 @@ async def stop_kernel(notebook_path: str):
         span.set_attribute("notebook_path", notebook_path)
         # 1. Prune assets before stopping
         from src.asset_manager import prune_unused_assets
+
         try:
             # Run cleanup. This ensures that if I delete a cell and close the notebook,
             # the orphaned image is deleted.
@@ -435,6 +488,7 @@ async def stop_kernel(notebook_path: str):
             logger.warning(f"Asset cleanup failed: {e}")
 
         return await session_manager.stop_kernel(notebook_path)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def list_kernels():
@@ -445,40 +499,45 @@ def list_kernels():
     result = []
     for nb_path, session in session_manager.sessions.items():
         pid = "unknown"
-        if hasattr(session.get('km'), 'kernel') and session['km'].kernel:
-            pid = getattr(session['km'].kernel, 'pid', 'unknown')
-        
-        result.append({
-            'notebook_path': nb_path,
-            'pid': pid,
-            'cwd': session.get('cwd', 'unknown'),
-            'execution_count': session.get('execution_counter', 0),
-            'queue_size': session['execution_queue'].qsize() if 'execution_queue' in session else 0,
-            'stop_on_error': session.get('stop_on_error', False)
-        })
-    
+        if hasattr(session.get("km"), "kernel") and session["km"].kernel:
+            pid = getattr(session["km"].kernel, "pid", "unknown")
+
+        result.append(
+            {
+                "notebook_path": nb_path,
+                "pid": pid,
+                "cwd": session.get("cwd", "unknown"),
+                "execution_count": session.get("execution_counter", 0),
+                "queue_size": (
+                    session["execution_queue"].qsize() if "execution_queue" in session else 0
+                ),
+                "stop_on_error": session.get("stop_on_error", False),
+            }
+        )
+
     return json.dumps(result, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(DetectSyncNeededArgs)
 async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[int, str]] = None):
     """
     [HANDOFF PROTOCOL] Detect if kernel state is out of sync with disk or VS Code buffer.
-    
+
     **Purpose**: Before the agent starts work, check if a human has modified the notebook
     since the last agent execution.
-    
+
     **How It Works**:
     1. If buffer_hashes provided (from VS Code client), use those as source of truth.
     2. Otherwise, reads notebook from disk.
     3. Calculates SHA-256 hash of each cell's content.
     4. Compares with 'execution_hash' stored in cell metadata.
     5. If hashes mismatch, sync is required.
-    
+
     Args:
         notebook_path: Path to notebook
         buffer_hashes: Optional dict of {cell_index: hash} from VS Code buffer (source of truth)
-    
+
     Returns:
         JSON with:
         - sync_needed: boolean
@@ -487,28 +546,30 @@ async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[in
     """
     import os
     from pathlib import Path
-    
+
     abs_path = str(Path(notebook_path).resolve())
     session = session_manager.get_session(notebook_path)
-    
+
     if not session:
-        return json.dumps({
-            "sync_needed": True,
-            "reason": "no_active_kernel",
-            "recommendation": "Call start_kernel() first"
-        })
-    
+        return json.dumps(
+            {
+                "sync_needed": True,
+                "reason": "no_active_kernel",
+                "recommendation": "Call start_kernel() first",
+            }
+        )
+
     # If buffer_hashes provided by client, use those as source of truth
     # Otherwise, read from disk (legacy behavior)
     changed_cells = []
-    
+
     if buffer_hashes is not None:
         # Client-provided hashes (VS Code buffer state) - this is the source of truth
         for idx, buffer_hash in buffer_hashes.items():
             # Compare against kernel execution history
-            exec_history = session.get('execution_history', {})
+            exec_history = session.get("execution_history", {})
             kernel_hash = exec_history.get(idx)
-            
+
             if not kernel_hash or buffer_hash != kernel_hash:
                 changed_cells.append(idx)
     else:
@@ -516,30 +577,36 @@ async def detect_sync_needed(notebook_path: str, buffer_hashes: Optional[Dict[in
         try:
             nb = nbformat.read(notebook_path, as_version=4)
         except Exception as e:
-            return json.dumps({
-                "error": f"Failed to read notebook: {e}"
-            })
-        
+            return json.dumps({"error": f"Failed to read notebook: {e}"})
+
         for idx, cell in enumerate(nb.cells):
-            if cell.cell_type == 'code':
+            if cell.cell_type == "code":
                 current_hash = utils.get_cell_hash(cell.source)
                 # Check both new 'mcp' and legacy 'mcp_trace' metadata locations
-                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
-                last_hash = mcp_meta.get('execution_hash')
-                
+                mcp_meta = cell.metadata.get("mcp", {}) or cell.metadata.get("mcp_trace", {})
+                last_hash = mcp_meta.get("execution_hash")
+
                 # If no hash exists (never executed by agent) or hash mismatch (content changed)
                 if not last_hash or current_hash != last_hash:
                     changed_cells.append(idx)
-    
+
     sync_needed = len(changed_cells) > 0
-    
-    return json.dumps({
-        'sync_needed': sync_needed,
-        'reason': f"Content mismatch in {len(changed_cells)} cells" if sync_needed else "Content matches execution history",
-        'changed_cells': changed_cells,
-        'recommendation': 'sync_state_from_disk' if sync_needed else 'proceed',
-        'sync_strategy': 'full'
-    }, indent=2)
+
+    return json.dumps(
+        {
+            "sync_needed": sync_needed,
+            "reason": (
+                f"Content mismatch in {len(changed_cells)} cells"
+                if sync_needed
+                else "Content matches execution history"
+            ),
+            "changed_cells": changed_cells,
+            "recommendation": "sync_state_from_disk" if sync_needed else "proceed",
+            "sync_strategy": "full",
+        },
+        indent=2,
+    )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def set_stop_on_error(notebook_path: str, enabled: bool):
@@ -551,9 +618,10 @@ def set_stop_on_error(notebook_path: str, enabled: bool):
     session = session_manager.get_session(notebook_path)
     if not session:
         return "Error: No running kernel. Call start_kernel first."
-    
-    session['stop_on_error'] = enabled
+
+    session["stop_on_error"] = enabled
     return f"stop_on_error set to {enabled} for {notebook_path}"
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_notebook_outline(notebook_path: str, structure_override: Optional[List[dict]] = None):
@@ -570,6 +638,7 @@ def get_notebook_outline(notebook_path: str, structure_override: Optional[List[d
         # Fallback to disk (risk of stale data)
         return notebook.get_notebook_outline(notebook_path)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     """
@@ -577,6 +646,7 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
     Constraint: Automatically clears output (to avoid stale data) and sets execution_count to null.
     """
     return notebook.append_cell(notebook_path, content, cell_type)
+
 
 # [ROUND 2 AUDIT: REMOVED] Checkpoint features using dill/pickle are fundamentally insecure
 # Enterprise compliance bans pickle deserialization. Use replay-from-history instead.
@@ -590,16 +660,18 @@ def append_cell(notebook_path: str, content: str, cell_type: str = "code"):
 #     """REMOVED: Use re-execute cells instead of deserializing pickled state"""
 #     pass
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def propose_edit(notebook_path: str, index: int, new_content: str):
     """
-    Propose an edit to a cell. 
+    Propose an edit to a cell.
     This avoids writing to disk directly, preventing conflicts with the editor buffer.
     The Agent should use this instead of 'edit_cell'.
     """
     import uuid
+
     proposal_id = str(uuid.uuid4())
-    
+
     # Construct proposal
     proposal = {
         "id": proposal_id,
@@ -607,7 +679,7 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         "notebook_path": notebook_path,
         "index": index,
         "new_content": new_content,
-        "timestamp": str(datetime.datetime.now())
+        "timestamp": str(datetime.datetime.now()),
     }
 
     # Persist the proposal with bounded history
@@ -615,44 +687,45 @@ def propose_edit(notebook_path: str, index: int, new_content: str):
         save_proposal(proposal_id, proposal)
     except Exception:
         logger.warning("Failed to persist proposal")
-    
+
     # We return a specific structure that the Client (mcpClient.ts) listens for.
     # By convention, if the tool result contains this structure, the client
     # will trigger a WorkspaceEdit.
-    
-    return json.dumps({
-        "status": "proposal_created", 
-        "proposal_id": proposal_id,
-        "proposal": proposal,
-        "message": "Edit proposed. Client must apply changes.",
-        # SIGNAL PROTOCOL
-        "_mcp_action": "apply_edit" 
-    })
+
+    return json.dumps(
+        {
+            "status": "proposal_created",
+            "proposal_id": proposal_id,
+            "proposal": proposal,
+            "message": "Edit proposed. Client must apply changes.",
+            # SIGNAL PROTOCOL
+            "_mcp_action": "apply_edit",
+        }
+    )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
-def notify_edit_result(notebook_path: str, proposal_id: str, status: str, message: Optional[str] = None):
+def notify_edit_result(
+    notebook_path: str, proposal_id: str, status: str, message: Optional[str] = None
+):
     """
     Callback for the client to report the result of a proposed edit.
     status: 'accepted' | 'rejected' | 'failed'
     """
     logger.info(f"Edit result for {notebook_path} (ID: {proposal_id}): {status} - {message}")
-    
+
     # Store result for agent to retrieve (bounded)
     timestamp = str(datetime.datetime.now())
     if proposal_id:
         try:
             existing = PROPOSAL_STORE.get(proposal_id, {})
-            existing.update({
-                "status": status,
-                "message": message,
-                "updated_at": timestamp
-            })
+            existing.update({"status": status, "message": message, "updated_at": timestamp})
             save_proposal(proposal_id, existing)
         except Exception:
             PROPOSAL_STORE[proposal_id] = {
                 "status": status,
                 "message": message,
-                "updated_at": timestamp
+                "updated_at": timestamp,
             }
         # Persist latest state
         try:
@@ -660,12 +733,9 @@ def notify_edit_result(notebook_path: str, proposal_id: str, status: str, messag
         except Exception:
             # Best-effort persistence
             save_proposals()
-    
-    return json.dumps({
-        "status": "ack",
-        "proposal_id": proposal_id,
-        "timestamp": timestamp
-    })
+
+    return json.dumps({"status": "ack", "proposal_id": proposal_id, "timestamp": timestamp})
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_proposal_status(proposal_id: str):
@@ -677,8 +747,15 @@ def get_proposal_status(proposal_id: str):
         return json.dumps(PROPOSAL_STORE[proposal_id])
     return json.dumps({"status": "unknown"})
 
+
 # @mcp.tool()  # MOVED TO src/tools/
-def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: str = "summary", line_range: Optional[List[int]] = None):
+def read_cell_smart(
+    notebook_path: str,
+    index: int,
+    target: str = "both",
+    fmt: str = "summary",
+    line_range: Optional[List[int]] = None,
+):
     """
     The Surgical Reader.
     target: "source" (code), "output" (result), or "both".
@@ -686,18 +763,21 @@ def read_cell_smart(notebook_path: str, index: int, target: str = "both", fmt: s
     line_range: [start_line, end_line] (e.g., [0, 10] or [-10, -1]).
     """
     if line_range and isinstance(line_range, list):
-         line_range = [int(x) for x in line_range]
+        line_range = [int(x) for x in line_range]
     return notebook.read_cell_smart(notebook_path, index, target, fmt, line_range)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def insert_cell(notebook_path: str, index: int, content: str, cell_type: str = "code"):
     """Inserts a cell at a specific position."""
     return notebook.insert_cell(notebook_path, index, content, cell_type)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def delete_cell(notebook_path: str, index: int):
     """Deletes a cell at a specific position."""
     return notebook.delete_cell(notebook_path, index)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def search_notebook(notebook_path: str, query: str, regex: bool = False):
@@ -706,6 +786,7 @@ def search_notebook(notebook_path: str, query: str, regex: bool = False):
     Returns: Found 'df_clean' in Cell 3 (Line 4) and Cell 8 (Line 1).
     """
     return notebook.search_notebook(notebook_path, query, regex)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SubmitInputArgs)
@@ -720,6 +801,7 @@ async def submit_input(notebook_path: str, text: str):
     except Exception as e:
         return json.dumps({"status": "error", "message": str(e)})
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetKernelInfoArgs)
 async def get_kernel_info(notebook_path: str):
@@ -729,71 +811,80 @@ async def get_kernel_info(notebook_path: str):
     """
     return await session_manager.get_kernel_info(notebook_path)
 
+
 def _derive_env_vars(python_path: str) -> Optional[dict]:
     """Helper to derive environment variables from a Python executable path."""
     import os
     from pathlib import Path
-    
+
     try:
         path_obj = Path(python_path)
-        
+
         # Windows Conda check: python.exe is usually in the root of the env
-        if os.name == 'nt' and path_obj.parent.name != 'Scripts':
+        if os.name == "nt" and path_obj.parent.name != "Scripts":
             venv_path = str(path_obj.parent)
         else:
             # Standard venv or Unix Conda (bin/python)
             venv_path = str(path_obj.parent.parent)
-            
+
         return environment.get_activated_env_vars(venv_path, python_path)
     except Exception:
         return None
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def check_code_syntax(code: str):
     """
-    [LSP] Check Python code for syntax errors. 
+    [LSP] Check Python code for syntax errors.
     Use this BEFORE running code to avoid wasting time on simple typos.
-    
+
     Args:
         code: Python source code
-        
+
     Returns:
         JSON with 'valid': bool, and 'error': str (if any).
     """
     is_valid, error_msg = validation.check_code_syntax(code)
-    
+
     return ToolResult(
         success=is_valid,
         data={"valid": is_valid},
         error_msg=error_msg,
-        user_suggestion="Fix syntax error and retry" if not is_valid else None
+        user_suggestion="Fix syntax error and retry" if not is_valid else None,
     ).to_json()
+
 
 # --- NEW ASYNC TOOLS ---
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RunCellArgs)
-async def run_cell_async(notebook_path: str, index: int, code_override: Optional[str] = None, task_id_override: Optional[str] = None):
+async def run_cell_async(
+    notebook_path: str,
+    index: int,
+    code_override: Optional[str] = None,
+    task_id_override: Optional[str] = None,
+):
     """
     Submits a cell for execution in the background.
-    
+
     Args:
         notebook_path: Path to the notebook
         index: Cell index
-        code_override: Optional explicit code to run (bypass disk read). 
+        code_override: Optional explicit code to run (bypass disk read).
                       Crucial for "File vs Buffer" race conditions.
         task_id_override: Optional client-generated ID to prevent race conditions.
-    
+
     Returns: A Task ID (e.g., "b4f2...").
     Use `get_execution_status(task_id)` to check progress.
-    
+
     Raises:
         RuntimeError: If execution queue is full (HTTP 429 equivalent)
     """
     session = session_manager.get_session(notebook_path)
     if not session:
         return "Error: No running kernel. Call start_kernel first."
-    
+
     # 1. Get Code (Buffer Priority)
     if code_override is not None:
         code = code_override
@@ -801,28 +892,30 @@ async def run_cell_async(notebook_path: str, index: int, code_override: Optional
         # Fallback to disk (Legacy/test behavior)
         try:
             cell = notebook.read_cell(notebook_path, index)
-            code = cell['source']
+            code = cell["source"]
         except Exception as e:
             return f"Error reading cell: {e}"
-    
+
     # 2. Submit (with backpressure handling)
     try:
-        exec_id = await session_manager.execute_cell_async(notebook_path, index, code, exec_id=task_id_override)
+        exec_id = await session_manager.execute_cell_async(
+            notebook_path, index, code, exec_id=task_id_override
+        )
         if not exec_id:
             return "Error starting execution."
-            
-        return json.dumps({
-            "task_id": exec_id,
-            "message": "Execution started"
-        })
+
+        return json.dumps({"task_id": exec_id, "message": "Execution started"})
     except RuntimeError as e:
         # [SECURITY] Backpressure: Queue is full
-        return json.dumps({
-            "error": "queue_full",
-            "message": str(e),
-            "http_equivalent": 429,
-            "retry_after_seconds": 5
-        })
+        return json.dumps(
+            {
+                "error": "queue_full",
+                "message": str(e),
+                "http_equivalent": 429,
+                "retry_after_seconds": 5,
+            }
+        )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_execution_status(notebook_path: str, task_id: str):
@@ -833,53 +926,59 @@ def get_execution_status(notebook_path: str, task_id: str):
     status = session_manager.get_execution_status(notebook_path, task_id)
     return json.dumps(status, indent=2)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def is_kernel_busy(notebook_path: str):
     """
     [PERFORMANCE] Check if kernel is currently executing or has queued work.
-    
+
     Used by UI components (like variable dashboard) to skip polling when kernel is busy.
     Prevents flooding the execution queue with inspection requests during long-running operations.
-    
+
     Args:
         notebook_path: Path to the notebook
-        
+
     Returns:
         JSON with 'is_busy' (boolean) and optional 'reason' string
-        
+
     Example:
         {"is_busy": true, "reason": "Executing cell 5"}
         {"is_busy": false}
     """
     is_busy = session_manager.is_kernel_busy(notebook_path)
-    
+
     result = {"is_busy": is_busy}
-    
+
     if is_busy:
         # Optionally provide more context about why it's busy
         session = session_manager.get_session(notebook_path)
         if session:
-            if session['queued_executions']:
+            if session["queued_executions"]:
                 result["reason"] = f"{len(session['queued_executions'])} executions queued"
             else:
                 # Check active executions
-                active_count = sum(1 for data in session['executions'].values() if data['status'] in ['busy', 'queued'])
+                active_count = sum(
+                    1
+                    for data in session["executions"].values()
+                    if data["status"] in ["busy", "queued"]
+                )
                 if active_count > 0:
                     result["reason"] = f"{active_count} executions running"
-    
+
     return json.dumps(result)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def check_kernel_resources(notebook_path: str):
     """
     [PHASE 3.4] Get CPU and RAM usage of the kernel process.
-    
+
     Allows agents to monitor resource consumption and implement auto-restart logic
     to prevent memory leaks or runaway processes.
-    
+
     Args:
         notebook_path: Path to the notebook file
-    
+
     Returns:
         JSON with:
         - status: 'active' or error state
@@ -889,7 +988,7 @@ def check_kernel_resources(notebook_path: str):
         - cpu_percent: CPU usage percentage (includes child processes)
         - num_threads: Number of threads in kernel process
         - num_children: Number of child processes spawned
-    
+
     Agent Usage:
         # Check before heavy computation
         resources = json.loads(check_kernel_resources(path))
@@ -897,7 +996,7 @@ def check_kernel_resources(notebook_path: str):
             stop_kernel(path)
             start_kernel(path)  # Fresh start
             print("Kernel restarted due to high memory usage")
-        
+
         # Monitor during long-running task
         while status['status'] == 'running':
             resources = json.loads(check_kernel_resources(path))
@@ -908,6 +1007,7 @@ def check_kernel_resources(notebook_path: str):
     """
     result = session_manager.get_kernel_resources(notebook_path)
     return json.dumps(result, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RunAllCellsArgs)
@@ -920,74 +1020,79 @@ async def run_all_cells(notebook_path: str):
     session = session_manager.get_session(notebook_path)
     if not session:
         return "Error: No running kernel. Call start_kernel first."
-    
+
     # Read notebook
     try:
         nb = nbformat.read(notebook_path, as_version=4)
     except Exception as e:
         return f"Error reading notebook: {e}"
-    
+
     # Queue all code cells
     exec_ids = []
     queue_full_count = 0
     for idx, cell in enumerate(nb.cells):
-        if cell.cell_type == 'code':
+        if cell.cell_type == "code":
             try:
                 exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
                 if exec_id:
-                    exec_ids.append({'cell_index': idx, 'exec_id': exec_id})
+                    exec_ids.append({"cell_index": idx, "exec_id": exec_id})
             except RuntimeError as e:
                 # Queue is full, skip remaining cells
                 queue_full_count += 1
                 if queue_full_count == 1:  # Log once
-                    logger.warning(f"[BACKPRESSURE] Queue full during run_all, stopped at cell {idx}")
+                    logger.warning(
+                        f"[BACKPRESSURE] Queue full during run_all, stopped at cell {idx}"
+                    )
                 break
-    
+
     if queue_full_count > 0:
-        return json.dumps({
-            'status': 'partial',
-            'message': f'Queue became full. Queued {len(exec_ids)} cells before hitting limit.',
-            'executions': exec_ids,
-            'queue_full': True,
-            'retry_after_seconds': 5
-        }, indent=2)
-    
-    return json.dumps({
-        'message': f'Queued {len(exec_ids)} cells for execution',
-        'executions': exec_ids
-    }, indent=2)
+        return json.dumps(
+            {
+                "status": "partial",
+                "message": f"Queue became full. Queued {len(exec_ids)} cells before hitting limit.",
+                "executions": exec_ids,
+                "queue_full": True,
+                "retry_after_seconds": 5,
+            },
+            indent=2,
+        )
+
+    return json.dumps(
+        {"message": f"Queued {len(exec_ids)} cells for execution", "executions": exec_ids}, indent=2
+    )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SyncStateFromDiskArgs)
 async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     """
     [HANDOFF PROTOCOL] Synchronize kernel state with disk after human intervention.
-    
-    **Critical Use Case**: When a human has edited the notebook externally (in VS Code, 
-    JupyterLab, etc.), the kernel's RAM state is OUT OF SYNC with the disk. This tool 
+
+    **Critical Use Case**: When a human has edited the notebook externally (in VS Code,
+    JupyterLab, etc.), the kernel's RAM state is OUT OF SYNC with the disk. This tool
     reconciles the "Split Brain" by re-executing cells to rebuild variable state.
-    
+
     **When to Use**:
     - Agent resumes work after human editing session
     - Agent detects unexpected notebook structure (new cells, modified cells)
     - After switching from "Human Mode" to "Agent Mode" in VS Code extension
-    
+
     **Strategy**:
     - "smart" (default): DAG-based minimal re-execution. Only reruns changed cells and their dependents.
     - "incremental": Re-executes from first changed cell to end (linear forward sync)
     - "full": Re-executes ALL code cells from scratch (safest but slowest)
-    
+
     Args:
         notebook_path: Path to the notebook file
         strategy: "smart" | "incremental" | "full"
-    
+
     Returns:
         JSON with:
         - cells_synced: Number of cells re-executed
         - execution_ids: List of execution IDs for tracking
         - sync_duration_estimate: Estimated time to complete (based on queue size)
         - rerun_reason: Explanation of why each cell was rerun
-    
+
     Agent Workflow Example:
         # 1. Agent detects notebook changed on disk
         outline = get_notebook_outline(path)
@@ -995,64 +1100,65 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
             # 2. Smart sync only reruns affected cells
             result = sync_state_from_disk(path, strategy="smart")
             print(f"Synced {result['cells_synced']} cells (skipped {result['cells_skipped']} clean cells)")
-        
+
         # 3. Now safe to continue work
         append_cell(path, "# Agent's new analysis")
     """
     session = session_manager.get_session(notebook_path)
     if not session:
-        return json.dumps({
-            "error": "No active kernel. Call start_kernel first.",
-            "hint": "The kernel must be running to sync state."
-        })
-    
+        return json.dumps(
+            {
+                "error": "No active kernel. Call start_kernel first.",
+                "hint": "The kernel must be running to sync state.",
+            }
+        )
+
     # Read notebook from disk
     try:
         nb = nbformat.read(notebook_path, as_version=4)
     except Exception as e:
-        return json.dumps({
-            "error": f"Failed to read notebook from disk: {e}",
-            "notebook_path": notebook_path
-        })
-    
+        return json.dumps(
+            {"error": f"Failed to read notebook from disk: {e}", "notebook_path": notebook_path}
+        )
+
     exec_ids = []
     strategy_used = strategy
     rerun_reasons = {}
-    
+
     if strategy == "full":
         # Full sync: rerun everything
         cells_to_run = list(range(len(nb.cells)))
         for idx in cells_to_run:
-            if nb.cells[idx].cell_type == 'code':
+            if nb.cells[idx].cell_type == "code":
                 rerun_reasons[idx] = "full_sync_requested"
-    
+
     elif strategy == "smart":
         # DAG-based minimal sync
         from . import dag_executor
-        
+
         # Find changed cells
         changed_cells = set()
-        executed_indices = session.get('executed_indices', set())
-        
+        executed_indices = session.get("executed_indices", set())
+
         for idx, cell in enumerate(nb.cells):
-            if cell.cell_type == 'code':
+            if cell.cell_type == "code":
                 # Check if never executed OR content changed
                 if idx not in executed_indices:
                     changed_cells.add(idx)
                     rerun_reasons[idx] = "never_executed"
                     continue
-                
+
                 current_hash = utils.get_cell_hash(cell.source)
-                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
-                last_hash = mcp_meta.get('execution_hash')
-                
+                mcp_meta = cell.metadata.get("mcp", {}) or cell.metadata.get("mcp_trace", {})
+                last_hash = mcp_meta.get("execution_hash")
+
                 if not last_hash or current_hash != last_hash:
                     changed_cells.add(idx)
                     rerun_reasons[idx] = "content_modified"
-        
+
         if changed_cells:
             # Build dependency graph and compute affected cells
-            cells_source = [cell.source if cell.cell_type == 'code' else '' for cell in nb.cells]
+            cells_source = [cell.source if cell.cell_type == "code" else "" for cell in nb.cells]
             try:
                 cells_to_run = dag_executor.get_minimal_rerun_set(cells_source, changed_cells)
                 # Mark dependent cells
@@ -1071,28 +1177,28 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
         else:
             cells_to_run = []
             strategy_used = "smart_skipped_all"
-    
+
     else:  # "incremental"
         # Incremental sync: find first dirty cell, rerun from there
         first_dirty_idx = -1
-        executed_indices = session.get('executed_indices', set())
-        
+        executed_indices = session.get("executed_indices", set())
+
         for idx, cell in enumerate(nb.cells):
-            if cell.cell_type == 'code':
+            if cell.cell_type == "code":
                 if idx not in executed_indices:
                     first_dirty_idx = idx
                     rerun_reasons[idx] = "never_executed"
-                    break 
-                
+                    break
+
                 current_hash = utils.get_cell_hash(cell.source)
-                mcp_meta = cell.metadata.get('mcp', {}) or cell.metadata.get('mcp_trace', {})
-                last_hash = mcp_meta.get('execution_hash')
-                
+                mcp_meta = cell.metadata.get("mcp", {}) or cell.metadata.get("mcp_trace", {})
+                last_hash = mcp_meta.get("execution_hash")
+
                 if not last_hash or current_hash != last_hash:
                     first_dirty_idx = idx
                     rerun_reasons[idx] = "content_modified"
                     break
-        
+
         if first_dirty_idx != -1:
             cells_to_run = list(range(first_dirty_idx, len(nb.cells)))
             for idx in cells_to_run:
@@ -1105,80 +1211,89 @@ async def sync_state_from_disk(notebook_path: str, strategy: str = "smart"):
     # Execute determined cells
     queue_full = False
     for idx in cells_to_run:
-        if idx < len(nb.cells) and nb.cells[idx].cell_type == 'code':
+        if idx < len(nb.cells) and nb.cells[idx].cell_type == "code":
             cell = nb.cells[idx]
             try:
                 exec_id = await session_manager.execute_cell_async(notebook_path, idx, cell.source)
                 if exec_id:
-                    exec_ids.append({
-                        'cell_index': idx,
-                        'exec_id': exec_id,
-                        'reason': rerun_reasons.get(idx, 'unknown')
-                    })
+                    exec_ids.append(
+                        {
+                            "cell_index": idx,
+                            "exec_id": exec_id,
+                            "reason": rerun_reasons.get(idx, "unknown"),
+                        }
+                    )
             except RuntimeError:
                 # Queue is full, stop queuing more
                 queue_full = True
-                logger.warning(f"[BACKPRESSURE] Queue full during sync_state_from_disk at cell {idx}")
+                logger.warning(
+                    f"[BACKPRESSURE] Queue full during sync_state_from_disk at cell {idx}"
+                )
                 break
-    
+
     # Calculate metrics
-    queue_size = session['execution_queue'].qsize() if 'execution_queue' in session else 0
+    queue_size = session["execution_queue"].qsize() if "execution_queue" in session else 0
     estimate_seconds = len(exec_ids) * 2
-    total_code_cells = sum(1 for c in nb.cells if c.cell_type == 'code')
+    total_code_cells = sum(1 for c in nb.cells if c.cell_type == "code")
     skipped_cells = total_code_cells - len(exec_ids)
-    
+
     response = {
-        'status': 'syncing' if not queue_full else 'partial',
-        'message': f'Queued {len(exec_ids)} cells for state synchronization',
-        'cells_synced': len(exec_ids),
-        'cells_skipped': skipped_cells,
-        'total_code_cells': total_code_cells,
-        'execution_ids': exec_ids,
-        'queue_size': queue_size + len(exec_ids),
-        'estimated_duration_seconds': estimate_seconds,
-        'strategy_used': strategy_used,
-        'hint': 'Use get_execution_status() to monitor progress.'
+        "status": "syncing" if not queue_full else "partial",
+        "message": f"Queued {len(exec_ids)} cells for state synchronization",
+        "cells_synced": len(exec_ids),
+        "cells_skipped": skipped_cells,
+        "total_code_cells": total_code_cells,
+        "execution_ids": exec_ids,
+        "queue_size": queue_size + len(exec_ids),
+        "estimated_duration_seconds": estimate_seconds,
+        "strategy_used": strategy_used,
+        "hint": "Use get_execution_status() to monitor progress.",
     }
-    
+
     if queue_full:
-        response['queue_full'] = True
-        response['retry_after_seconds'] = 5
-    
+        response["queue_full"] = True
+        response["retry_after_seconds"] = 5
+
     return json.dumps(response, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 async def get_version():
     """
     Get MCP server version for compatibility checking.
-    
+
     Returns:
         JSON with version, protocol_version, and capabilities
     """
-    return json.dumps({
-        'version': __version__,
-        'protocol_version': '1.0',
-        'capabilities': [
-            'execute_cells',
-            'async_execution',
-            'websocket_streaming',
-            'health_monitoring',
-            'interrupt_escalation',
-            'checkpoint_recovery',
-            'docker_isolation',
-            'sql_superpowers'
-        ],
-        'python_version': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
-    })
+    return json.dumps(
+        {
+            "version": __version__,
+            "protocol_version": "1.0",
+            "capabilities": [
+                "execute_cells",
+                "async_execution",
+                "websocket_streaming",
+                "health_monitoring",
+                "interrupt_escalation",
+                "checkpoint_recovery",
+                "docker_isolation",
+                "sql_superpowers",
+            ],
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        }
+    )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(CancelExecutionArgs)
 async def cancel_execution(notebook_path: str, task_id: str):
     """
     Interrupts the kernel to stop the running task.
-    
+
     Uses multi-stage escalation: SIGINT → SIGTERM → SIGKILL
     """
     return await session_manager.cancel_execution(notebook_path, task_id)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetVariableInfoArgs)
@@ -1189,6 +1304,7 @@ async def get_variable_info(notebook_path: str, var_name: str):
     Returns: JSON with type, shape, columns, memory usage, preview, etc.
     """
     return await session_manager.get_variable_info(notebook_path, var_name)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(ListVariablesArgs)
@@ -1210,18 +1326,19 @@ print(json.dumps(result))
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(GetVariableManifestArgs)
 async def get_variable_manifest(notebook_path: str):
     """
     [VARIABLE DASHBOARD] Lightweight manifest of all kernel variables.
     Returns name, type, and memory size for each variable (optimized for UI polling).
-    
+
     **Use Case**: VS Code extension can poll this after each execution to populate
     a Variable Explorer sidebar, giving humans visibility into the agent's kernel state.
-    
+
     **Performance**: Much lighter than list_variables() - includes memory size for sorting.
-    
+
     Returns:
         JSON array: [{"name": "df", "type": "DataFrame", "size": "2.4 MB"}, ...]
     """
@@ -1287,17 +1404,18 @@ print(json.dumps(manifest))
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InspectVariableArgs)
 async def inspect_variable(notebook_path: str, variable_name: str):
     """
     Surgical Inspection: Returns a human-readable markdown summary of a variable.
-    
-    Agent Use Case: 
+
+    Agent Use Case:
     - Peek at DataFrames without loading 1GB of data into context
     - Inspect lists, dicts, models without full dumps
     - Get shape, columns, dtypes, and head(3) for DataFrames
-    
+
     Returns: Markdown-formatted summary suitable for LLM consumption
     """
     # 1. Input Validation (Prevent Injection)
@@ -1311,66 +1429,66 @@ async def inspect_variable(notebook_path: str, variable_name: str):
     # SessionManager.run_simple_code runs using execute_cell logic which captures output.
     # _mcp_inspect returns a string. To get it as output, we might need to print it or rely on it being the last expression.
     # Jupyter usually displays the last expression.
-    
+
     return await session_manager.run_simple_code(notebook_path, code)
+
 
 # -----------------------
 # Asset Management Tools
 # -----------------------
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def read_asset(
-    asset_path: str, 
-    lines: Optional[List[int]] = None, 
+    asset_path: str,
+    lines: Optional[List[int]] = None,
     search: Optional[str] = None,
-    max_lines: int = 1000
+    max_lines: int = 1000,
 ) -> str:
     """
     Read content from an offloaded output file (assets/text_*.txt).
     Use this to selectively retrieve large outputs without loading everything into context.
-    
+
     Agent Use Cases:
     - Search for errors in 50MB training logs: read_asset("assets/text_abc123.txt", search="error")
     - View specific section: read_asset("assets/text_abc123.txt", lines=[100, 200])
     - Check final results: read_asset("assets/text_abc123.txt", lines=[1, 50])
-    
+
     Args:
         asset_path: Path to the asset file (e.g. "assets/text_abc123.txt")
         lines: [start_line, end_line] for pagination (1-based, inclusive)
         search: Search term for grep-like filtering (case-insensitive)
         max_lines: Maximum lines to return (default 1000, max 5000)
-    
+
     Returns:
         Content from the asset file (filtered or paginated)
     """
     from pathlib import Path
     import os
-    
+
     # FIXED: Enforce hard caps on return size
     MAX_RETURN_CHARS = 20000  # 20KB safety limit
-    MAX_RETURN_LINES = 500    # 500 lines safety limit
-    
+    MAX_RETURN_LINES = 500  # 500 lines safety limit
+
     # Limit max_lines to prevent context overflow
     max_lines = min(max_lines, MAX_RETURN_LINES)
-    
+
     # Security: Prevent path traversal
     asset_path = str(Path(asset_path).resolve())
-    if '..' in asset_path or not asset_path.endswith('.txt'):
-        return json.dumps({
-            "error": "Invalid asset path. Must be a .txt file without path traversal."
-        })
-    
+    if ".." in asset_path or not asset_path.endswith(".txt"):
+        return json.dumps(
+            {"error": "Invalid asset path. Must be a .txt file without path traversal."}
+        )
+
     # Check if file exists
     if not Path(asset_path).exists():
-        return json.dumps({
-            "error": f"Asset file not found: {asset_path}"
-        })
-    
+        return json.dumps({"error": f"Asset file not found: {asset_path}"})
+
     try:
         # Get file info
         file_size = Path(asset_path).stat().st_size
-        
-        with open(asset_path, 'r', encoding='utf-8', errors='replace') as f:
+
+        with open(asset_path, "r", encoding="utf-8", errors="replace") as f:
             if search:
                 # Grep mode: efficient for finding specific content
                 matches = []
@@ -1378,81 +1496,101 @@ def read_asset(
                     if search.lower() in line.lower():
                         matches.append(f"{i}: {line.rstrip()}")
                         if len(matches) >= max_lines:
-                            matches.append(f"\n... [Search limit reached: {max_lines} matches shown] ...")
+                            matches.append(
+                                f"\n... [Search limit reached: {max_lines} matches shown] ..."
+                            )
                             break
-                
+
                 if not matches:
-                    return json.dumps({
-                        "content": f"No matches found for '{search}'",
+                    return json.dumps(
+                        {
+                            "content": f"No matches found for '{search}'",
+                            "file_size_bytes": file_size,
+                            "matches": 0,
+                        }
+                    )
+
+                return json.dumps(
+                    {
+                        "content": "\n".join(matches),
                         "file_size_bytes": file_size,
-                        "matches": 0
-                    })
-                
-                return json.dumps({
-                    "content": "\n".join(matches),
-                    "file_size_bytes": file_size,
-                    "matches": len(matches)
-                })
-            
+                        "matches": len(matches),
+                    }
+                )
+
             elif lines:
                 # Pagination mode: read specific line range
                 if len(lines) != 2 or lines[0] < 1 or lines[1] < lines[0]:
-                    return json.dumps({
-                        "error": "Invalid line range. Use [start_line, end_line] where start >= 1 and end >= start."
-                    })
-                
+                    return json.dumps(
+                        {
+                            "error": "Invalid line range. Use [start_line, end_line] where start >= 1 and end >= start."
+                        }
+                    )
+
                 start_line, end_line = lines
                 # Cap the range
                 end_line = min(end_line, start_line + max_lines - 1)
-                
+
                 selected_lines = []
                 for i, line in enumerate(f, 1):
                     if i >= start_line:
                         selected_lines.append(line.rstrip())
                     if i >= end_line:
                         break
-                
+
                 content = "\n".join(selected_lines)
-                
+
                 # Truncate content if too large
                 if len(content) > MAX_RETURN_CHARS:
-                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
-                
-                return json.dumps({
-                    "content": content,
-                    "file_size_bytes": file_size,
-                    "line_range": [start_line, min(end_line, i)],
-                    "lines_returned": len(selected_lines)
-                })
-            
+                    content = (
+                        content[:MAX_RETURN_CHARS]
+                        + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                    )
+
+                return json.dumps(
+                    {
+                        "content": content,
+                        "file_size_bytes": file_size,
+                        "line_range": [start_line, min(end_line, i)],
+                        "lines_returned": len(selected_lines),
+                    }
+                )
+
             else:
                 # Default: return first N lines
                 content_lines = []
                 for i, line in enumerate(f):
                     if i >= max_lines:
-                        content_lines.append(f"\n... [Content truncated at {max_lines} lines. Use 'lines' parameter for pagination] ...")
+                        content_lines.append(
+                            f"\n... [Content truncated at {max_lines} lines. Use 'lines' parameter for pagination] ..."
+                        )
                         break
                     content_lines.append(line.rstrip())
-                
+
                 content = "\n".join(content_lines)
-                
+
                 # Truncate content if too large
                 if len(content) > MAX_RETURN_CHARS:
-                    content = content[:MAX_RETURN_CHARS] + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
-                
-                return json.dumps({
-                    "content": content,
-                    "file_size_bytes": file_size,
-                    "lines_returned": len(content_lines),
-                    "note": "Use 'lines' or 'search' parameters for targeted retrieval"
-                })
-    
+                    content = (
+                        content[:MAX_RETURN_CHARS]
+                        + f"\n... [Truncated: Exceeded {MAX_RETURN_CHARS} char limit] ..."
+                    )
+
+                return json.dumps(
+                    {
+                        "content": content,
+                        "file_size_bytes": file_size,
+                        "lines_returned": len(content_lines),
+                        "note": "Use 'lines' or 'search' parameters for targeted retrieval",
+                    }
+                )
+
     except Exception as e:
-        return json.dumps({
-            "error": f"Failed to read asset: {str(e)}"
-        })
+        return json.dumps({"error": f"Failed to read asset: {str(e)}"})
+
 
 # -----------------------
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InterruptKernelArgs)
@@ -1460,11 +1598,13 @@ async def interrupt_kernel(notebook_path: str):
     """Stops the currently running cell immediately."""
     return await session_manager.interrupt_kernel(notebook_path)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(RestartKernelArgs)
 async def restart_kernel(notebook_path: str):
     """Restarts the kernel, clearing all variables but keeping outputs."""
     return await session_manager.restart_kernel(notebook_path)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(CheckWorkingDirectoryArgs)
@@ -1472,6 +1612,7 @@ async def check_working_directory(notebook_path: str):
     """Checks the current working directory (CWD) of the active kernel."""
     code = "import os; print(os.getcwd())"
     return await session_manager.run_simple_code(notebook_path, code)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SetWorkingDirectoryArgs)
@@ -1484,6 +1625,7 @@ async def set_working_directory(notebook_path: str, path: str):
     if "Error" in result:
         return result
     return f"Working directory changed to: {result}"
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(ListKernelPackagesArgs)
@@ -1498,11 +1640,13 @@ for p, v in installed:
 """
     return await session_manager.run_simple_code(notebook_path, code)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def list_available_environments():
     """Scans the system for Python environments (venvs, conda, etc)."""
     envs = session_manager.list_environments()
     return json.dumps(envs, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(SwitchKernelEnvironmentArgs)
@@ -1513,14 +1657,16 @@ async def switch_kernel_environment(notebook_path: str, venv_path: str):
     """
     # 1. Stop
     await session_manager.stop_kernel(notebook_path)
-    
+
     # 2. Start with new env
     result = await session_manager.start_kernel(notebook_path, venv_path)
     return f"Switched Environment. {result}"
 
+
 # ============================================================================
 # NEW TOOLS - Notebook Creation and Management
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def create_notebook(
@@ -1529,11 +1675,11 @@ def create_notebook(
     kernel_display_name: Optional[str] = None,
     language: str = "python",
     python_version: Optional[str] = None,
-    initial_cells: Optional[str] = None
+    initial_cells: Optional[str] = None,
 ):
     """
     Creates a new Jupyter notebook with proper metadata structure.
-    
+
     Args:
         notebook_path: Path where the notebook will be created
         kernel_name: Name of the kernel (e.g., 'python3', 'conda-env-myenv-py')
@@ -1541,7 +1687,7 @@ def create_notebook(
         language: Programming language (default: 'python')
         python_version: Python version string (e.g., '3.10.5'). Auto-detected if None.
         initial_cells: JSON string with list of dicts containing 'type' and 'content' keys
-    
+
     Returns:
         Success message with notebook path
     """
@@ -1552,39 +1698,40 @@ def create_notebook(
             cells = json.loads(initial_cells)
         except json.JSONDecodeError:
             return "Error: initial_cells must be valid JSON"
-    
+
     return notebook.create_notebook(
-        notebook_path,
-        kernel_name,
-        kernel_display_name,
-        language,
-        python_version,
-        cells
+        notebook_path, kernel_name, kernel_display_name, language, python_version, cells
     )
+
 
 # ============================================================================
 # Cell Manipulation Tools
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def move_cell(notebook_path: str, from_index: int, to_index: int):
     """Moves a cell from one position to another."""
     return notebook.move_cell(notebook_path, from_index, to_index)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def copy_cell(notebook_path: str, index: int, target_index: Optional[int] = None):
     """Copies a cell to a new position. If target_index is None, appends to end."""
     return notebook.copy_cell(notebook_path, index, target_index)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def merge_cells(notebook_path: str, start_index: int, end_index: int, separator: str = "\n\n"):
     """Merges cells from start_index to end_index (inclusive) into a single cell."""
     return notebook.merge_cells(notebook_path, start_index, end_index, separator)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def split_cell(notebook_path: str, index: int, split_at_line: int):
     """Splits a cell at the specified line number into two cells."""
     return notebook.split_cell(notebook_path, index, split_at_line)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def change_cell_type(notebook_path: str, index: int, new_type: str):
@@ -1594,15 +1741,18 @@ def change_cell_type(notebook_path: str, index: int, new_type: str):
     """
     return notebook.change_cell_type(notebook_path, index, new_type)
 
+
 # ============================================================================
 # Metadata Operations
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_notebook_metadata(notebook_path: str):
     """Gets the notebook-level metadata as JSON."""
     metadata = notebook.get_notebook_metadata(notebook_path)
     return json.dumps(metadata, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def set_notebook_metadata(notebook_path: str, metadata_json: str):
@@ -1614,19 +1764,27 @@ def set_notebook_metadata(notebook_path: str, metadata_json: str):
         metadata = json.loads(metadata_json)
     except json.JSONDecodeError:
         return "Error: metadata_json must be valid JSON"
-    
+
     return notebook.set_notebook_metadata(notebook_path, metadata)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
-def update_kernelspec(notebook_path: str, kernel_name: str, display_name: Optional[str] = None, language: Optional[str] = None):
+def update_kernelspec(
+    notebook_path: str,
+    kernel_name: str,
+    display_name: Optional[str] = None,
+    language: Optional[str] = None,
+):
     """Updates the kernelspec in notebook metadata."""
     return notebook.update_kernelspec(notebook_path, kernel_name, display_name, language)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_cell_metadata(notebook_path: str, index: int):
     """Gets metadata for a specific cell as JSON."""
     metadata = notebook.get_cell_metadata(notebook_path, index)
     return json.dumps(metadata, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def set_cell_metadata(notebook_path: str, index: int, metadata_json: str):
@@ -1638,8 +1796,9 @@ def set_cell_metadata(notebook_path: str, index: int, metadata_json: str):
         metadata = json.loads(metadata_json)
     except json.JSONDecodeError:
         return "Error: metadata_json must be valid JSON"
-    
+
     return notebook.set_cell_metadata(notebook_path, index, metadata)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def add_cell_tags(notebook_path: str, index: int, tags: str):
@@ -1651,8 +1810,9 @@ def add_cell_tags(notebook_path: str, index: int, tags: str):
         tag_list = json.loads(tags)
     except json.JSONDecodeError:
         return "Error: tags must be valid JSON array"
-    
+
     return notebook.add_cell_tags(notebook_path, index, tag_list)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def remove_cell_tags(notebook_path: str, index: int, tags: str):
@@ -1664,22 +1824,26 @@ def remove_cell_tags(notebook_path: str, index: int, tags: str):
         tag_list = json.loads(tags)
     except json.JSONDecodeError:
         return "Error: tags must be valid JSON array"
-    
+
     return notebook.remove_cell_tags(notebook_path, index, tag_list)
+
 
 # ============================================================================
 # Output Operations
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def clear_cell_outputs(notebook_path: str, index: int):
     """Clears outputs from a specific cell."""
     return notebook.clear_cell_outputs(notebook_path, index)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def clear_all_outputs(notebook_path: str):
     """Clears outputs from all code cells in the notebook."""
     return notebook.clear_all_outputs(notebook_path)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_cell_outputs(notebook_path: str, index: int):
@@ -1687,9 +1851,11 @@ def get_cell_outputs(notebook_path: str, index: int):
     outputs = notebook.get_cell_outputs(notebook_path, index)
     return json.dumps(outputs, indent=2)
 
+
 # ============================================================================
 # Validation
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def validate_notebook(notebook_path: str):
@@ -1697,9 +1863,11 @@ def validate_notebook(notebook_path: str):
     result = notebook.validate_notebook(notebook_path)
     return json.dumps(result, indent=2)
 
+
 # ============================================================================
 # Environment Detection and Management
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def find_python_executables():
@@ -1711,6 +1879,7 @@ def find_python_executables():
     executables = environment.find_python_executables()
     return json.dumps(executables, indent=2)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def validate_python_executable(python_path: str):
     """
@@ -1719,6 +1888,7 @@ def validate_python_executable(python_path: str):
     """
     result = environment.validate_python_executable(python_path)
     return json.dumps(result, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def auto_detect_environment(notebook_path: Optional[str] = None):
@@ -1730,32 +1900,33 @@ def auto_detect_environment(notebook_path: Optional[str] = None):
     result = environment.auto_detect_environment(notebook_path)
     return json.dumps(result, indent=2)
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def get_asset_content(asset_path: str) -> str:
     """
     Retrieve base64-encoded content of an asset file (PNG, PDF, SVG, etc.).
-    
+
     **Use Case**: When the server reports `[PNG SAVED: assets/xyz.png]` and you need
     to analyze the image content with multimodal capabilities.
-    
+
     **Security**: Only allows access to assets/ directory (prevents path traversal).
-    
+
     Args:
         asset_path: Relative path to asset, typically from execution output
                    Format: "assets/asset_abc123.png" or just "asset_abc123.png"
-    
+
     Returns:
         JSON with:
         - mime_type: MIME type of the asset (e.g., "image/png")
         - data: Base64-encoded binary content
         - size_bytes: Size of the encoded data
         - filename: Original filename
-    
+
     Agent Workflow Example:
         # 1. Execute cell that generates plot
         result = execute_cell(path, 0, "import matplotlib.pyplot as plt\\nplt.plot([1,2,3])")
         # Output: "[PNG SAVED: assets/asset_abc123.png]"
-        
+
         # 2. Retrieve asset for analysis
         asset = get_asset_content("assets/asset_abc123.png")
         # Now can pass asset['data'] to multimodal model for description
@@ -1763,10 +1934,10 @@ def get_asset_content(asset_path: str) -> str:
     import base64
     from pathlib import Path
     from src.security import validate_path
-    
+
     # Normalize path separators
     asset_path = asset_path.replace("\\", "/")
-    
+
     # Security: Extract just the filename if full path provided
     # Allows "assets/file.png" or just "file.png"
     path_parts = asset_path.split("/")
@@ -1774,149 +1945,172 @@ def get_asset_content(asset_path: str) -> str:
         filename = path_parts[-1]
     else:
         filename = path_parts[-1]
-    
+
     # Build full path relative to current working directory
     # Assets are always stored in assets/ subdirectory
     assets_dir = Path("assets").resolve()
-    
+
     # Security check: Use validate_path to prevent path traversal
     try:
         full_path = validate_path(filename, assets_dir)
     except PermissionError as e:
-        return json.dumps({
-            "error": "Security violation: Path traversal attempt blocked",
-            "requested_path": asset_path,
-            "details": str(e)
-        })
-    
+        return json.dumps(
+            {
+                "error": "Security violation: Path traversal attempt blocked",
+                "requested_path": asset_path,
+                "details": str(e),
+            }
+        )
+
     # Check if file exists
     if not full_path.exists():
-        return json.dumps({
-            "error": f"Asset not found: {asset_path}",
-            "checked_path": str(full_path),
-            "hint": "Ensure the cell has been executed and produced output. Check execution status."
-        })
-    
+        return json.dumps(
+            {
+                "error": f"Asset not found: {asset_path}",
+                "checked_path": str(full_path),
+                "hint": "Ensure the cell has been executed and produced output. Check execution status.",
+            }
+        )
+
     # Determine MIME type from extension
     mime_map = {
-        '.png': 'image/png',
-        '.jpg': 'image/jpeg',
-        '.jpeg': 'image/jpeg',
-        '.svg': 'image/svg+xml',
-        '.pdf': 'application/pdf',
-        '.gif': 'image/gif',
-        '.webp': 'image/webp'
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".svg": "image/svg+xml",
+        ".pdf": "application/pdf",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
     }
     suffix = full_path.suffix.lower()
-    mime_type = mime_map.get(suffix, 'application/octet-stream')
-    
+    mime_type = mime_map.get(suffix, "application/octet-stream")
+
     # Read and encode
     try:
-        with open(full_path, 'rb') as f:
+        with open(full_path, "rb") as f:
             raw_bytes = f.read()
-            data = base64.b64encode(raw_bytes).decode('utf-8')
-        
-        return json.dumps({
-            "mime_type": mime_type,
-            "data": data,
-            "size_bytes": len(raw_bytes),
-            "encoded_size": len(data),
-            "filename": filename,
-            "full_path": str(full_path)
-        }, indent=2)
-    
+            data = base64.b64encode(raw_bytes).decode("utf-8")
+
+        return json.dumps(
+            {
+                "mime_type": mime_type,
+                "data": data,
+                "size_bytes": len(raw_bytes),
+                "encoded_size": len(data),
+                "filename": filename,
+                "full_path": str(full_path),
+            },
+            indent=2,
+        )
+
     except Exception as e:
-        return json.dumps({
-            "error": f"Failed to read asset: {str(e)}",
-            "asset_path": str(full_path)
-        })
+        return json.dumps(
+            {"error": f"Failed to read asset: {str(e)}", "asset_path": str(full_path)}
+        )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
-def edit_cell_by_id(notebook_path: str, cell_id: str, content: str, expected_index: Optional[int] = None):
+def edit_cell_by_id(
+    notebook_path: str, cell_id: str, content: str, expected_index: Optional[int] = None
+):
     """
     [GIT-SAFE] Edit cell by stable Cell ID instead of index.
-    
+
     **Why Cell IDs**: Index-based addressing breaks when cells are added/deleted.
     Cell IDs are stable UUIDs that survive notebook restructuring.
-    
+
     **Pre-flight Validation**: If expected_index is provided, checks that the cell
     hasn't moved since the agent last read the outline. Prevents overwriting wrong cell.
-    
+
     Args:
         notebook_path: Path to notebook
         cell_id: Cell ID from get_notebook_outline (e.g., "89523d2a-...")
         content: New cell content
         expected_index: Optional - cell's last known index for staleness check
-    
+
     Returns:
         Success message or StaleStateError
-    
+
     Agent Workflow:
         # 1. Get current outline
         outline = get_notebook_outline(path)
         cell = outline[5]  # Edit 6th cell
-        
+
         # 2. Edit by ID with validation
         result = edit_cell_by_id(
-            path, 
+            path,
             cell_id=cell['id'],
             content="import pandas as pd",
             expected_index=cell['index']  # Prevents race conditions
         )
     """
     from src.cell_id_manager import edit_cell_by_id as _edit_by_id, StaleStateError
-    
+
     try:
         return _edit_by_id(notebook_path, cell_id, content, expected_index)
     except StaleStateError as e:
-        return json.dumps({
-            "error": "StaleStateError",
-            "message": str(e),
-            "action_required": "Call get_notebook_outline() to refresh cell positions and retry"
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "StaleStateError",
+                "message": str(e),
+                "action_required": "Call get_notebook_outline() to refresh cell positions and retry",
+            },
+            indent=2,
+        )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def delete_cell_by_id(notebook_path: str, cell_id: str, expected_index: Optional[int] = None):
     """
     [GIT-SAFE] Delete cell by stable Cell ID.
-    
+
     See edit_cell_by_id for rationale on Cell ID addressing.
     """
     from src.cell_id_manager import delete_cell_by_id as _delete_by_id, StaleStateError
-    
+
     try:
         return _delete_by_id(notebook_path, cell_id, expected_index)
     except StaleStateError as e:
-        return json.dumps({
-            "error": "StaleStateError",
-            "message": str(e),
-            "action_required": "Call get_notebook_outline() to refresh and retry"
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "StaleStateError",
+                "message": str(e),
+                "action_required": "Call get_notebook_outline() to refresh and retry",
+            },
+            indent=2,
+        )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
-def insert_cell_by_id(notebook_path: str, after_cell_id: Optional[str], content: str, cell_type: str = "code"):
+def insert_cell_by_id(
+    notebook_path: str, after_cell_id: Optional[str], content: str, cell_type: str = "code"
+):
     """
     [GIT-SAFE] Insert new cell after specified Cell ID.
-    
+
     Args:
         notebook_path: Path to notebook
         after_cell_id: Insert after this Cell ID (None = prepend to start)
         content: Cell content
         cell_type: 'code' or 'markdown'
-    
+
     Returns:
         Success message with new cell's ID
     """
     from src.cell_id_manager import insert_cell_by_id as _insert_by_id, StaleStateError
-    
+
     try:
         return _insert_by_id(notebook_path, after_cell_id, content, cell_type)
     except StaleStateError as e:
-        return json.dumps({
-            "error": "StaleStateError",
-            "message": str(e),
-            "action_required": "Call get_notebook_outline() to refresh and retry"
-        }, indent=2)
+        return json.dumps(
+            {
+                "error": "StaleStateError",
+                "message": str(e),
+                "action_required": "Call get_notebook_outline() to refresh and retry",
+            },
+            indent=2,
+        )
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def create_venv(path: str, python_executable: str = ""):
@@ -1931,36 +2125,40 @@ def create_venv(path: str, python_executable: str = ""):
         result = environment.create_venv(path, sys.executable)
     return json.dumps(result, indent=2)
 
+
 # ============================================================================
 # Git-Awareness Tools (Git-Safe Workflow)
 # ============================================================================
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
     """
     [GIT-SAFE] Save notebook in Git-friendly format.
-    
+
     Strips volatile metadata while keeping outputs for GitHub viewing:
     - execution_count (set to null)
     - Volatile cell metadata (timestamps, collapsed, scrolled)
     - Optionally strips all outputs if strip_outputs=True
-    
+
     **When to use**: Call this before git commit to minimize merge conflicts.
-    
+
     Args:
         notebook_path: Path to notebook file
         strip_outputs: If True, also remove all outputs (for sensitive data)
-    
+
     Returns:
         Success message with count of cleaned cells
-    
+
     Example:
         # Before committing
         save_notebook_clean("analysis.ipynb")
         # Then: git add analysis.ipynb && git commit
     """
     from src.git_tools import save_notebook_clean as _save_clean
+
     return _save_clean(notebook_path, strip_outputs)
+
 
 # [PHASE 4: DESCOPED] Git filter setup removed
 # @mcp.tool()
@@ -1980,23 +2178,24 @@ def save_notebook_clean(notebook_path: str, strip_outputs: bool = False):
 #     """REMOVED: Agent should not commit code. Human reviews and commits."""
 #     pass
 
+
 # @mcp.tool()  # MOVED TO src/tools/
 def prune_unused_assets(notebook_path: str, dry_run: bool = False):
     """
     [GIT-SAFE] Delete asset files not referenced in notebook.
     Implements "Reference Counting GC" for both image assets and text offload files.
-    
+
     Scans notebook for asset references (images and text_*.txt files),
     deletes orphaned files. Automatically runs on kernel stop to maintain Git hygiene.
     Safe to run periodically to clean up after cell deletions.
-    
+
     Args:
         notebook_path: Path to notebook file
         dry_run: If True, only report what would be deleted
-    
+
     Returns:
         JSON with deleted/kept files and size freed
-    
+
     Example:
         # Check what would be deleted
         prune_unused_assets("analysis.ipynb", dry_run=True)
@@ -2004,49 +2203,53 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False):
         prune_unused_assets("analysis.ipynb")
     """
     from src.asset_manager import prune_unused_assets as _prune_assets
+
     result = _prune_assets(notebook_path, dry_run)
     return json.dumps(result, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def get_assets_summary(notebook_path: str):
     """
     [GIT-SAFE] Get summary of asset usage for a notebook.
-    
+
     Returns counts and sizes of assets (total, referenced, orphaned).
     Useful to understand storage impact before/after cleanup.
-    
+
     Args:
         notebook_path: Path to notebook file
-    
+
     Returns:
         JSON with asset statistics
-    
+
     Example:
         get_assets_summary("analysis.ipynb")
         # Shows: 50 total assets, 30 referenced, 20 orphaned
     """
     from src.asset_manager import get_assets_summary as _get_summary
+
     result = _get_summary(notebook_path)
     return json.dumps(result, indent=2)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(InstallPackageArgs)
 async def install_package(notebook_path: str, package: str):
     """
     [ENVIRONMENT] Install a Python package in the kernel's environment.
-    
+
     Better than !pip install because:
     - Uses the correct pip for the kernel
     - Returns clear success/failure
     - Reminds about kernel restart if needed
-    
+
     Args:
         notebook_path: Path to notebook (determines which kernel environment)
         package: Package name or pip specifier (e.g., "pandas", "numpy>=1.20")
-    
+
     Returns:
         JSON with installation status and instructions
-        
+
     Example:
         install_package("analysis.ipynb", "pandas==2.0.0")
         # Returns: {"success": true, "message": "Package installed. Restart kernel to use."}
@@ -2054,11 +2257,9 @@ async def install_package(notebook_path: str, package: str):
     session = session_manager.get_session(notebook_path)
     if not session:
         return ToolResult(
-            success=False,
-            data={},
-            error_msg="No running kernel. Call start_kernel first."
+            success=False, data={}, error_msg="No running kernel. Call start_kernel first."
         ).to_json()
-    
+
     # Install command using sys.executable (correct Python for kernel)
     install_code = f"""
 import subprocess
@@ -2074,7 +2275,7 @@ print("STDOUT:", result.stdout)
 print("STDERR:", result.stderr)
 print("RETURNCODE:", result.returncode)
 """
-    
+
     # Execute installation using SessionManager's queue (index -1 = internal tool)
     try:
         exec_id = await session_manager.execute_cell_async(notebook_path, -1, install_code)
@@ -2083,87 +2284,83 @@ print("RETURNCODE:", result.returncode)
         return ToolResult(
             success=False,
             data={},
-            error_msg=f"Execution queue is full. Cannot install package. {str(e)}"
+            error_msg=f"Execution queue is full. Cannot install package. {str(e)}",
         ).to_json()
-    
+
     if not exec_id:
         return ToolResult(
-            success=False,
-            data={},
-            error_msg="Failed to submit installation"
+            success=False, data={}, error_msg="Failed to submit installation"
         ).to_json()
-    
+
     # Wait for completion
     import time
+
     timeout = 60  # Package installation can take time
     start_time = time.time()
-    
+
     while time.time() - start_time < timeout:
         status = session_manager.get_execution_status(notebook_path, exec_id)
-        if status['status'] in ['completed', 'error']:
+        if status["status"] in ["completed", "error"]:
             # Check if installation succeeded
-            outputs = status.get('outputs', [])
+            outputs = status.get("outputs", [])
             output_text = ""
             for out in outputs:
-                if out.get('output_type') == 'stream' and 'text' in out:
-                    output_text += out['text']
-            
+                if out.get("output_type") == "stream" and "text" in out:
+                    output_text += out["text"]
+
             # Parse return code
             success = "RETURNCODE: 0" in output_text
-            
+
             if success:
                 return ToolResult(
                     success=True,
-                    data={
-                        'package': package,
-                        'output': output_text
-                    },
-                    user_suggestion=f"Package '{package}' installed successfully. Restart kernel to use new package."
+                    data={"package": package, "output": output_text},
+                    user_suggestion=f"Package '{package}' installed successfully. Restart kernel to use new package.",
                 ).to_json()
             else:
                 return ToolResult(
                     success=False,
-                    data={'output': output_text},
+                    data={"output": output_text},
                     error_msg=f"Failed to install '{package}'",
-                    user_suggestion="Check package name and version. See output for details."
+                    user_suggestion="Check package name and version. See output for details.",
                 ).to_json()
-        
+
         await asyncio.sleep(0.5)
-    
-    return ToolResult(
-        success=False,
-        data={},
-        error_msg="Installation timeout (60s)"
-    ).to_json()
+
+    return ToolResult(success=False, data={}, error_msg="Installation timeout (60s)").to_json()
+
 
 # --- SUPERPOWER TOOLS: SQL Queries, Auto-EDA, Time Travel ---
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 @validated_tool(QueryDataframesArgs)
 async def query_dataframes(notebook_path: str, sql_query: str):
     """
     [SUPERPOWER] Run SQL directly on active DataFrames using DuckDB.
-    
+
     Execute SQL queries against pandas/polars DataFrames in memory.
     No data copying required - DuckDB reads directly from Python objects.
-    
+
     Args:
         notebook_path: Path to notebook with running kernel
         sql_query: SQL query (e.g., "SELECT * FROM df WHERE amount > 100")
-    
+
     Returns:
         JSON with query results as markdown table
-        
+
     Example:
         query_dataframes("analysis.ipynb", "SELECT region, SUM(revenue) FROM df_sales GROUP BY region")
         # Returns: Markdown table with aggregated results
-        
+
     Wow Factor:
         Users can explore data with SQL instead of pandas syntax.
         "Show me top 5 users by revenue" becomes a simple SQL query.
     """
     from src.data_tools import query_dataframes as _query_df
+
     return await _query_df(session_manager, notebook_path, sql_query)
+
 
 # [IIRB P0 FIX #1] REMOVED: save_checkpoint and load_checkpoint tools
 # These tools called non-existent SessionManager.save_checkpoint/load_checkpoint methods.
@@ -2183,28 +2380,30 @@ async def query_dataframes(notebook_path: str, sql_query: str):
 
 # --- PROMPTS: Consumer-Ready Personas for Claude Desktop ---
 
+
 def _read_prompt(filename: str) -> str:
     """Helper to read prompt files from the package."""
     try:
         # Locate the prompts directory relative to this file (src/main.py)
         current_dir = Path(__file__).parent
         prompt_path = current_dir / "prompts" / filename
-        
+
         if not prompt_path.exists():
             return f"Error: Prompt file '{filename}' not found at {prompt_path}"
-            
+
         return prompt_path.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error reading prompt: {str(e)}"
+
 
 # @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def jupyter_expert() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Jupyter Expert persona.
     Use this to turn Claude into a safe, state-aware Data Science co-pilot.
-    
+
     Activates with: /prompt jupyter-expert
-    
+
     Persona traits:
     - Always checks sync status before execution
     - Uses inspect_variable for large DataFrames
@@ -2212,21 +2411,17 @@ def jupyter_expert() -> list[types.PromptMessage]:
     - Follows Hub and Spoke architecture
     """
     content = _read_prompt("jupyter_expert.md")
-    return [
-        types.PromptMessage(
-            role="user", 
-            content=types.TextContent(type="text", text=content)
-        )
-    ]
+    return [types.PromptMessage(role="user", content=types.TextContent(type="text", text=content))]
+
 
 # @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def autonomous_researcher() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Autonomous Researcher.
     Use this for long-running, self-correcting tasks.
-    
+
     Activates with: /prompt autonomous-researcher
-    
+
     Persona traits:
     - Follows OODA loop (Observe, Orient, Decide, Act)
     - Self-healing error recovery
@@ -2234,39 +2429,31 @@ def autonomous_researcher() -> list[types.PromptMessage]:
     - Documents findings automatically
     """
     content = _read_prompt("autonomous_researcher.md")
-    return [
-        types.PromptMessage(
-            role="user", 
-            content=types.TextContent(type="text", text=content)
-        )
-    ]
+    return [types.PromptMessage(role="user", content=types.TextContent(type="text", text=content))]
+
 
 # @mcp.prompt()  # MOVED TO src/tools/prompts_tools.py
 def auto_analyst() -> list[types.PromptMessage]:
     """
     Returns the System Prompt for the Auto-Analyst.
     Use this for automatic Exploratory Data Analysis (EDA).
-    
+
     Activates with: /prompt auto-analyst
-    
+
     Persona traits:
     - Autonomous EDA generation (no permission needed)
     - Generates missing values maps, distributions, correlations
     - Saves all plots to assets/
     - Creates comprehensive summary reports
     - Uses SQL for fast data exploration
-    
+
     Wow Factor:
         User drops a CSV and says "analyze this."
         Agent generates full EDA report with 5 plots in 60 seconds.
     """
     content = _read_prompt("auto_analyst.md")
-    return [
-        types.PromptMessage(
-            role="user", 
-            content=types.TextContent(type="text", text=content)
-        )
-    ]
+    return [types.PromptMessage(role="user", content=types.TextContent(type="text", text=content))]
+
 
 # --- NEW: Client Bridge Logic ---
 async def run_bridge(uri: str):
@@ -2274,7 +2461,7 @@ async def run_bridge(uri: str):
     Client Mode: Connects stdin/stdout to the running WebSocket server.
     """
     logger.info(f"[Bridge] Connecting to {uri}...")
-    
+
     async def forward_stdin_to_ws(ws):
         loop = asyncio.get_event_loop()
         reader = asyncio.StreamReader()
@@ -2287,7 +2474,7 @@ async def run_bridge(uri: str):
                 break
             try:
                 # Verify valid JSON before sending to avoid breaking the pipe
-                json.loads(line) 
+                json.loads(line)
                 await ws.send(line.decode())
             except Exception as e:
                 logger.error(f"[Bridge] Error reading stdin: {e}")
@@ -2299,42 +2486,44 @@ async def run_bridge(uri: str):
 
     try:
         # Connect with the required subprotocol
-        async with websockets.connect(uri, subprotocols=['mcp']) as ws:
+        async with websockets.connect(uri, subprotocols=["mcp"]) as ws:
             logger.info("[Bridge] Connected successfully.")
-            await asyncio.gather(
-                forward_stdin_to_ws(ws),
-                forward_ws_to_stdout(ws)
-            )
+            await asyncio.gather(forward_stdin_to_ws(ws), forward_ws_to_stdout(ws))
     except Exception as e:
         logger.error(f"[Bridge] Connection failed: {e}")
         # Emit a JSON-RPC error to the agent so it fails gracefully
-        print(json.dumps({
-            "jsonrpc": "2.0", 
-            "error": {"code": -32603, "message": f"Bridge connection failed: {str(e)}"},
-            "id": None
-        }))
+        print(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": f"Bridge connection failed: {str(e)}"},
+                    "id": None,
+                }
+            )
+        )
         sys.exit(1)
+
 
 # @mcp.tool()  # MOVED TO src/tools/
 def export_diagnostic_bundle():
     """
     [ENTERPRISE SUPPORT] Export a diagnostic bundle for troubleshooting.
-    
+
     Creates a ZIP file containing:
     - .mcp/ directory (session files, checkpoints)
     - Latest server.log (error diagnostics)
     - System info (Python version, packages, OS)
-    
+
     **Use When**: "Something broke. Let me send you the diagnostic bundle."
-    
+
     **What Support Gets**:
     - Complete session state
     - Full error trace
     - Environment details
-    
+
     Returns:
         JSON with path to ZIP file and size
-        
+
     Example:
         bundle = export_diagnostic_bundle()
         # Returns: {"path": "/tmp/mcp-diag-2025-01-17.zip", "size_mb": 2.5}
@@ -2343,68 +2532,69 @@ def export_diagnostic_bundle():
     import zipfile
     import tempfile
     import subprocess
-    
+
     try:
         # Create temporary ZIP
-        fd, zip_path = tempfile.mkstemp(suffix='.zip', prefix='mcp-diag-')
+        fd, zip_path = tempfile.mkstemp(suffix=".zip", prefix="mcp-diag-")
         os.close(fd)
-        
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             # 1. Include .mcp directory (sessions, checkpoints)
             mcp_dir = settings.get_data_dir()
             if mcp_dir.exists():
-                for file in mcp_dir.rglob('*'):
+                for file in mcp_dir.rglob("*"):
                     if file.is_file():
                         zf.write(file, arcname=f".mcp/{file.relative_to(mcp_dir)}")
-            
+
             # 2. Include latest logs
             log_files = list(Path.cwd().glob("*.log"))
             for log_file in log_files[-5:]:  # Last 5 log files
                 if log_file.is_file():
                     zf.write(log_file, arcname=f"logs/{log_file.name}")
-            
+
             # 3. Include system info
             sysinfo = {
                 "timestamp": datetime.datetime.now().isoformat(),
                 "python_version": sys.version,
                 "platform": sys.platform,
                 "active_sessions": len(session_manager.sessions),
-                "installed_packages": {}
+                "installed_packages": {},
             }
-            
+
             # Capture pip list
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "pip", "list", "--format", "json"],
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
                 )
                 if result.returncode == 0:
                     sysinfo["installed_packages"] = json.loads(result.stdout)
             except Exception:
                 pass
-            
+
             # Write sysinfo.json
             zf.writestr("sysinfo.json", json.dumps(sysinfo, indent=2))
-        
+
         # Get file size
         size_mb = Path(zip_path).stat().st_size / (1024 * 1024)
-        
-        return json.dumps({
-            "status": "success",
-            "path": zip_path,
-            "size_mb": round(size_mb, 2),
-            "message": f"Diagnostic bundle created. Share this with IT/Support for quick diagnosis.",
-            "instructions": "Email this file to data-tools@yourorg.com with subject 'MCP Jupyter Issue Report'"
-        }, indent=2)
-        
+
+        return json.dumps(
+            {
+                "status": "success",
+                "path": zip_path,
+                "size_mb": round(size_mb, 2),
+                "message": f"Diagnostic bundle created. Share this with IT/Support for quick diagnosis.",
+                "instructions": "Email this file to data-tools@yourorg.com with subject 'MCP Jupyter Issue Report'",
+            },
+            indent=2,
+        )
+
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "error": str(e),
-            "message": "Failed to create diagnostic bundle"
-        })
+        return json.dumps(
+            {"status": "error", "error": str(e), "message": "Failed to create diagnostic bundle"}
+        )
 
 
 def log_startup_configuration():
@@ -2420,38 +2610,61 @@ def log_startup_configuration():
 
 def main():
     import argparse
-    
+
     # [LAST MILE #1] Log startup configuration banner
     log_startup_configuration()
-    
+
     parser = argparse.ArgumentParser(description="MCP Jupyter Server")
-    
+
     # Mode selection
-    parser.add_argument("--mode", default="server", choices=["server", "client"], 
-                       help="Run as a 'server' (host) or 'client' (bridge to existing server)")
-    
+    parser.add_argument(
+        "--mode",
+        default="server",
+        choices=["server", "client"],
+        help="Run as a 'server' (host) or 'client' (bridge to existing server)",
+    )
+
     # Server args
-    parser.add_argument("--transport", default="stdio", choices=["stdio", "websocket", "sse"],
-                       help="[Server Mode] Transport type")
-    parser.add_argument("--host", default="127.0.0.1", 
-                       help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)")
-    parser.add_argument("--port", type=int, default=3000, 
-                       help="Port number")
-    parser.add_argument("--idle-timeout", type=int, default=0,
-                       help="Auto-shutdown server after N seconds of no connections (0 to disable)")
-    parser.add_argument("--data-dir", default=None,
-                       help="[Security] Point assets to encrypted/secure volume. Default: ./assets")
-    parser.add_argument("--isolate", action="store_true",
-                       help="[Docker] Enable Docker isolation for kernel execution (opt-in)")
+    parser.add_argument(
+        "--transport",
+        default="stdio",
+        choices=["stdio", "websocket", "sse"],
+        help="[Server Mode] Transport type",
+    )
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="Bind address (default: 127.0.0.1, use 0.0.0.0 for Docker/Remote)",
+    )
+    parser.add_argument("--port", type=int, default=3000, help="Port number")
+    parser.add_argument(
+        "--idle-timeout",
+        type=int,
+        default=0,
+        help="Auto-shutdown server after N seconds of no connections (0 to disable)",
+    )
+    parser.add_argument(
+        "--data-dir",
+        default=None,
+        help="[Security] Point assets to encrypted/secure volume. Default: ./assets",
+    )
+    parser.add_argument(
+        "--isolate",
+        action="store_true",
+        help="[Docker] Enable Docker isolation for kernel execution (opt-in)",
+    )
 
     # Client args
-    parser.add_argument("--uri", default=None,
-                       help="[Client Mode] WebSocket URI to connect to (e.g. ws://127.0.0.1:3000/ws)")
+    parser.add_argument(
+        "--uri",
+        default=None,
+        help="[Client Mode] WebSocket URI to connect to (e.g. ws://127.0.0.1:3000/ws)",
+    )
 
     args = parser.parse_args()
 
     # Windows event loop policy fix
-    if sys.platform == 'win32':
+    if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     # Bind global exception handler and set a dedicated loop so fatal errors are caught
@@ -2473,20 +2686,51 @@ def main():
     try:
         # [SECURITY] Generate and communicate auth token
         import secrets
+
         token = os.environ.get("MCP_SESSION_TOKEN")
         if not token:
             token = secrets.token_urlsafe(32)
             os.environ["MCP_SESSION_TOKEN"] = token
         print(f"[MCP_SESSION_TOKEN]: {token}", file=sys.stderr)
 
+        # [TOKEN HANDSHAKE] Persist connection info file for "Zero-Config" localhost
+        try:
+            home = Path.home()
+            config_dir = home / ".mcp-jupyter"
+            config_dir.mkdir(parents=True, exist_ok=True)
+            conn_file = config_dir / "connection.json"
+
+            # Write with restricted permissions (0600)
+            # Create file first to set permissions
+            if not conn_file.exists():
+                conn_file.touch(mode=0o600)
+            else:
+                os.chmod(conn_file, 0o600)
+
+            # Use actual port or args.port (might be 0, updated later if socket bound)
+            # We will update this again after binding the socket if port is 0
+            # But here we just write the token primarily
+            conn_info = {
+                "token": token,
+                "port": args.port,
+                "host": args.host,
+                "pid": os.getpid(),
+                "updated_at": datetime.datetime.now().isoformat(),
+            }
+            conn_file.write_text(json.dumps(conn_info, indent=2))
+        except Exception as e:
+            logger.warning(f"Failed to write connection file: {e}")
+
         # CONFIGURE HEARTBEAT (auto-shutdown when no clients are connected)
-        if getattr(args, 'idle_timeout', 0) and args.idle_timeout > 0:
+        if getattr(args, "idle_timeout", 0) and args.idle_timeout > 0:
             connection_manager.set_idle_timeout(args.idle_timeout)
 
         # Restore any persisted sessions from previous server runs
         # Wrap in timeout to prevent hanging on stale session files
         try:
-            asyncio.run(asyncio.wait_for(session_manager.restore_persisted_sessions(), timeout=10.0))
+            asyncio.run(
+                asyncio.wait_for(session_manager.restore_persisted_sessions(), timeout=10.0)
+            )
         except asyncio.TimeoutError:
             logger.warning("Session restoration timed out, skipping")
 
@@ -2495,17 +2739,20 @@ def main():
             loop.run_until_complete(session_manager.reconcile_zombies())
         except Exception as e:
             logger.error("reaper_failed", error=str(e))
-        
+
         # Start deferred background tasks now that we have an event loop
         _ensure_proposal_cleanup_task()
         session_manager._ensure_asset_cleanup_task()
-        
+
         if args.transport == "websocket":
+            with open("/tmp/mcp_boot.log", "a") as f:
+                f.write("DEBUG: Entering websocket block\n")
+
             import uvicorn
             from starlette.applications import Starlette
             from starlette.routing import WebSocketRoute
             from mcp.server.websocket import websocket_server
-            
+
             async def mcp_websocket_endpoint(websocket: WebSocket):
                 logger.info(f"WebSocket endpoint called! Client: {websocket.client}")
                 try:
@@ -2514,11 +2761,13 @@ def main():
                     # This allows FastMCP to read/write, while ConnectionManager can also broadcast
                     # NOTE: websocket_server() performs the WebSocket handshake (accept)
                     logger.info("Entering websocket_server context manager...")
-                    async with websocket_server(websocket.scope, websocket.receive, websocket.send) as (read_stream, write_stream):
+                    async with websocket_server(
+                        websocket.scope, websocket.receive, websocket.send
+                    ) as (read_stream, write_stream):
                         logger.info("✅ WebSocket handshake completed!")
                         # A. Register connection AFTER handshake is complete
                         await connection_manager.connect(websocket)
-                        
+
                         await mcp._mcp_server.run(
                             read_stream,
                             write_stream,
@@ -2532,9 +2781,9 @@ def main():
                     # (sometimes wrapped in an ExceptionGroup on Python 3.11+). Treat these as normal.
                     def _is_closed_resource_error(err: BaseException) -> bool:
                         try:
-                            if err.__class__.__name__ == 'ClosedResourceError':
+                            if err.__class__.__name__ == "ClosedResourceError":
                                 return True
-                            sub = getattr(err, 'exceptions', None)
+                            sub = getattr(err, "exceptions", None)
                             if sub and isinstance(sub, (list, tuple)):
                                 return any(_is_closed_resource_error(x) for x in sub)
                         except Exception:
@@ -2552,7 +2801,7 @@ def main():
             # [DATA GRAVITY FIX] Mount assets directory for HTTP access
             # Instead of sending 50MB Base64 blobs over WebSocket, serve assets via HTTP
             # This prevents JSON-RPC connection choking on large binary data
-            
+
             # [SECURITY] Allow pointing assets to secure volume (e.g., encrypted partition)
             if args.data_dir:
                 assets_path = Path(args.data_dir).resolve()
@@ -2561,11 +2810,11 @@ def main():
             else:
                 assets_path = Path.cwd() / "assets"
                 assets_path.mkdir(exist_ok=True)
-            
+
             # Store port in environment for utils.py to construct URLs
-            os.environ['MCP_PORT'] = str(args.port)
-            os.environ['MCP_HOST'] = args.host
-            os.environ['MCP_DATA_DIR'] = str(assets_path)
+            os.environ["MCP_PORT"] = str(args.port)
+            os.environ["MCP_HOST"] = args.host
+            os.environ["MCP_DATA_DIR"] = str(assets_path)
 
             from src.security import TokenAuthMiddleware
             from starlette.middleware import Middleware
@@ -2576,28 +2825,42 @@ def main():
                     Route("/health", health_check),
                     WebSocketRoute("/ws", mcp_websocket_endpoint),
                     # Mount assets at /assets for HTTP access
-                    Mount("/assets", app=StaticFiles(directory=str(assets_path)), name="assets")
+                    Mount("/assets", app=StaticFiles(directory=str(assets_path)), name="assets"),
                 ],
-                middleware=[
-                    Middleware(TokenAuthMiddleware)
-                ]
+                middleware=[Middleware(TokenAuthMiddleware)],
             )
-            
+
             # [ROUND 2 AUDIT] Add trace_id propagation middleware
             app.middleware("http")(trace_middleware)
-            
+
             # [FIX] Bind a socket and hand the FD to Uvicorn to avoid TOCTOU races
             import socket
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((args.host, args.port if args.port != 0 else 0))
-            sock.listen(1)
+            sock.listen(100)
             actual_port = sock.getsockname()[1]
 
             # Print port to stderr so parent process can parse it if needed
-            print(f"[MCP_PORT]: {actual_port}", file=sys.stderr)
-            print(f"MCP Server listening on ws://{args.host}:{actual_port}/ws", file=sys.stderr)
-            
+            print(f"[MCP_PORT]: {actual_port}", file=sys.stderr, flush=True)
+            print(
+                f"MCP Server listening on ws://{args.host}:{actual_port}/ws",
+                file=sys.stderr,
+                flush=True,
+            )
+
+            # [TOKEN HANDSHAKE] Update connection file with actual bound port
+            try:
+                home = Path.home()
+                conn_file = home / ".mcp-jupyter" / "connection.json"
+                if conn_file.exists():
+                    data = json.loads(conn_file.read_text())
+                    data["port"] = actual_port
+                    conn_file.write_text(json.dumps(data, indent=2))
+            except Exception:
+                pass
+
             host = args.host if args.host != "0.0.0.0" else "localhost"
             print(f"\n🚀 MCP Server Running.")
             print(f"To connect VS Code, open the Command Palette and run:")
@@ -2609,7 +2872,7 @@ def main():
             config = uvicorn.Config(
                 app=app,
                 fd=sock.fileno(),
-                log_level="error",
+                log_level="info",  # Enable info logs to see connection attempts
                 loop="asyncio",
                 limit_concurrency=100,  # Max concurrent connections
                 limit_max_requests=10000,  # Restart worker after N requests
@@ -2621,6 +2884,12 @@ def main():
 
             try:
                 server.run()
+            except Exception as e:
+                print(f"[FATAL] Server crashed: {e}", file=sys.stderr, flush=True)
+                import traceback
+
+                traceback.print_exc(file=sys.stderr)
+                raise
             finally:
                 # [CRUCIBLE] Graceful shutdown sequence
                 try:
@@ -2633,12 +2902,13 @@ def main():
                     pass
                 except Exception:
                     pass
-             
+
         else:
             # Start the MCP server using Standard IO
             mcp.run()
     finally:
         asyncio.run(session_manager.shutdown_all())
+
 
 if __name__ == "__main__":
     main()

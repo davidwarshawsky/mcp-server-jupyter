@@ -35,6 +35,14 @@ export class QuickStartWizard {
    * [DS UX FIX] Now triggers silent auto-install instead of showing notifications
    */
   public showIfNeeded(): void {
+    // Check configuration first
+    const config = vscode.workspace.getConfiguration('mcp-jupyter');
+    const showWizard = config.get<boolean>('showSetupWizard', true);
+
+    if (!showWizard) {
+      return;
+    }
+
     const isSetupComplete = this.context.globalState.get('mcp.hasCompletedSetup', false);
     if (!isSetupComplete) {
       // [DS UX FIX] Start silent auto-install - no wizard, no prompts
@@ -52,14 +60,14 @@ export class QuickStartWizard {
   private async runSilentAutoInstall(): Promise<void> {
     // Prevent duplicate auto-installs
     if (this.isAutoInstalling) return;
-    
+
     const alreadyAttempted = this.context.workspaceState.get('mcp.autoInstallAttempted', false);
     if (alreadyAttempted) {
       // Show status bar for manual retry if auto-install already attempted this session
       this.statusBarItem.show();
       return;
     }
-    
+
     this.isAutoInstalling = true;
     await this.context.workspaceState.update('mcp.autoInstallAttempted', true);
 
@@ -71,18 +79,18 @@ export class QuickStartWizard {
     try {
       // Step 1: Create managed environment (silent)
       const venvPath = await this.setupManager.createManagedEnvironmentSilent();
-      
+
       // Step 2: Install dependencies (silent)
       await this.setupManager.installDependenciesSilent(venvPath);
-      
+
       // Step 3: Start server
       await this.mcpClient.start();
-      
+
       // Success! Mark setup complete
       await this.context.globalState.update('mcp.hasCompletedSetup', true);
       this.statusBarItem.hide();
       statusMessage.dispose();
-      
+
       // Show success toast with kernel hint
       vscode.window.showInformationMessage(
         '✅ AI Agent Ready! Select "MCP Agent Kernel" in any notebook to start.',
@@ -92,17 +100,17 @@ export class QuickStartWizard {
           this.openTestNotebook();
         }
       });
-      
+
       // Flash the kernel picker to draw attention
       vscode.commands.executeCommand('notebook.selectKernel');
-      
+
     } catch (error) {
       statusMessage.dispose();
       this.isAutoInstalling = false;
-      
+
       // Only show error on failure - don't bother user if it worked
       const errorMessage = error instanceof Error ? error.message : String(error);
-      
+
       // Show discrete error with option to manually configure
       vscode.window.showErrorMessage(
         `AI Kernel setup failed: ${errorMessage}`,
@@ -115,7 +123,7 @@ export class QuickStartWizard {
           this.mcpClient.getOutputChannel().show();
         }
       });
-      
+
       // Show status bar for manual retry
       this.statusBarItem.show();
     }
@@ -129,15 +137,15 @@ export class QuickStartWizard {
     // Don't show if we already showed it this session
     const shownThisSession = this.context.workspaceState.get('mcp.welcomeShownThisSession', false);
     if (shownThisSession) return;
-    
+
     await this.context.workspaceState.update('mcp.welcomeShownThisSession', true);
-    
+
     const choice = await vscode.window.showInformationMessage(
       '🚀 Welcome to MCP Jupyter! Set up your AI Data Science Assistant in 60 seconds.',
       'Setup Now (Recommended)',
       'Later'
     );
-    
+
     if (choice === 'Setup Now (Recommended)') {
       await this.run();
     }
@@ -156,7 +164,7 @@ export class QuickStartWizard {
   public async run(): Promise<void> {
     // Check if already set up
     const isSetupComplete = this.context.globalState.get('mcp.hasCompletedSetup', false);
-    
+
     if (isSetupComplete) {
       const choice = await vscode.window.showInformationMessage(
         'MCP Jupyter is already set up. What would you like to do?',
@@ -200,13 +208,13 @@ export class QuickStartWizard {
               'Test It',
               'View Logs'
             );
-            
+
             if (choice === 'Test It') {
               await this.openTestNotebook();
             } else if (choice === 'View Logs') {
               this.mcpClient.getOutputChannel().show();
             }
-            
+
             await this.context.globalState.update('mcp.hasCompletedSetup', true);
             this.hide();
             return;
@@ -223,11 +231,11 @@ export class QuickStartWizard {
             // Step 3a: Create managed environment
             progress.report({ increment: 20, message: 'Creating isolated environment...' });
             const venvPath = await this.setupManager.createManagedEnvironment();
-            
+
             // Step 3b: Install dependencies
             progress.report({ increment: 30, message: 'Installing dependencies...' });
             await this.setupManager.installDependencies(venvPath);
-            
+
             progress.report({ increment: 20, message: 'Starting server...' });
           } else if (mode === 'existing') {
             // Step 3: Select existing Python
@@ -236,14 +244,14 @@ export class QuickStartWizard {
             if (!pythonPath) {
               throw new Error('No Python executable selected');
             }
-            
+
             // Save configuration
             await vscode.workspace.getConfiguration('mcp-jupyter').update(
               'pythonPath',
               pythonPath,
               vscode.ConfigurationTarget.Global
             );
-            
+
             progress.report({ increment: 50, message: 'Starting server...' });
           } else {
             // Remote mode
@@ -252,7 +260,7 @@ export class QuickStartWizard {
             if (!configured) {
               throw new Error('Remote configuration cancelled');
             }
-            
+
             progress.report({ increment: 40, message: 'Connecting to remote server...' });
           }
 
@@ -275,7 +283,7 @@ export class QuickStartWizard {
           // Success!
           await this.context.globalState.update('mcp.hasCompletedSetup', true);
           this.hide();
-          
+
           const choice = await vscode.window.showInformationMessage(
             '🎉 MCP Jupyter is ready! Try executing a cell with the 🤖 MCP Agent Kernel.',
             'Open Example Notebook',
@@ -353,7 +361,7 @@ export class QuickStartWizard {
       if (pythonExt) {
         await pythonExt.activate();
         const pythonApi = pythonExt.exports;
-        
+
         // Get active interpreter
         const activeInterpreter = pythonApi.settings.getExecutionDetails?.();
         if (activeInterpreter) {
@@ -362,10 +370,10 @@ export class QuickStartWizard {
             'Yes',
             'Choose Different'
           );
-          
+
           if (choice === 'Yes') {
-            return Array.isArray(activeInterpreter.execCommand) 
-              ? activeInterpreter.execCommand[0] 
+            return Array.isArray(activeInterpreter.execCommand)
+              ? activeInterpreter.execCommand[0]
               : activeInterpreter.execCommand;
           }
         }
@@ -429,7 +437,7 @@ export class QuickStartWizard {
     await config.update('serverMode', 'connect', vscode.ConfigurationTarget.Global);
     await config.update('remoteHost', host, vscode.ConfigurationTarget.Global);
     await config.update('remotePort', parseInt(port), vscode.ConfigurationTarget.Global);
-    
+
     if (token) {
       await config.update('sessionToken', token, vscode.ConfigurationTarget.Global);
     }
@@ -451,7 +459,7 @@ export class QuickStartWizard {
         try {
           const status = this.mcpClient.getStatus();
           const connectionState = this.mcpClient.getConnectionState();
-          
+
           progress.report({ message: 'Checking server status...' });
           await this.sleep(500);
 
@@ -460,7 +468,7 @@ export class QuickStartWizard {
             progress.report({ message: 'Executing test query...' });
             try {
               const envs = await this.mcpClient.listEnvironments();
-              
+
               vscode.window.showInformationMessage(
                 `✅ Connection successful!\n\nFound ${envs.length} Python environment(s)`,
                 'View Logs'
@@ -497,13 +505,13 @@ export class QuickStartWizard {
    */
   private async openTestNotebook(): Promise<void> {
     const examplePath = path.join(this.context.extensionPath, 'examples', 'quickstart.ipynb');
-    
+
     // Check if example notebook already exists
     if (fs.existsSync(examplePath)) {
       // Check if it's been modified (compare file size as a simple heuristic)
       const stats = fs.statSync(examplePath);
       const expectedSize = 2500; // Approximate size of generated notebook
-      
+
       // If file size is significantly different, user likely modified it
       if (Math.abs(stats.size - expectedSize) > 500) {
         const choice = await vscode.window.showInformationMessage(
@@ -512,7 +520,7 @@ export class QuickStartWizard {
           'Overwrite',
           'Cancel'
         );
-        
+
         if (choice === 'Cancel') {
           return;
         } else if (choice === 'Open Existing') {
@@ -523,7 +531,7 @@ export class QuickStartWizard {
         // If 'Overwrite', continue to recreate
       }
     }
-    
+
     // Create example notebook if it doesn't exist or user chose to overwrite
     const examplesDir = path.dirname(examplePath);
     if (!fs.existsSync(examplesDir)) {
@@ -532,101 +540,101 @@ export class QuickStartWizard {
 
     const exampleNotebook = {
       cells: [
-          {
-            cell_type: 'markdown',
-            metadata: {},
-            source: [
-              '# MCP Jupyter Quick Start\n',
-              '\n',
-              'Welcome to MCP Jupyter! This notebook will help you get started.\n',
-              '\n',
-              '## Step 1: Select the MCP Agent Kernel\n',
-              '\n',
-              'Click the kernel picker in the top-right and select **🤖 MCP Agent Kernel**'
-            ]
-          },
-          {
-            cell_type: 'code',
-            execution_count: null,
-            metadata: {},
-            outputs: [],
-            source: [
-              '# Test basic execution\n',
-              'print("Hello from MCP Jupyter!")\n',
-              'print(f"Python version: {__import__(\'sys\').version}")'
-            ]
-          },
-          {
-            cell_type: 'code',
-            execution_count: null,
-            metadata: {},
-            outputs: [],
-            source: [
-              '# Test variable inspection\n',
-              'import pandas as pd\n',
-              'import numpy as np\n',
-              '\n',
-              'data = pd.DataFrame({\n',
-              '    "name": ["Alice", "Bob", "Charlie"],\n',
-              '    "age": [25, 30, 35],\n',
-              '    "score": [85.5, 92.0, 88.5]\n',
-              '})\n',
-              '\n',
-              'data.head()'
-            ]
-          },
-          {
-            cell_type: 'markdown',
-            metadata: {},
-            source: [
-              '## Step 2: View Variables\n',
-              '\n',
-              'Open the **MCP Variables** panel in the sidebar to see all defined variables with their types and memory usage.'
-            ]
-          },
-          {
-            cell_type: 'code',
-            execution_count: null,
-            metadata: {},
-            outputs: [],
-            source: [
-              '# Test streaming output\n',
-              'import time\n',
-              '\n',
-              'for i in range(5):\n',
-              '    print(f"Processing step {i+1}/5...")\n',
-              '    time.sleep(0.5)\n',
-              '\n',
-              'print("✅ Done!")'
-            ]
-          },
-          {
-            cell_type: 'markdown',
-            metadata: {},
-            source: [
-              '## Next Steps\n',
-              '\n',
-              '- Try executing cells with AI agents (they share the same kernel state!)\n',
-              '- Check out the Variable Dashboard for real-time variable inspection\n',
-              '- Explore automatic environment switching with different Python environments\n',
-              '\n',
-              '📚 [View Documentation](https://github.com/example/mcp-jupyter)'
-            ]
-          }
-        ],
-        metadata: {
-          kernelspec: {
-            display_name: 'Python 3',
-            language: 'python',
-            name: 'python3'
-          },
-          language_info: {
-            name: 'python',
-            version: '3.10.0'
-          }
+        {
+          cell_type: 'markdown',
+          metadata: {},
+          source: [
+            '# MCP Jupyter Quick Start\n',
+            '\n',
+            'Welcome to MCP Jupyter! This notebook will help you get started.\n',
+            '\n',
+            '## Step 1: Select the MCP Agent Kernel\n',
+            '\n',
+            'Click the kernel picker in the top-right and select **🤖 MCP Agent Kernel**'
+          ]
         },
-        nbformat: 4,
-        nbformat_minor: 4
+        {
+          cell_type: 'code',
+          execution_count: null,
+          metadata: {},
+          outputs: [],
+          source: [
+            '# Test basic execution\n',
+            'print("Hello from MCP Jupyter!")\n',
+            'print(f"Python version: {__import__(\'sys\').version}")'
+          ]
+        },
+        {
+          cell_type: 'code',
+          execution_count: null,
+          metadata: {},
+          outputs: [],
+          source: [
+            '# Test variable inspection\n',
+            'import pandas as pd\n',
+            'import numpy as np\n',
+            '\n',
+            'data = pd.DataFrame({\n',
+            '    "name": ["Alice", "Bob", "Charlie"],\n',
+            '    "age": [25, 30, 35],\n',
+            '    "score": [85.5, 92.0, 88.5]\n',
+            '})\n',
+            '\n',
+            'data.head()'
+          ]
+        },
+        {
+          cell_type: 'markdown',
+          metadata: {},
+          source: [
+            '## Step 2: View Variables\n',
+            '\n',
+            'Open the **MCP Variables** panel in the sidebar to see all defined variables with their types and memory usage.'
+          ]
+        },
+        {
+          cell_type: 'code',
+          execution_count: null,
+          metadata: {},
+          outputs: [],
+          source: [
+            '# Test streaming output\n',
+            'import time\n',
+            '\n',
+            'for i in range(5):\n',
+            '    print(f"Processing step {i+1}/5...")\n',
+            '    time.sleep(0.5)\n',
+            '\n',
+            'print("✅ Done!")'
+          ]
+        },
+        {
+          cell_type: 'markdown',
+          metadata: {},
+          source: [
+            '## Next Steps\n',
+            '\n',
+            '- Try executing cells with AI agents (they share the same kernel state!)\n',
+            '- Check out the Variable Dashboard for real-time variable inspection\n',
+            '- Explore automatic environment switching with different Python environments\n',
+            '\n',
+            '📚 [View Documentation](https://github.com/example/mcp-jupyter)'
+          ]
+        }
+      ],
+      metadata: {
+        kernelspec: {
+          display_name: 'Python 3',
+          language: 'python',
+          name: 'python3'
+        },
+        language_info: {
+          name: 'python',
+          version: '3.10.0'
+        }
+      },
+      nbformat: 4,
+      nbformat_minor: 4
     };
 
     fs.writeFileSync(examplePath, JSON.stringify(exampleNotebook, null, 2));

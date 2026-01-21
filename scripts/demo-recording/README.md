@@ -1,216 +1,165 @@
-# Demo Recording Environment
+# 🎬 Demo Recording Environment
 
-This directory contains the setup for recording Playwright demo videos of Jupyter notebooks in an isolated code-server Docker environment.
+This directory contains everything needed to create polished demo recordings of MCP Jupyter.
 
-## Why Docker?
-
-Running code-server directly on the host causes problems:
-- Restarting code-server kills any active VS Code sessions
-- Configuration conflicts between demo and development
-- Difficult to reset to a clean state
-
-The Docker approach provides:
-- **Isolation**: Demo environment is completely separate from your development setup
-- **Reproducibility**: Start fresh each time with consistent state
-- **Safety**: Won't interfere with any running VS Code sessions
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                         Host Machine                         │
-│                                                              │
-│  ┌────────────────────┐     ┌─────────────────────────────┐ │
-│  │                    │     │     Docker Container        │ │
-│  │    Playwright      │────▶│                             │ │
-│  │   (runs locally)   │     │    code-server:latest       │ │
-│  │                    │     │    http://localhost:8443    │ │
-│  │  - Controls Chrome │     │                             │ │
-│  │  - Records video   │     │    /home/coder/project      │ │
-│  │  - Captures UI     │     │         ▲                   │ │
-│  └────────────────────┘     │         │                   │ │
-│                             └─────────│───────────────────┘ │
-│                                       │                      │
-│  ┌────────────────────────────────────┴──────────────────┐  │
-│  │              Your Project Files (mounted)              │  │
-│  │              ~/personal/mcp-server-jupyter             │  │
-│  └────────────────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────────────────┘
-```
-
-## Quick Start
+## 🚀 Quick Start
 
 ```bash
-# 1. Start the demo environment
-./run-demo.sh start
+# One command to set everything up
+./setup-demo.sh
 
-# 2. Open in browser to verify (optional)
-open http://localhost:8443
-
-# 3. Run demo recordings
-./run-demo.sh record
-
-# 4. Stop when done
-./run-demo.sh stop
+# Run the demo test
+./run-demo.sh
 ```
 
-## Files
+## 📁 Directory Structure
 
-| File | Description |
-|------|-------------|
-| `docker-compose.yml` | Docker Compose configuration for code-server |
-| `playwright.demo.config.ts` | Playwright configuration optimized for demo recordings |
-| `run-demo.sh` | Helper script for managing the demo environment |
-| `demo-tests/` | Directory containing Playwright test files for demos |
-| `demo-recordings/` | Output directory for videos, screenshots, and reports |
+```
+demo-recording/
+├── setup-demo.sh              # 🔧 One-command setup script
+├── run-demo.sh                # ▶️  Run Playwright tests
+├── Dockerfile                 # 🐳 Custom container image
+├── docker-compose.yml         # 🐙 Container orchestration
+├── automation-config/
+│   └── settings.json          # ⚙️  VS Code settings for demos
+├── demo-tests/
+│   └── duckdb-magic.spec.ts   # 🧪 Playwright test script
+├── demo-recordings/           # 📸 Output screenshots/videos
+├── LESSONS_LEARNED.md         # 📚 Deep dive on debugging
+├── PROGRESS_PLAN_...md        # 📋 Project tracking
+└── README.md                  # 📖 This file
+```
 
-## Commands
+## 🎯 What You Get
 
-### `./run-demo.sh start`
-Starts the code-server container and waits for it to be ready.
+After running `./setup-demo.sh`, you'll have:
 
-### `./run-demo.sh stop`
-Stops the code-server container.
+- ✅ **code-server** running at http://localhost:8443
+- ✅ **Jupyter extension** installed and configured
+- ✅ **MCP Agent Kernel extension** with all fixes applied
+- ✅ **Python 3** with data science packages (pandas, numpy, matplotlib)
+- ✅ **demo.ipynb** mounted and ready
+- ✅ **Dark theme** for beautiful screenshots
 
-### `./run-demo.sh record [playwright-args]`
-Starts the container (if needed) and runs the Playwright demo tests.
+## 📺 Creating Demos
+
+### Automated (Playwright)
 
 ```bash
-# Run all demo tests
-./run-demo.sh record
-
-# Run with visible browser
-./run-demo.sh record --headed
-
-# Run specific test
-./run-demo.sh record --grep "notebook"
-
-# Run in debug mode
-./run-demo.sh record --debug
+./run-demo.sh                     # Run all demo tests
+./run-demo.sh duckdb-magic        # Run specific test
 ```
 
-### `./run-demo.sh cleanup`
-Stops the container and removes all persistent data (volumes, recordings).
+Output goes to `demo-recordings/`.
 
-### `./run-demo.sh status`
-Shows the current status of the demo environment.
+### Manual
 
-### `./run-demo.sh logs`
-Shows container logs (follow mode).
+1. Open http://localhost:8443
+2. Navigate to `demo.ipynb`
+3. Select "🤖 MCP Agent Kernel"
+4. Record with OBS Studio or similar
 
-### `./run-demo.sh shell`
-Opens a bash shell inside the container.
+## 🔧 Configuration
 
-## Configuration
+### VS Code Settings (`automation-config/settings.json`)
 
-### Docker Compose (`docker-compose.yml`)
+Key settings for demo environment:
 
-Key settings:
-- **Port 8443**: code-server web UI
-- **No authentication**: `--auth=none` for automated testing
-- **Volume mounts**: Project files available at `/home/coder/project`
-- **Persistent volumes**: Extensions and settings persist across restarts
-
-### Playwright Config (`playwright.demo.config.ts`)
-
-Key settings:
-- **Video**: Always on, 1920x1080 resolution
-- **Viewport**: Matches video size for crisp output
-- **Single worker**: Sequential execution for predictable recordings
-- **webServer**: Automatically starts/stops Docker container
-
-## Writing Demo Tests
-
-Demo tests are regular Playwright tests but optimized for recording:
-
-```typescript
-import { test, expect } from '@playwright/test';
-
-test('demo: create and run notebook', async ({ page }) => {
-  // Navigate to code-server
-  await page.goto('/');
-  
-  // Wait for VS Code to load
-  await page.waitForSelector('.monaco-workbench', { timeout: 60000 });
-  
-  // Your demo steps...
-  await page.keyboard.press('Control+Shift+P');
-  await page.keyboard.type('Jupyter: Create New Notebook');
-  await page.keyboard.press('Enter');
-  
-  // Pause for visibility in the recording
-  await page.waitForTimeout(2000);
-});
+```json
+{
+  "workbench.startupEditor": "none",       // No welcome page
+  "security.workspace.trust.enabled": false, // No trust prompts
+  "mcp-jupyter.showSetupWizard": false,    // No auto-install wizard
+  "mcp-jupyter.autoStart": true,           // Server starts automatically
+  "window.zoomLevel": 1,                   // Larger text for recordings
+  "workbench.colorTheme": "Default Dark Modern"
+}
 ```
 
-### Tips for Good Demo Recordings
+### Docker Resources
 
-1. **Add pauses**: Use `waitForTimeout()` after important actions so viewers can see what happened
-2. **Use explicit waits**: Always wait for elements before interacting
-3. **Keep it focused**: Each test should demonstrate one concept
-4. **Add comments**: The test file serves as documentation
+Adjust in `docker-compose.yml`:
 
-## Troubleshooting
-
-### Container won't start
-```bash
-# Check Docker logs
-./run-demo.sh logs
-
-# Check if port 8443 is in use
-lsof -i :8443
+```yaml
+mem_limit: 4g    # Memory limit
+cpus: 2.0        # CPU limit
+shm_size: 2gb    # Shared memory
 ```
 
-### VS Code takes too long to load
-- First load can take 30-60 seconds as extensions initialize
-- Subsequent loads are faster due to cached data in volumes
+## 🔄 Workflow
 
-### Video quality issues
-- Ensure viewport matches video size (default: 1920x1080)
-- Check `shm_size` in docker-compose.yml (default: 2gb)
-
-### Permission issues with mounted files
-- The container runs as your UID/GID
-- If issues persist, check the `UID` and `GID` environment variables
-
-### Resetting to clean state
-```bash
-# Remove all persistent data
-./run-demo.sh cleanup
-
-# Start fresh
-./run-demo.sh start
-```
-
-## Advanced Configuration
-
-### Installing VS Code Extensions
-
-Extensions persist in the `code-server-local` volume. To pre-install:
+### Fresh Start
 
 ```bash
-# Start container
-./run-demo.sh start
-
-# Install extensions
-docker exec demo-code-server code-server --install-extension ms-python.python
-docker exec demo-code-server code-server --install-extension ms-toolsai.jupyter
-
-# Stop and restart to apply
-./run-demo.sh stop
-./run-demo.sh start
+# Clean everything and rebuild
+./setup-demo.sh --clean --rebuild
 ```
 
-### Custom code-server Settings
+### Quick Iteration
 
-Settings persist in the `code-server-config` volume at:
-- `/home/coder/.config/code-server/config.yaml`
-- `/home/coder/.local/share/code-server/User/settings.json`
+```bash
+# Just run tests (container already running)
+./run-demo.sh
 
-### Environment Variables
+# After changing extension code:
+cd ../../vscode-extension
+npm run bundle-python && npm run compile && npx vsce package
+./setup-demo.sh  # Will reinstall extension
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CODE_SERVER_URL` | `http://localhost:8443` | Override code-server URL |
-| `UID` | Current user's UID | Container user ID |
-| `GID` | Current user's GID | Container group ID |
+### Stop Environment
+
+```bash
+cd scripts/demo-recording
+docker compose down      # Stop container, keep data
+docker compose down -v   # Stop and delete all data
+```
+
+## 🐛 Troubleshooting
+
+### Container not starting?
+
+```bash
+docker compose logs -f
+```
+
+### Extension not loading?
+
+```bash
+docker exec demo-code-server ls /config/extensions
+```
+
+### Server connection errors?
+
+```bash
+# Check MCP server logs
+docker exec demo-code-server find /config/data/logs -name "1-MCP Jupyter Server.log" -exec cat {} \;
+```
+
+### Need fresh state?
+
+```bash
+./setup-demo.sh --clean
+```
+
+## 📚 Deep Dive
+
+See [LESSONS_LEARNED.md](LESSONS_LEARNED.md) for:
+- All bugs encountered and how they were fixed
+- WebSocket authentication details
+- VS Code extension debugging tips
+- Playwright selector strategies
+
+## 🎥 Output Assets
+
+After running demos, find outputs in:
+
+- `demo-recordings/` - Screenshots and videos
+- `docs/media/` - Published assets for README
+
+### Moving Assets to Docs
+
+```bash
+cp demo-recordings/duckdb-magic*/test-finished-1.png ../../docs/media/hero-demo.png
+cp demo-recordings/duckdb-magic*/video.webm ../../docs/media/demo-video.webm
+```

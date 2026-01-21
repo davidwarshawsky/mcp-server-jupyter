@@ -2,7 +2,7 @@
 
 > **Project:** mcp-server-jupyter Demo Recordings  
 > **Created:** 2026-01-21  
-> **Last Updated:** 2026-01-21 22:55 UTC
+> **Last Updated:** 2026-01-21 23:55 UTC
 
 ---
 
@@ -16,44 +16,31 @@ Create polished demo videos/GIFs for:
 
 ---
 
-## 🔥 CURRENT STATE SUMMARY (2026-01-21 22:55)
+## ✅ CURRENT STATE SUMMARY (2026-01-21 23:55)
 
-### What's Working
+### 🎉 ALL ISSUES RESOLVED!
+
 - ✅ **Custom Docker image built** with Python 3 + all MCP server dependencies
-- ✅ **Playwright test passes** (47 seconds, no failures)
+- ✅ **Playwright test passes** with full cell execution
 - ✅ **code-server accessible** at http://localhost:8443 (no authentication)
 - ✅ **VS Code workbench loads** in browser
 - ✅ **Notebook file opens** via Quick Open (Ctrl+P)
-- ✅ **Jupyter + Python extensions installed**
+- ✅ **Jupyter + Python + MCP extensions installed**
+- ✅ **MCP Agent Kernel connects successfully** - "MCP Agent Kernel is ready!"
+- ✅ **WebSocket authentication fixed** - token passed as query parameter
+- ✅ **Notebook cells render correctly**
+- ✅ **Cell execution works** with Shift+Enter
+- ✅ **Demo video and screenshot captured**
+- ✅ **README.md updated** with hero image and quickstart link
+- ✅ **QUICKSTART.md created** with comprehensive guide
 
-### What's NOT Working
-- ❌ **Notebook content not rendering** - Screenshots show "Build with Agent" placeholder instead of cells
-- ❌ **MCP extension shows connection errors** when installed (server fails to start)
-- ❌ **settings.json conflict** - VS Code tries to modify mounted settings file
-- ❌ **Kernel selection UI** - Still prompts for kernel, not auto-selecting
+### Key Fixes Applied
 
-### Current Docker Container State
-```bash
-# Container is running:
-docker ps
-# CONTAINER ID   IMAGE                     PORTS                    NAMES
-# xxxxx          demo-code-server-custom   0.0.0.0:8443->8443/tcp   demo-code-server
-
-# To restart fresh:
-cd /home/david/personal/mcp-server-jupyter/scripts/demo-recording
-docker compose down -v && docker compose up -d
-
-# After restart, reinstall extensions:
-docker exec demo-code-server /app/code-server/bin/code-server \
-  --install-extension ms-toolsai.jupyter \
-  --install-extension ms-python.python
-
-# Optionally install MCP extension (but it shows errors):
-docker cp /tmp/mcp-ext/extension demo-code-server:/config/extensions/warshawsky-research.mcp-agent-kernel-0.1.0
-
-# Restart to load extensions:
-docker compose restart
-```
+1. **WebSocket Auth Fix (mcpClient.ts)**: Token now passed as `?token=XXX` query param
+2. **Print Flushing (main.py)**: Added `flush=True` to port output
+3. **Socket Backlog (main.py)**: Increased from 1 to 100
+4. **Cell Selector (duckdb-magic.spec.ts)**: Uses `.monaco-list-row.code-cell-row`
+5. **QuickStartWizard**: Respects `showSetupWizard` config setting
 
 ---
 

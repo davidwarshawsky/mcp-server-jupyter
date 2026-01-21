@@ -165,7 +165,7 @@ export class McpClient {
         if (serverPath) {
           spawnOptions.cwd = serverPath;
         }
-        
+
         // Log proxy config for debugging
         logProxyConfig(this.outputChannel);
 
@@ -358,7 +358,15 @@ export class McpClient {
             }
           }
 
-          this.ws = new WebSocket(url, ['mcp'], { headers, agent });
+          // [SECURITY FIX] Append token as query parameter for WebSocket auth
+          // The server middleware only checks query params for WebSocket connections
+          let wsUrl = url;
+          if (this.sessionToken) {
+            const separator = url.includes('?') ? '&' : '?';
+            wsUrl = `${url}${separator}token=${encodeURIComponent(this.sessionToken)}`;
+          }
+
+          this.ws = new WebSocket(wsUrl, ['mcp'], { headers, agent });
 
           this.ws.on('open', async () => {
             this.outputChannel.appendLine('WebSocket connected');
@@ -519,7 +527,7 @@ export class McpClient {
   async forceKill(): Promise<void> {
     this.isShuttingDown = true;
     this.autoRestart = false;
-    
+
     // Close WebSocket immediately
     if (this.ws) {
       try {
@@ -529,16 +537,16 @@ export class McpClient {
       }
       this.ws = undefined;
     }
-    
+
     // Force kill process with SIGKILL
     if (this.process) {
       try {
         // First try SIGTERM
         this.process.kill('SIGTERM');
-        
+
         // Wait 500ms, then SIGKILL if still running
         await new Promise(resolve => setTimeout(resolve, 500));
-        
+
         if (this.process && !this.process.killed) {
           this.process.kill('SIGKILL');
         }
@@ -547,10 +555,10 @@ export class McpClient {
       }
       this.process = undefined;
     }
-    
+
     // Reject all pending requests
     this.rejectAllPending(new Error('MCP server force killed'));
-    
+
     this.outputChannel.appendLine('[FORCE KILL] Server terminated');
   }
 
@@ -1529,7 +1537,7 @@ export class McpClient {
 
     // When packaged, Python server is bundled in extension root at python_server/
     // When in development, look for sibling directory
-    const extensionPath = path.dirname(__dirname);  // out/ -> vscode-extension/
+    const extensionPath = path.dirname(path.dirname(__dirname));  // out/src/ -> vscode-extension/
 
     // Try bundled location first (production)
     const bundledPath = path.join(extensionPath, 'python_server');

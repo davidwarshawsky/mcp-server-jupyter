@@ -1,14 +1,30 @@
-# Demo Recording Environment - Docker Compose
-# Runs code-server in isolation for Playwright demo recordings
-# Last Updated: 2026-01-21
+# ==============================================================================
+# MCP Jupyter Demo Recording Environment - Docker Compose
+# ==============================================================================
+#
+# Runs code-server in isolation for Playwright demo recordings.
+#
+# Usage:
+#   docker compose up -d          # Start container
+#   docker compose down           # Stop container
+#   docker compose down -v        # Stop and remove volumes (fresh start)
+#   docker compose logs -f        # View logs
+#   docker compose restart        # Restart (after installing extensions)
+#
+# Access: http://localhost:8443
+#
+# Last Updated: 2026-01-22
+# ==============================================================================
 
 services:
   code-server:
     build:
       context: .
       dockerfile: Dockerfile
-    image: demo-code-server-custom
+    image: demo-code-server-custom:latest
     container_name: demo-code-server
+    
+    # User/Group settings (LinuxServer.io convention)
     environment:
       - PUID=1000
       - PGID=1000
@@ -16,24 +32,46 @@ services:
       # Disable authentication entirely for demo recording
       - PASSWORD=
       - HASHED_PASSWORD=
+      # Set default workspace
       - DEFAULT_WORKSPACE=/config/workspace
+      # Python settings
+      - PYTHONUNBUFFERED=1
+    
     volumes:
-      # Mount the settings - needs to be writable for VS Code
+      # VS Code settings - needs to be writable
       - ./automation-config/settings.json:/config/data/User/settings.json
-      # Mount demo notebook
+      
+      # Demo notebook (read-only to prevent accidental changes)
       - ../../demo.ipynb:/config/workspace/demo.ipynb:ro
-      # Persist extensions
+      
+      # Persist extensions across restarts (avoids reinstall)
       - code-server-extensions:/config/extensions
-      # Persist VS Code data
+      
+      # Persist VS Code data (settings, global storage, etc.)
       - code-server-data:/config/data
+    
     ports:
       - "8443:8443"
-    # Resource limits
+    
+    # Resource limits for predictable performance
     mem_limit: 4g
     cpus: 2.0
-    # Recommended Docker settings for browser-based apps
-    shm_size: 2gb  # Larger shared memory for video playback
+    
+    # Larger shared memory for browser-like operations
+    shm_size: 2gb
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8443"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
+# Named volumes for persistence
 volumes:
   code-server-extensions:
     name: demo-code-server-extensions

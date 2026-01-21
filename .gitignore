@@ -17,3 +17,5 @@ vscode-extension/python_server/wheels/
 # Temporary diff and digest files
 diff.txt
 digest.txt
+node_modules/
+safe_screenshots/

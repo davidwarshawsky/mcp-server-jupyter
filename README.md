@@ -11,13 +11,28 @@
 
 **Production-grade Jupyter with Superpowers: SQL queries on DataFrames, Auto-EDA, Git-Safe Workflows, and AI Agent tools**
 
-[**📖 Documentation**](https://yourusername.github.io/mcp-jupyter-server) | [**🚀 Quick Start**](#quick-start) | [**✨ Superpowers**](#superpowers) | [**🔥 Try in Codespaces**](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
+[**📖 Documentation**](https://yourusername.github.io/mcp-jupyter-server) | [**🚀 Quick Start**](docs/QUICKSTART.md) | [**✨ Superpowers**](#superpowers) | [**🔥 Try in Codespaces**](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
+
+</div>
+
+---
+
+## 🎬 See It In Action
+
+<div align="center">
+
+![MCP Jupyter Demo](docs/media/mcp-jupyter-demo.png)
+
+*MCP Agent Kernel running in VS Code with DuckDB SQL magic and Variable Dashboard*
+
+**[▶️ Watch the Full Demo Video](docs/media/mcp-jupyter-demo.webm)** | **[📖 Quick Start Guide →](docs/QUICKSTART.md)**
 
 </div>
 
 ---
 
 ## The One-Line Pitch
+
 
 **Standard Jupyter crashes. Outputs freeze browsers. Agents struggle. MCP Jupyter Server solves this.**
 
@@ -134,6 +149,8 @@ edit_cell(id="abc-123", content="...")  # Works after git pull
 ---
 
 ## Quick Start
+
+> 📺 **New to MCP Jupyter?** Check out the **[🚀 Visual Quick Start Guide](docs/QUICKSTART.md)** with screenshots and video demos!
 
 ### 1. Install (One Command)
 
@@ -332,6 +349,7 @@ Pre-built personas for common workflows:
 
 📖 **[Full Documentation](https://yourusername.github.io/mcp-jupyter-server)**
 
+- [🚀 Quick Start Guide](docs/QUICKSTART.md) ← **Start here!**
 - [Getting Started](https://yourusername.github.io/mcp-jupyter-server/getting-started/installation/)
 - [Superpowers Guide](https://yourusername.github.io/mcp-jupyter-server/superpowers/)
 - [Architecture Deep Dive](https://yourusername.github.io/mcp-jupyter-server/architecture/)
