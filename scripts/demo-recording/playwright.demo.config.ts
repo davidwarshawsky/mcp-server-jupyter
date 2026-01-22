@@ -26,12 +26,12 @@ export default defineConfig({
   
   /* HTML reporter + list for console output */
   reporter: [
-    ['html', { outputFolder: './demo-recordings/report' }],
+    ['html', { outputFolder: '/tmp/demo-recordings/report' }],
     ['list']
   ],
   
   /* Output directory for videos and traces */
-  outputDir: './demo-recordings',
+  outputDir: '/tmp/demo-recordings/test-results',
   
   /* Global test timeout - demos can be long */
   timeout: 5 * 60 * 1000, // 5 minutes per test

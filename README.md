@@ -31,6 +31,24 @@
 
 ---
 
+## 🚀 Interactive Scenarios (Test & Verify)
+
+We provide automated scenarios to verify the extension's functionality in a clean environment. You can run these yourself using Docker!
+
+### Scenario 1: Setup & Connection
+Shows the initial kernel selection and successful connection to the MCP server.
+[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-01-setup.spec.ts)
+
+### Scenario 2: Standard Features
+Demonstrates running Python cells and inspecting variables in the real-time Variable Dashboard.
+[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-02-standard.spec.ts)
+
+### Scenario 3: Superpowers (DuckDB & Auto-EDA)
+Showcases the `%%duckdb` magic for SQL on DataFrames and the `/prompt auto-analyst` for instant EDA.
+[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-03-superpowers.spec.ts)
+
+---
+
 ## The One-Line Pitch
 
 

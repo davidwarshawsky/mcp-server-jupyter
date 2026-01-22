@@ -190,6 +190,30 @@ You now have access to:
 - ✅ **Crash recovery** and output management
 - ✅ **Git-safe workflows** with stable cell IDs
 
+---
+
+## 🧪 Verification Scenarios (Docker)
+
+To see the extension in action programmatically, you can run our automated verification scenarios. These use **Docker** and **Playwright** to mimic a real developer environment.
+
+### 1. Run the Setup
+Ensure you have Docker installed, then run:
+```bash
+cd scripts/demo-recording
+./setup-demo.sh
+```
+
+### 2. Run a Scenario
+Execute any of the pre-defined scenarios to verify results:
+
+| Scenario | Command | What it Verifies |
+|----------|---------|-------------------|
+| **Setup** | `npx playwright test scenario-01-setup` | Kernel selection & connection |
+| **Standard** | `npx playwright test scenario-02-standard` | Variable Dashboard & Python execution |
+| **Superpowers** | `npx playwright test scenario-03-superpowers` | DuckDB SQL & Auto-EDA |
+
+The results (screenshots and videos) will be saved in `scripts/demo-recording/demo-recordings/`.
+
 **Happy coding!** 🚀
 
 ---

@@ -41,13 +41,27 @@ After running `./setup-demo.sh`, you'll have:
 - ✅ **demo.ipynb** mounted and ready
 - ✅ **Dark theme** for beautiful screenshots
 
-## 📺 Creating Demos
+## 📺 Creating Demos & Verification
 
-### Automated (Playwright)
+### Consolidated Scenarios
+
+To run the full suite of advertising and tutorial scenarios (Setup, Standard Features, Superpowers) and verify "right results":
 
 ```bash
-./run-demo.sh                     # Run all demo tests
-./run-demo.sh duckdb-magic        # Run specific test
+./run-all-scenarios.sh
+```
+
+This will:
+1. Ensure the Docker container is running.
+2. Run **Scenario 1: Setup** (Kernel selection, connection).
+3. Run **Scenario 2: Standard Features** (Variable Dashboard, Python execution).
+4. Run **Scenario 3: Superpowers** (DuckDB SQL, Auto-EDA).
+5. Capture screenshots for each stage in `demo-recordings/screenshots/`.
+
+### Targeted Run
+
+```bash
+./run-demo.sh scenario-01-setup    # Run specific scenario
 ```
 
 Output goes to `demo-recordings/`.

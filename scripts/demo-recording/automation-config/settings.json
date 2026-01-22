@@ -1,5 +1,6 @@
 {
     "workbench.startupEditor": "none",
+    "workbench.welcomePage.walkthroughs.openOnInstall": false,
     "security.workspace.trust.enabled": false,
     "security.workspace.trust.startupPrompt": "never",
     "security.workspace.trust.banner": "never",
@@ -25,7 +26,7 @@
     "workbench.statusBar.visible": true,
     "files.autoSave": "off",
     "telemetry.telemetryLevel": "off",
-    "mcp-jupyter.pythonPath": "/config/data/User/globalStorage/warshawsky-research.mcp-agent-kernel/mcp-venv/bin/python",
+    "mcp-jupyter.pythonPath": "/usr/bin/python3",
     "mcp-jupyter.showSetupWizard": false,
     "mcp-jupyter.autoStart": true
 }
