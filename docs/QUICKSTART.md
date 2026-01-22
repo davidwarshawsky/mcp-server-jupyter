@@ -16,7 +16,7 @@
 
 Watch the full demo of MCP Jupyter in action:
 
-https://github.com/user-attachments/assets/mcp-jupyter-demo.webm
+[**▶️ Watch the Full Demo Video**](media/mcp-jupyter-demo.webm)
 
 *Or see the [demo video file](media/mcp-jupyter-demo.webm) in this repository.*
 
@@ -118,7 +118,7 @@ Open the **MCP Variables** panel in the sidebar to see:
 
 The video below shows how to use SQL queries directly on pandas DataFrames:
 
-https://github.com/user-attachments/assets/mcp-jupyter-demo.webm
+[**▶️ Watch the DuckDB SQL Demo**](media/mcp-jupyter-demo.webm)
 
 ### Variable Dashboard
 
