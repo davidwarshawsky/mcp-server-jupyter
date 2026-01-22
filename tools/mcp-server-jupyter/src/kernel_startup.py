@@ -154,7 +154,8 @@ def _mcp_search_columns(df_name, pattern):
 DUCKDB_MAGIC_CODE = """
 # [DS UX] Register %%duckdb and %%sql magics for native SQL syntax
 try:
-    from IPython.core.magic import register_cell_magic, register_line_magic
+    from IPython.core.magic import register_cell_magic
+    from IPython import get_ipython
     import sys
     
     @register_cell_magic
@@ -175,14 +176,24 @@ try:
             print("❌ DuckDB not installed. Run: pip install duckdb")
             return None
         
+        # Get IPython instance
+        shell = get_ipython()
+        if not shell:
+            print("❌ IPython not found.")
+            return None
+
         # Get all DataFrames from user namespace
-        ns = get_ipython().user_ns
+        ns = shell.user_ns
         dataframes = {}
         
-        if 'pandas' in sys.modules:
-            pd = sys.modules['pandas']
-            for name, obj in ns.items():
-                if isinstance(obj, pd.DataFrame) and not name.startswith('_'):
+        # Check for pandas DataFrames robustly
+        for name, obj in ns.items():
+            if name.startswith('_'):
+                continue
+            t_name = type(obj).__name__
+            if t_name == 'DataFrame':
+                # Double check it's actually a pandas DF
+                if hasattr(obj, 'to_markdown') and hasattr(obj, 'columns'):
                     dataframes[name] = obj
         
         if not dataframes:
@@ -198,9 +209,7 @@ try:
             result = conn.execute(cell).fetchdf()
             conn.close()
             
-            # Display result nicely
-            from IPython.display import display
-            display(result)
+            # Returning the result allows it to be displayed and captured
             return result
         except Exception as e:
             print(f"❌ SQL Error: {e}")
@@ -221,6 +230,12 @@ except Exception as e:
 
 # Main startup code template
 KERNEL_STARTUP_TEMPLATE = """
+import sys
+import os
+import json
+import traceback
+from IPython import get_ipython
+
 # [PHASE 2: Autoreload Magic]
 # Automatically reload modules when they change (saves kernel restarts during dev)
 try:
