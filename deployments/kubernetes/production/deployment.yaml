@@ -1,45 +1,57 @@
 ---
-# deployment.yaml: Main MCP Server Manager Deployment
-# This deployment runs the MCP server in Kubernetes.
-# It has permissions to create and manage notebook kernel pods.
+# deployment.yaml: MCP Jupyter Server - Production Ready
+# Features:
+# - Persistent volumes for state/checkpoints/assets (Friday-Monday Gap fix)
+# - Health checks and graceful shutdown (Zombie process fix)
+# - Resource limits and security context
+# - Entrypoint script for pre-flight checks (Port cleanup fix)
 
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: mcp-server-manager
+  name: mcp-jupyter-server
   namespace: default
   labels:
-    app: mcp-server-manager
+    app: mcp-jupyter
     version: v1
 spec:
-  replicas: 2
+  replicas: 1  # IMPORTANT: Keep at 1 (stateful, not horizontally scalable)
   strategy:
-    type: RollingUpdate
-    rollingUpdate:
-      maxSurge: 1
-      maxUnavailable: 0
+    type: Recreate  # Replace instead of RollingUpdate (stateful app)
   selector:
     matchLabels:
-      app: mcp-server-manager
+      app: mcp-jupyter
   template:
     metadata:
       labels:
-        app: mcp-server-manager
+        app: mcp-jupyter
         version: v1
     spec:
       serviceAccountName: mcp-pod-manager-sa
+      terminationGracePeriodSeconds: 30
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
       containers:
       - name: mcp-server
-        image: your-registry/mcp-server-manager:latest
+        image: your-registry/mcp-jupyter:latest
         imagePullPolicy: IfNotPresent
         ports:
         - name: http
-          containerPort: 8000
+          containerPort: 3000
           protocol: TCP
+        
+        # Entrypoint for zombie cleanup and pre-flight checks
+        command:
+          - /bin/bash
+          - /usr/local/bin/docker-entrypoint.sh
+        args:
+          - "--transport"
+          - "websocket"
+          - "--port"
+          - "3000"
+        
         env:
         - name: KUBERNETES_NAMESPACE
           valueFrom:
@@ -49,122 +61,108 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.name
-        - name: ENVIRONMENT
-          value: "production"
+        - name: MCP_DATA_DIR
+          value: "/data/mcp"
+        - name: MCP_MAX_KERNELS
+          value: "10"
+        - name: MCP_MAX_QUEUE_SIZE
+          value: "1000"
+        - name: LOG_LEVEL
+          value: "INFO"
+        - name: JUPYTER_KERNEL_TIMEOUT
+          value: "300"
+        
         resources:
           requests:
+            memory: "1Gi"
             cpu: "500m"
-            memory: "512Mi"
           limits:
-            cpu: "1000m"
-            memory: "1024Mi"
+            memory: "4Gi"
+            cpu: "2"
+        
+        # Persistent volume mounts (Friday-Monday Gap)
+        volumeMounts:
+        - name: mcp-data
+          mountPath: /data
+        - name: tmp
+          mountPath: /tmp
+        
         livenessProbe:
           httpGet:
             path: /health
-            port: http
-          initialDelaySeconds: 10
+            port: 3000
+          initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
           failureThreshold: 3
+        
         readinessProbe:
           httpGet:
             path: /ready
-            port: http
-          initialDelaySeconds: 5
+            port: 3000
+          initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
           failureThreshold: 2
+        
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3000
+          periodSeconds: 2
+          timeoutSeconds: 3
+          failureThreshold: 30
+        
         securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
           allowPrivilegeEscalation: false
           readOnlyRootFilesystem: false
           capabilities:
             drop:
               - ALL
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-          - weight: 100
-            podAffinityTerm:
-              labelSelector:
-                matchExpressions:
-                - key: app
-                  operator: In
-                  values:
-                  - mcp-server-manager
-              topologyKey: kubernetes.io/hostname
+      
+      volumes:
+      - name: mcp-data
+        persistentVolumeClaim:
+          claimName: mcp-jupyter-data-pvc
+      - name: tmp
+        emptyDir:
+          sizeLimit: 10Gi
+      
+      restartPolicy: Always
+      dnsPolicy: ClusterFirst
 
 ---
-# service.yaml: Service to expose the MCP Server
+# Persistent Volume Claim (Friday-Monday Gap)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mcp-jupyter-data-pvc
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 100Gi
+
+---
+# Service
 apiVersion: v1
 kind: Service
 metadata:
-  name: mcp-server-manager
+  name: mcp-jupyter-service
   namespace: default
   labels:
-    app: mcp-server-manager
+    app: mcp-jupyter
 spec:
   type: ClusterIP
   selector:
-    app: mcp-server-manager
+    app: mcp-jupyter
   ports:
   - name: http
-    port: 8000
-    targetPort: http
+    port: 3000
+    targetPort: 3000
     protocol: TCP
-
----
-# networkpolicy.yaml: Restrict network access for kernel pods
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: kernel-network-policy
-  namespace: default
-spec:
-  podSelector:
-    matchLabels:
-      app: mcp-kernel
-  policyTypes:
-  - Ingress
-  - Egress
-  ingress:
-  - from:
-    - podSelector:
-        matchLabels:
-          app: mcp-server-manager
-    ports:
-    - protocol: TCP
-      port: 8888  # Jupyter kernel port
-  egress:
-  # Allow DNS
-  - to:
-    - namespaceSelector: {}
-    ports:
-    - protocol: UDP
-      port: 53
-  # Allow HTTPS for pip install
-  - to:
-    - namespaceSelector: {}
-    ports:
-    - protocol: TCP
-      port: 443
-  # Deny all other egress by default (implicit in networkpolicy)
-
----
-# resourcequota.yaml: Limit total resource usage in the namespace
-apiVersion: v1
-kind: ResourceQuota
-metadata:
-  name: mcp-quota
-  namespace: default
-spec:
-  hard:
-    requests.cpu: "10"
-    requests.memory: "20Gi"
-    limits.cpu: "20"
-    limits.memory: "40Gi"
-    pods: "100"
-  scopeSelector:
-    matchExpressions:
-    - operator: In
-      scopeName: PriorityClass
-      values: ["default"]
+  sessionAffinity: ClientIP

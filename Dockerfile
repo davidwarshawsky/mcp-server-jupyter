@@ -1,12 +1,15 @@
 FROM python:3.10-slim
 
-# 1. Install build dependencies, then remove them after
+# 1. Install build dependencies and utilities
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
     ca-certificates \
-    # [DUH FIX #1] Add libmagic1 for python-magic
     libmagic1 \
+    # [ZOMBIE FIX] Add fuser for port cleanup
+    psmisc \
+    # [LOCK CLEANUP] Add find utility (usually present)
+    findutils \
     && rm -rf /var/lib/apt/lists/*
 
 # NOTE: We do not install kubectl in the server image by default. Port-forwarding
@@ -20,18 +23,31 @@ RUN useradd --create-home --shell /bin/bash appuser
 # 3. Copy only necessary files
 COPY --chown=appuser:appuser tools/mcp-server-jupyter/ /app
 
-# 4. Switch to the non-root user
+# 4. [ZOMBIE FIX] Copy entrypoint script with proper permissions
+COPY --chown=appuser:appuser tools/mcp-server-jupyter/docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# 5. Switch to the non-root user
 USER appuser
-WORKDIR /app/home/appuser
+WORKDIR /app
 
-# 5. Install dependencies into user's home directory
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir --user -r /app/requirements.txt
+# 6. Install dependencies into user's home directory
+RUN pip install --no-cache-dir --upgrade pip setuptools
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
-# 6. Set environment variables
+# [FRIDAY-MONDAY FIX] Install dill for checkpoint serialization
+RUN pip install --no-cache-dir dill
+
+# 7. Set environment variables
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 ENV MCP_JUPYTER_PROD=1
+ENV MCP_DATA_DIR=/data/mcp
+ENV PYTHONUNBUFFERED=1
 
-# 7. Expose the port and define the entrypoint
+# 8. Create data directory mount point
+RUN mkdir -p /data/mcp
+
+# 9. Expose the port and entrypoint
 EXPOSE 3000
-CMD ["python", "-m", "src.main", "--host", "0.0.0.0", "--port", "3000"]
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["--transport", "websocket", "--port", "3000"]
