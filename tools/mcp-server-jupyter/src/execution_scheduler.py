@@ -28,6 +28,7 @@ class ExecutionScheduler:
         code: str,
         exec_id: str,
         execute_callback,
+        persistence=None,
     ) -> None:
         """Register an execution and wait for it to complete or timeout.
 
@@ -38,13 +39,21 @@ class ExecutionScheduler:
         
         [OBSERVABILITY FIX] Uses asyncio.Event for completion notification instead
         of polling with sleep(0.01). This eliminates the 100 checks/second CPU burn.
+        
+        [PERSISTENCE FIX] Optional persistence manager to record task lifecycle events.
         """
         # Call execute callback to get msg_id; handle exceptions
         try:
             msg_id = await execute_callback(code)
         except Exception:
             # If kernel execution couldn't be started, do not register an execution
+            if persistence:
+                persistence.mark_task_failed(exec_id, "Execution startup failed")
             return
+
+        # Mark task as running in persistence layer
+        if persistence:
+            persistence.mark_task_running(exec_id)
 
         # Register execution entry
         session_data.setdefault("executions", {})
@@ -109,6 +118,8 @@ class ExecutionScheduler:
         except asyncio.TimeoutError:
             exec_entry["status"] = "timeout"
             exec_entry["error"] = f"Execution exceeded timeout of {timeout} seconds"
+            if persistence:
+                persistence.mark_task_failed(exec_id, exec_entry["error"])
         finally:
             logger.debug(f"Finalizing {msg_id} status={exec_entry.get('status')} cell_index={cell_index}")
 
@@ -117,6 +128,12 @@ class ExecutionScheduler:
                 session_data["max_executed_index"] = max(
                     session_data.get("max_executed_index", -1), cell_index
                 )
+                if persistence:
+                    persistence.mark_task_complete(exec_id)
+            elif exec_entry.get("status") == "error":
+                if persistence:
+                    persistence.mark_task_failed(exec_id, exec_entry.get("error"))
+            
             # Signal finalization
             exec_entry["finalization_event"].set()
 

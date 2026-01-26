@@ -51,7 +51,7 @@ logger = structlog.get_logger(__name__)
 
 
 def safe_path(p: Path) -> str:
-    """[FINAL FIX: SPACE IN USERNAME]
+    r"""[FINAL FIX: SPACE IN USERNAME]
     Return a path string safe for injection into Docker commands and Python code.
     
     Converts Windows backslashes to forward slashes to avoid escaping issues

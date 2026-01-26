@@ -232,6 +232,15 @@ class PersistenceManager:
         
         logger.debug(f"[PERSISTENCE] Renewed asset lease: {asset_path}")
 
+    def renew_lease(
+        self,
+        asset_path: str,
+        notebook_path: str,
+        ttl_hours: int = 24,
+    ):
+        """Alias for renew_asset_lease() for API compatibility."""
+        return self.renew_asset_lease(asset_path, notebook_path, ttl_hours)
+
     def get_expired_assets(self) -> List[str]:
         """
         Get list of assets whose leases have expired.
