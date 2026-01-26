@@ -1,6 +1,9 @@
 import asyncio
 import time
+import logging
 from typing import Any, Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 class ExecutionScheduler:
     def __init__(self, default_timeout: int = 300):
@@ -32,6 +35,9 @@ class ExecutionScheduler:
         External test harness will mutate session_data['executions'][msg_id]['status'] to
         simulate completion/error. This method will wait until completion or until the
         configured timeout is exceeded.
+        
+        [OBSERVABILITY FIX] Uses asyncio.Event for completion notification instead
+        of polling with sleep(0.01). This eliminates the 100 checks/second CPU burn.
         """
         # Call execute callback to get msg_id; handle exceptions
         try:
@@ -50,12 +56,17 @@ class ExecutionScheduler:
 
         # Check for linearity warning
         linearity_warning = self._check_linearity(session_data, cell_index)
+        
+        # [OBSERVABILITY FIX] Use asyncio.Event instead of polling
+        completion_event = asyncio.Event()
+        
         exec_entry = {
             "status": "running",
             "cell_index": cell_index,
             "execution_count": execution_count,
             "start_time": time.time(),
             "finalization_event": asyncio.Event(),
+            "completion_event": completion_event,  # <-- THE FIX: Push, not Poll
             "error": None,
             # Execution identifier provided by SessionManager (task id)
             "id": exec_id,
@@ -92,13 +103,14 @@ class ExecutionScheduler:
                 pass
 
         try:
-            print(f"Waiting for status change on {msg_id} with timeout={timeout}")
-            await asyncio.wait_for(_wait_for_status_change(session_data, msg_id), timeout=timeout)
+            logger.debug(f"Waiting for completion on {msg_id} with timeout={timeout}s")
+            # [OBSERVABILITY FIX] Wait for event signal instead of polling
+            await asyncio.wait_for(completion_event.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             exec_entry["status"] = "timeout"
             exec_entry["error"] = f"Execution exceeded timeout of {timeout} seconds"
         finally:
-            print(f"Finalizing {msg_id} status={exec_entry.get('status')} cell_index={cell_index}")
+            logger.debug(f"Finalizing {msg_id} status={exec_entry.get('status')} cell_index={cell_index}")
 
             # update max_executed_index if completed
             if exec_entry.get("status") == "completed":
@@ -111,6 +123,7 @@ class ExecutionScheduler:
             # If error and stop_on_error requested, clear the queue
             if exec_entry.get("status") == "error" and session_data.get("stop_on_error"):
                 await self._clear_queue_on_error(session_data, exec_entry.get("error"))
+
 
     async def _clear_queue_on_error(self, session_data: Dict[str, Any], error: Optional[str]) -> None:
         q = session_data.get("execution_queue")
@@ -155,27 +168,19 @@ class ExecutionScheduler:
                 continue
 
 
-async def _wait_for_status_change(session_data: dict, msg_id: str):
-    """Helper that waits until session_data['executions'][msg_id]['status'] is not 'running'."""
-    while True:
-        entry = session_data.get("executions", {}).get(msg_id)
-        if entry is None:
-            # If entry disappears, stop waiting
-            return
-        if entry.get("status") != "running":
-            return
-        await asyncio.sleep(0.01)
-
-
 def _auto_complete_callback(exec_entry: dict):
     """Best-effort auto-complete callback scheduled with `loop.call_later`.
 
     This avoids creating a pending Task and prevents shutdown warnings during
     tests. If the entry is still 'running' when the callback runs, mark it
-    as 'completed'.
+    as 'completed' and signal the completion event.
     """
     try:
         if exec_entry.get("status") == "running":
             exec_entry["status"] = "completed"
+            # [OBSERVABILITY FIX] Signal completion to waiting coroutine
+            if "completion_event" in exec_entry:
+                exec_entry["completion_event"].set()
     except Exception:
         pass
+

@@ -119,6 +119,10 @@ class ConnectionManager:
         """Broadcast a message to all active connections.
 
         Output messages (notebook/output) are throttled to ~10Hz.
+        
+        [HEAD-OF-LINE BLOCKING FIX] Uses fire-and-forget with background tasks
+        instead of awaiting sends sequentially. This prevents a slow client from
+        blocking all other clients from receiving updates.
         """
         now = time.time()
         method = None
@@ -130,14 +134,27 @@ class ConnectionManager:
                 return
             self.last_broadcast = now
 
+        # [HEAD-OF-LINE BLOCKING FIX] Fire-and-forget with background tasks
+        # Instead of: for conn in ...: await conn.send_text(...)
+        # We create background tasks so slow clients don't block others
+        background_tasks = set()
+        
         for conn in list(self.active_connections):
-            try:
-                payload = msg if isinstance(msg, str) else json.dumps(msg)
-                await conn.send_text(payload)
-            except Exception:
-                # Remove broken connections (self-healing)
-                if conn in self.active_connections:
-                    self.active_connections.remove(conn)
+            # Create a background task for each send (don't await)
+            task = asyncio.create_task(self._send_to_connection(conn, msg))
+            background_tasks.add(task)
+            # Clean up completed tasks
+            task.add_done_callback(background_tasks.discard)
+
+    async def _send_to_connection(self, conn, msg):
+        """Helper to send message to a single connection, removing on failure."""
+        try:
+            payload = msg if isinstance(msg, str) else json.dumps(msg)
+            await conn.send_text(payload)
+        except Exception:
+            # Remove broken connections (self-healing)
+            if conn in self.active_connections:
+                self.active_connections.remove(conn)
 
     def set_idle_timeout(self, seconds: int):
         self.idle_timeout = seconds

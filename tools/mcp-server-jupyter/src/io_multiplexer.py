@@ -16,12 +16,18 @@ Design Goals:
 2. No kernel process management (that's KernelLifecycle's job)
 3. No execution scheduling (that's ExecutionScheduler's job)
 4. Testable in isolation
+
+[NETWORK FIX] Ring buffer instead of time-based TTL for orphaned messages:
+- Old: Drop messages after 5 seconds (race condition in high-latency networks)
+- New: Keep up to 1000 orphaned messages in memory; drop oldest if size exceeded
+- This allows clients with slow registration to still receive outputs
 """
 
 import asyncio
-import nbformat
+from collections import deque
 from typing import Dict, Any, Optional, Callable
 import structlog
+import nbformat
 
 logger = structlog.get_logger(__name__)
 
@@ -45,11 +51,11 @@ class IOMultiplexer:
         logger.info(
             f"IOMultiplexer initialized (input_timeout={input_request_timeout}s)"
         )
-        # Buffer for IOPub messages that arrive before an execution entry is
-        # registered. Keyed by parent_msg_id -> list of (timestamp, msg).
-        self._message_buffer = {}
-        # How long (seconds) to keep buffered messages before dropping them
-        self._buffer_ttl = 5.0
+        # [NETWORK FIX] Ring buffer for orphaned messages (size-bounded, not time-based)
+        # Stores up to 1000 orphaned messages per parent_id
+        # Older messages are dropped when limit is exceeded
+        self._message_buffer = {}  # Dict[parent_id] -> deque of messages
+        self._max_orphaned_per_id = 1000
 
     async def listen_iopub(
         self,
@@ -165,9 +171,9 @@ class IOMultiplexer:
         # Identify which execution this belongs to
         parent_id = msg.get("parent_header", {}).get("msg_id")
         if not parent_id or parent_id not in executions:
-            # Message from previous run or system status - buffer briefly
-            # instead of dropping immediately to mitigate a race where IOPub
-            # messages arrive before the execution entry is registered.
+            # [NETWORK FIX] Buffer with ring buffer (size-bounded, not time-based)
+            # If the client is slow to register, we wait up to 1000 messages
+            # If buffer overflows, we drop the oldest message
             try:
                 exec_keys = list(executions.keys()) if executions is not None else []
                 logger.debug(
@@ -176,13 +182,12 @@ class IOMultiplexer:
                 # Store nb_path in msg to preserve context for later routing
                 msg_with_context = dict(msg)
                 msg_with_context["_nb_path"] = nb_path
-                # Append to buffer with timestamp
-                self._message_buffer.setdefault(parent_id, []).append((asyncio.get_event_loop().time(), msg_with_context))
-                # Also prune old entries for this parent
-                entries = self._message_buffer.get(parent_id, [])
-                ttl = getattr(self, "_buffer_ttl", 5.0)
-                now = asyncio.get_event_loop().time()
-                self._message_buffer[parent_id] = [(t, m) for (t, m) in entries if now - t <= ttl]
+                
+                # Ring buffer: store in deque with max size
+                if parent_id not in self._message_buffer:
+                    self._message_buffer[parent_id] = deque(maxlen=self._max_orphaned_per_id)
+                
+                self._message_buffer[parent_id].append(msg_with_context)
             except Exception:
                 pass
             return
@@ -191,8 +196,8 @@ class IOMultiplexer:
         # buffered messages for this parent are processed as well. This helps
         # with races where some messages arrived before registration.
         if parent_id in getattr(self, "_message_buffer", {}):
-            buffered = self._message_buffer.pop(parent_id, [])
-            for _, buffered_msg in buffered:
+            buffered_deque = self._message_buffer.pop(parent_id, deque())
+            for buffered_msg in buffered_deque:
                 try:
                     # Process buffered messages by routing them through
                     # the same code path (avoid recursion loops by calling
@@ -237,6 +242,10 @@ class IOMultiplexer:
                 broadcast_callback,
                 notification_callback,
             )
+            # [OBSERVABILITY FIX] Signal completion event if execution is complete
+            if msg_type == "status" and content.get("execution_state") == "idle":
+                if "completion_event" in exec_data:
+                    exec_data["completion_event"].set()
 
     async def _handle_status(
         self,
@@ -255,6 +264,10 @@ class IOMultiplexer:
             # Execution completed
             if exec_data["status"] not in ["error", "cancelled"]:
                 exec_data["status"] = "completed"
+
+            # [OBSERVABILITY FIX] Signal completion event so waiting coroutine wakes up
+            if "completion_event" in exec_data:
+                exec_data["completion_event"].set()
 
             # Wait for finalization event (synchronizes with queue processor)
             if "finalization_event" in exec_data:

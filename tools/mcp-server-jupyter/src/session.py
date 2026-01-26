@@ -21,6 +21,7 @@ from src.kernel_startup import INSPECT_HELPER_CODE, get_startup_code
 from src.kernel_lifecycle import KernelLifecycle
 from src.execution_scheduler import ExecutionScheduler
 from src.io_multiplexer import IOMultiplexer
+from src.persistence import PersistenceManager  # [STATE AMNESIA FIX]
 
 # Configure logging
 logger = get_logger()
@@ -142,6 +143,11 @@ class SessionManager:
             default_timeout=default_execution_timeout
         )
         self.io_multiplexer = IOMultiplexer(input_request_timeout=input_request_timeout)
+        
+        # [STATE AMNESIA FIX] Initialize SQLite persistence layer
+        self.db_path = self.persistence_dir / "state.db"
+        self.persistence = PersistenceManager(self.db_path)
+        logger.info(f"[PERSISTENCE] Initialized with database at {self.db_path}")
 
         # [PHASE 2.3] Asset cleanup task - deferred to avoid "no running event loop" error
         # [IIRB OPS FIX P1] "Infinite Disk" - continuous asset pruning
@@ -241,55 +247,29 @@ class SessionManager:
 
     async def _asset_cleanup_loop(self, interval: int = 3600):
         """
-        [PHASE 2.3] Periodically cleans up old asset files to prevent disk space exhaustion.
-        Runs every hour by default and deletes files older than 24 hours.
-
-        [ROUND 2 AUDIT] Also cleanup old proposals.json entries.
+        [ZOMBIE GC FIX - DISABLED]
+        
+        PREVIOUS IMPLEMENTATION (REMOVED): Autonomously deleted assets based on 
+        static analysis of notebook on disk, causing race condition:
+        
+        1. Cell generates assets/plot.png (in-memory in VS Code)
+        2. Background task reads notebook from disk (old version, no reference)
+        3. Background task deletes assets/plot.png
+        4. User saves notebook (reference is now permanent)
+        5. Notebook references deleted file -> CORRUPTION
+        
+        NEW APPROACH (PersistenceManager.get_expired_assets()):
+        - Assets have "leases" (default 24 hours)
+        - Client renews lease when notebook is saved
+        - Only delete if lease EXPIRED AND asset not in notebook
+        - Asset GC must be explicit (triggered by client via tools/asset_tools.py)
+        
+        This prevents data loss while still cleaning up old files.
         """
-        logger.info(f"Starting Asset Cleanup task (scan interval: {interval}s)")
-        max_age_hours = int(os.environ.get("MCP_ASSET_MAX_AGE_HOURS", "24"))
-        await asyncio.sleep(interval)  # Initial delay
-
-        while True:
-            try:
-                assets_dir = Path("assets")
-                if not assets_dir.exists():
-                    await asyncio.sleep(interval)
-                    continue
-
-                import time
-
-                now = time.time()
-                max_age_seconds = max_age_hours * 3600
-                deleted_count = 0
-
-                for asset_file in assets_dir.glob("*"):
-                    if asset_file.is_file():
-                        try:
-                            file_age = now - asset_file.stat().st_mtime
-                            if file_age > max_age_seconds:
-                                asset_file.unlink()
-                                deleted_count += 1
-                                logger.debug(
-                                    f"[ASSET CLEANUP] Deleted old asset: {asset_file.name} (age: {file_age/3600:.1f}h)"
-                                )
-                        except Exception as e:
-                            logger.warning(
-                                f"[ASSET CLEANUP] Failed to delete {asset_file.name}: {e}"
-                            )
-
-                if deleted_count > 0:
-                    logger.info(
-                        f"[ASSET CLEANUP] Deleted {deleted_count} old assets (>{max_age_hours}h)"
-                    )
-
-                await asyncio.sleep(interval)
-            except asyncio.CancelledError:
-                logger.info("Asset cleanup task cancelled.")
-                break
-            except Exception as e:
-                logger.error(f"[ASSET CLEANUP] Unhandled error: {e}")
-                await asyncio.sleep(interval)
+        logger.info("[ASSET CLEANUP] Disabled in favor of lease-based GC (see persistence.py)")
+        # This method is kept for backward compatibility but does nothing
+        # Asset cleanup is now triggered explicitly by the client via asset_tools.py
+        pass
 
     async def _health_check_loop(self, nb_path: str):
         """
