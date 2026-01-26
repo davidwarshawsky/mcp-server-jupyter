@@ -1,0 +1,170 @@
+---
+# deployment.yaml: Main MCP Server Manager Deployment
+# This deployment runs the MCP server in Kubernetes.
+# It has permissions to create and manage notebook kernel pods.
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server-manager
+  namespace: default
+  labels:
+    app: mcp-server-manager
+    version: v1
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: mcp-server-manager
+  template:
+    metadata:
+      labels:
+        app: mcp-server-manager
+        version: v1
+    spec:
+      serviceAccountName: mcp-pod-manager-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+      - name: mcp-server
+        image: your-registry/mcp-server-manager:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - name: http
+          containerPort: 8000
+          protocol: TCP
+        env:
+        - name: KUBERNETES_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: ENVIRONMENT
+          value: "production"
+        resources:
+          requests:
+            cpu: "500m"
+            memory: "512Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1024Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: http
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: http
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 2
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - mcp-server-manager
+              topologyKey: kubernetes.io/hostname
+
+---
+# service.yaml: Service to expose the MCP Server
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server-manager
+  namespace: default
+  labels:
+    app: mcp-server-manager
+spec:
+  type: ClusterIP
+  selector:
+    app: mcp-server-manager
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP
+
+---
+# networkpolicy.yaml: Restrict network access for kernel pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kernel-network-policy
+  namespace: default
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-kernel
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels:
+          app: mcp-server-manager
+    ports:
+    - protocol: TCP
+      port: 8888  # Jupyter kernel port
+  egress:
+  # Allow DNS
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: UDP
+      port: 53
+  # Allow HTTPS for pip install
+  - to:
+    - namespaceSelector: {}
+    ports:
+    - protocol: TCP
+      port: 443
+  # Deny all other egress by default (implicit in networkpolicy)
+
+---
+# resourcequota.yaml: Limit total resource usage in the namespace
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: mcp-quota
+  namespace: default
+spec:
+  hard:
+    requests.cpu: "10"
+    requests.memory: "20Gi"
+    limits.cpu: "20"
+    limits.memory: "40Gi"
+    pods: "100"
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values: ["default"]

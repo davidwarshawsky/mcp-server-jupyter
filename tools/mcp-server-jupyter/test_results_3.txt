@@ -1,0 +1,1478 @@
+bringing up nodes...
+bringing up nodes...
+
+........................................................s............... [ 11%]
+........................................................................ [ 22%]
+........................................................................ [ 33%]
+........................................................s............... [ 45%]
+........................................................................ [ 56%]
+.F.........s.............................F.............................. [ 67%]
+........F.F............F....................sF....s..........s..s.F..... [ 79%]
+..................F..................................................... [ 90%]
+.............................FFFailed to export traces to localhost:4317, error code: StatusCode.UNAVAILABLE
+.....F..F.Failed to export traces to localhost:4317, error code: StatusCode.UNAVAILABLE
+F..Transient error StatusCode.UNAVAILABLE encountered while exporting traces to localhost:4317, retrying in 1.20s.
+...FFailed to export traces to localhost:4317, error code: StatusCode.UNAVAILABLE
+F...........             [100%]Transient error StatusCode.UNAVAILABLE encountered while exporting metrics to localhost:4317, retrying in 0.96s.
+Transient error StatusCode.UNAVAILABLE encountered while exporting metrics to localhost:4317, retrying in 1.04s.
+Transient error StatusCode.UNAVAILABLE encountered while exporting metrics to localhost:4317, retrying in 0.91s.
+Failed to export metrics to localhost:4317, error code: StatusCode.UNAVAILABLE
+Failed to export metrics to localhost:4317, error code: StatusCode.UNAVAILABLE
+Failed to export metrics to localhost:4317, error code: StatusCode.UNAVAILABLE
+
+=================================== FAILURES ===================================
+____________________________ test_get_server_status ____________________________
+[gw3] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+    def test_get_server_status():
+        """Verify the self-awareness tool."""
+        # Save original state and ensure clean state for test
+        original_connections = connection_manager.active_connections.copy()
+        connection_manager.active_connections = []
+    
+        try:
+            # Only agent connected (implicit) - actually tool returns active_connections which tracks websockets
+            status = json.loads(get_server_status())
+            assert status["active_connections"] == 0
+            assert status["mode"] == "solo"
+    
+            # Simulate a connection
+            connection_manager.active_connections.append(MagicMock())
+            status = json.loads(get_server_status())
+>           assert status["active_connections"] == 1
+E           assert 0 == 1
+
+tests/test_production_features.py:62: AssertionError
+_______________ test_end_to_end_asset_extraction_and_provenance ________________
+[gw3] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0')
+real_session_manager = <src.session.SessionManager object at 0x7e261ef8f140>
+
+    @pytest.mark.asyncio
+    @pytest.mark.optional
+    async def test_end_to_end_asset_extraction_and_provenance(
+        tmp_path, real_session_manager
+    ):
+        """
+        Validates:
+        1. Kernel starts in correct environment
+        2. Matplotlib imports work
+        3. PNG images are extracted to assets/ directory
+        4. Cell metadata contains provenance (timestamp, env_name, python_path)
+    
+        Note: This test is marked as 'optional' because it requires matplotlib and numpy.
+        Run with: pytest -m optional
+        """
+        # 1. Create a test notebook
+        nb_path = tmp_path / "test_assets.ipynb"
+        notebook.create_notebook(str(nb_path))
+    
+        # 2. Start kernel
+        start_result = await real_session_manager.start_kernel(str(nb_path))
+        assert "Kernel started" in start_result
+    
+        # 3. Check if matplotlib is available, skip if not
+        check_code = "import matplotlib; import numpy; print('OK')"
+        check_id = await real_session_manager.execute_cell_async(
+            str(nb_path), 0, check_code
+        )
+    
+        check_status = {"status": "not_found"}
+        for _ in range(20):
+            await asyncio.sleep(0.5)
+            check_status = real_session_manager.get_execution_status(str(nb_path), check_id)
+            if check_status["status"] in ["completed", "error"]:
+                break
+    
+        if check_status["status"] == "error":
+            pytest.skip("Matplotlib or numpy not available in test environment")
+    
+        # 4. Add a cell that creates a matplotlib plot and saves it
+        plot_code = """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    x = np.linspace(0, 10, 100)
+    y = np.sin(x)
+    
+    plt.figure(figsize=(8, 4))
+    plt.plot(x, y)
+    plt.title("Test Plot for Asset Extraction")
+    plt.xlabel("X")
+    plt.ylabel("Sin(X)")
+    plt.grid(True)
+    
+    # Save the plot explicitly
+    plt.savefig('test_plot.png')
+    print("Plot saved as test_plot.png")
+    
+    # Also show it (should create display_data)
+    plt.show()
+    """
+        notebook.insert_cell(str(nb_path), 0, plot_code)
+    
+        # 5. Execute the plot cell
+        exec_id = await real_session_manager.execute_cell_async(str(nb_path), 0, plot_code)
+        assert exec_id is not None
+    
+        # 6. Wait for execution to complete
+        status = {"status": "not_found"}
+        for _ in range(30):  # 15 seconds max
+            await asyncio.sleep(0.5)
+            status = real_session_manager.get_execution_status(str(nb_path), exec_id)
+            if status["status"] in ["completed", "error"]:
+                break
+    
+        # 7. Verify execution completed successfully
+        assert status["status"] == "completed", f"Execution failed: {status}"
+    
+        # DEBUG: Print output to debug why png is missing
+        print(f"DEBUG: Plot Execution Output:\n{status['output']}")
+        print(f"DEBUG: Status dict: {status}")
+        print(
+            f"DEBUG: Intermediate outputs count: {status.get('intermediate_outputs_count', 0)}"
+        )
+    
+        assets_dir = tmp_path / "assets"
+        # Check if assets directory was created
+        if assets_dir.exists():
+            print(f"DEBUG: Assets dir exists with files: {list(assets_dir.glob('*'))}")
+        else:
+            print("DEBUG: Assets dir does not exist")
+        assert assets_dir.exists(), "assets/ directory should be created"
+    
+        # 8. Check that PNG file was saved (either in assets/ or notebook directory)
+        notebook_dir = tmp_path
+        png_files = list(assets_dir.glob("*.png"))
+        if not png_files:
+            # Check in notebook directory for explicitly saved file
+            png_files = list(notebook_dir.glob("*.png"))
+    
+>       assert (
+            len(png_files) > 0
+        ), f"At least one PNG file should be saved. Checked {assets_dir} and {notebook_dir}"
+E       AssertionError: At least one PNG file should be saved. Checked /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/assets and /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0
+E       assert 0 > 0
+E        +  where 0 = len([])
+
+tests/test_real_world.py:131: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-01-25 18:24:58 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:24:58 [info     ] IOMultiplexer initialized (input_timeout=60s)
+------------------------------ Captured log setup ------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:24:58 [info     ] [KERNEL] Assigning UUID: 810ca068-1075-415f-bd7b-3bd68d8d5dc2
+2026-01-25 18:24:59 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0 docker=False env=system
+2026-01-25 18:25:01 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb
+2026-01-25 18:25:01 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb
+Waiting for status change on 3083eef1-f6456a110827d80ba9215ef0_24198_4 with timeout=300
+2026-01-25 18:25:01 [debug    ] Buffering IOPub msg (type=status parent_id=3083eef1-f6456a110827d80ba9215ef0_24198_2) - known exec keys: ['3083eef1-f6456a110827d80ba9215ef0_24198_4'] (len=1)
+2026-01-25 18:25:01 [debug    ] Buffering IOPub msg (type=stream parent_id=3083eef1-f6456a110827d80ba9215ef0_24198_2) - known exec keys: ['3083eef1-f6456a110827d80ba9215ef0_24198_4'] (len=1)
+Finalizing 3083eef1-f6456a110827d80ba9215ef0_24198_4 status=completed cell_index=0
+Waiting for status change on 3083eef1-f6456a110827d80ba9215ef0_24198_5 with timeout=300
+Finalizing 3083eef1-f6456a110827d80ba9215ef0_24198_5 status=completed cell_index=0
+DEBUG: Plot Execution Output:
+[INTEGRITY WARNING] Cell 1 executed out-of-order; highest executed Cell 1. This may indicate hidden state has been relied upon.
+DEBUG: Status dict: {'status': 'completed', 'output': '[INTEGRITY WARNING] Cell 1 executed out-of-order; highest executed Cell 1. This may indicate hidden state has been relied upon.', 'intermediate_outputs_count': 0}
+DEBUG: Intermediate outputs count: 0
+DEBUG: Assets dir exists with files: []
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: bab2f494-61cb-4978-a330-2db77f7378be
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb (PID: 24734)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:02 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb
+2026-01-25 18:25:02 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_end_to_end_asset_extracti0/test_assets.ipynb
+__________________________ test_async_execution_flow ___________________________
+[gw1] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+    @pytest.mark.asyncio
+    async def test_async_execution_flow():
+        """
+        Tests async execution flow with real kernel.
+    
+        Validates that async cell execution properly tracks execution state
+        through the queue → running → completed lifecycle.
+        """
+        # Setup
+        manager = SessionManager()
+        nb_path = Path("test_async.ipynb").resolve()
+    
+        # Create dummy notebook
+        nb = nbformat.v4.new_notebook()
+        # A cell that sleeps for 2 seconds
+        code = "import time\nprint('Start')\ntime.sleep(2)\nprint('End')"
+        nb.cells.append(nbformat.v4.new_code_cell(code))
+        with open(nb_path, "w") as f:
+            nbformat.write(nb, f)
+    
+        try:
+            # 1. Start Kernel
+            print(f"Starting kernel for {nb_path}...")
+            res = await manager.start_kernel(str(nb_path))
+            print(res)
+    
+            # 2. Run Async
+            print("Submitting async task...")
+            exec_id = await manager.execute_cell_async(str(nb_path), 0, code)
+            assert exec_id is not None
+            print(f"Task ID: {exec_id}")
+    
+            # 3. Check immediately (Should be queued or running)
+            # Note: With autoreload delay, kernel startup takes ~1s
+            # Poll until we catch it in queued/running state or it completes
+            caught_in_progress = False
+            for _ in range(
+                20
+            ):  # Increased from implicit single check to account for autoreload delay
+                await asyncio.sleep(0.1)
+                status = manager.get_execution_status(str(nb_path), exec_id)
+                print(f"Status during execution: {status['status']}")
+                if status["status"] in ["queued", "running"]:
+                    caught_in_progress = True
+                    break
+                if status["status"] == "completed":
+                    # Fast execution - acceptable, skip assertion
+                    caught_in_progress = True
+                    break
+            assert caught_in_progress, "Failed to catch execution state"
+    
+            # 4. Wait a bit (simulate Agent doing other stuff)
+            print("Waiting 3 seconds...")
+            await asyncio.sleep(3)
+    
+            # 5. Check again (Should be done) - increased wait time for parallel test reliability
+            max_wait = 30  # seconds
+            wait_interval = 1.0
+            elapsed = 0
+            final_status = None
+    
+            while elapsed < max_wait:
+                status = manager.get_execution_status(str(nb_path), exec_id)
+                if status["status"] == "completed":
+                    final_status = status
+                    break
+                await asyncio.sleep(wait_interval)
+                elapsed += wait_interval
+    
+            assert (
+                final_status is not None
+            ), f"Execution did not complete within {max_wait} seconds"
+            print(f"Final status: {final_status['status']}")
+            print(f"Output: {final_status.get('output', '')}")
+    
+            assert final_status["status"] == "completed"
+>           assert "Start" in final_status["output"]
+E           assert 'Start' in '{"llm_summary": "\\u2705 SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\\n", "raw_outputs": [{"output_t..."metadata": {}, "name": "stdout", "text": "\\u2705 SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\\n"}]}'
+
+tests/test_async_integration.py:85: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:24:59 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:24:59 [info     ] IOMultiplexer initialized (input_timeout=60s)
+Starting kernel for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb...
+2026-01-25 18:24:59 [info     ] [KERNEL] Assigning UUID: 2a4b0bdf-b786-4f1d-943a-c5f3b620dff9
+2026-01-25 18:24:59 [info     ] [KERNEL] Started /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb cwd=/home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter docker=False env=system
+Kernel started (PID: 24740). CWD set to: /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter
+Submitting async task...
+Task ID: a6ad4029-21aa-41da-816c-490f02a67b60
+2026-01-25 18:25:01 [info     ] Starting IOPub listener for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb
+2026-01-25 18:25:01 [info     ] Starting stdin listener for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb
+Waiting for status change on 916c06fd-a6ab61a51fbb1c5769e14b14_24180_4 with timeout=300
+2026-01-25 18:25:01 [debug    ] Buffering IOPub msg (type=status parent_id=916c06fd-a6ab61a51fbb1c5769e14b14_24180_2) - known exec keys: ['916c06fd-a6ab61a51fbb1c5769e14b14_24180_4'] (len=1)
+2026-01-25 18:25:01 [debug    ] Buffering IOPub msg (type=stream parent_id=916c06fd-a6ab61a51fbb1c5769e14b14_24180_2) - known exec keys: ['916c06fd-a6ab61a51fbb1c5769e14b14_24180_4'] (len=1)
+Status during execution: running
+Waiting 3 seconds...
+2026-01-25 18:25:03 [debug    ] Buffering IOPub msg (type=status parent_id=916c06fd-a6ab61a51fbb1c5769e14b14_24180_2) - known exec keys: ['916c06fd-a6ab61a51fbb1c5769e14b14_24180_4'] (len=1)
+Finalizing 916c06fd-a6ab61a51fbb1c5769e14b14_24180_4 status=completed cell_index=0
+2026-01-25 18:25:03 [debug    ] Buffering IOPub msg (type=status parent_id=916c06fd-a6ab61a51fbb1c5769e14b14_24180_3) - known exec keys: ['916c06fd-a6ab61a51fbb1c5769e14b14_24180_4'] (len=1)
+2026-01-25 18:25:03 [debug    ] Buffering IOPub msg (type=status parent_id=916c06fd-a6ab61a51fbb1c5769e14b14_24180_3) - known exec keys: ['916c06fd-a6ab61a51fbb1c5769e14b14_24180_4'] (len=1)
+Final status: completed
+Output: {"llm_summary": "\u2705 SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\n", "raw_outputs": [{"output_type": "stream", "metadata": {}, "name": "stdout", "text": "\u2705 SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\n"}]}
+2026-01-25 18:25:04 [info     ] IOPub listener cancelled for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 6f1d8ae8-3b0c-4e6d-8a62-4f936a4dda5f
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb (PID: 24740)
+INFO     src.observability:observability.py:16 Finalize exec a6ad4029-21aa-41da-816c-490f02a67b60 text_summary len: 247
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb (PID: 24740)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:04 [info     ] Stdin listener cancelled for /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/test_async.ipynb
+______________________ test_inspect_variable_integration _______________________
+[gw3] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0')
+real_session_manager = <src.session.SessionManager object at 0x7e261e0e6f00>
+
+    @pytest.mark.asyncio
+    @pytest.mark.optional
+    async def test_inspect_variable_integration(tmp_path, real_session_manager):
+        """
+        Tests the inspect_variable tool with a real kernel.
+    
+        Validates:
+        1. Variable inspection returns markdown-formatted output
+        2. DataFrames show shape, columns, head
+        3. Lists show length and sample
+        4. Non-existent variables return error message
+    
+        Note: This test is marked as 'optional' because it requires pandas and numpy.
+        Run with: pytest -m optional
+        """
+        # 1. Create notebook
+        nb_path = tmp_path / "test_inspect.ipynb"
+        notebook.create_notebook(str(nb_path))
+    
+        # 2. Start kernel
+        await real_session_manager.start_kernel(str(nb_path))
+    
+        # 3. Create test variables
+        setup_code = """
+    import pandas as pd
+    import numpy as np
+    
+    # Create test DataFrame
+    df_test = pd.DataFrame({
+        'A': [1, 2, 3, 4, 5],
+        'B': ['a', 'b', 'c', 'd', 'e'],
+        'C': [1.1, 2.2, 3.3, 4.4, 5.5]
+    })
+    
+    # Create test list
+    my_list = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    
+    # Create test dict
+    my_dict = {'key1': 'value1', 'key2': 'value2', 'key3': 'value3'}
+    """
+    
+        exec_id = await real_session_manager.execute_cell_async(str(nb_path), 0, setup_code)
+    
+        # Wait for setup
+        status = {"status": "not_found"}
+        for _ in range(60):
+            await asyncio.sleep(0.5)
+            status = real_session_manager.get_execution_status(str(nb_path), exec_id)
+            if status["status"] in ["completed", "error"]:
+                break
+    
+        # Skip if pandas not available
+        if status["status"] == "error":
+            pytest.skip("Pandas or numpy not available in test environment")
+    
+        assert status["status"] == "completed", "Setup should complete successfully"
+    
+        # 4. Test DataFrame inspection via get_variable_info
+        df_info = await real_session_manager.get_variable_info(str(nb_path), "df_test")
+>       df_data = json.loads(df_info)
+
+tests/test_real_world.py:246: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:338: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7e262817fef0>
+s = '[INTEGRITY WARNING] Cell 0 executed out-of-order; highest executed Cell 1. This may indicate hidden state has been re..."metadata": {}, "name": "stdout", "text": "\\u2705 SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\\n"}]}'
+idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 2 (char 1)
+
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:356: JSONDecodeError
+---------------------------- Captured stdout setup -----------------------------
+2026-01-25 18:25:02 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:02 [info     ] IOMultiplexer initialized (input_timeout=60s)
+------------------------------ Captured log setup ------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:02 [info     ] [KERNEL] Assigning UUID: ff1cee5d-f084-4f70-aea2-8563bd16384b
+2026-01-25 18:25:02 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0 docker=False env=system
+2026-01-25 18:25:04 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb
+2026-01-25 18:25:04 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb
+Waiting for status change on 1f0db508-79d97589f253daaec88a5991_24198_4 with timeout=300
+2026-01-25 18:25:04 [debug    ] Buffering IOPub msg (type=status parent_id=1f0db508-79d97589f253daaec88a5991_24198_2) - known exec keys: ['1f0db508-79d97589f253daaec88a5991_24198_4'] (len=1)
+2026-01-25 18:25:04 [debug    ] Buffering IOPub msg (type=stream parent_id=1f0db508-79d97589f253daaec88a5991_24198_2) - known exec keys: ['1f0db508-79d97589f253daaec88a5991_24198_4'] (len=1)
+Finalizing 1f0db508-79d97589f253daaec88a5991_24198_4 status=completed cell_index=0
+Waiting for status change on 1f0db508-79d97589f253daaec88a5991_24198_5 with timeout=300
+Finalizing 1f0db508-79d97589f253daaec88a5991_24198_5 status=completed cell_index=-1
+2026-01-25 18:25:06 [debug    ] Buffering IOPub msg (type=status parent_id=1f0db508-79d97589f253daaec88a5991_24198_2) - known exec keys: ['1f0db508-79d97589f253daaec88a5991_24198_4', '1f0db508-79d97589f253daaec88a5991_24198_5'] (len=2)
+2026-01-25 18:25:06 [debug    ] Buffering IOPub msg (type=status parent_id=1f0db508-79d97589f253daaec88a5991_24198_3) - known exec keys: ['1f0db508-79d97589f253daaec88a5991_24198_4', '1f0db508-79d97589f253daaec88a5991_24198_5'] (len=2)
+2026-01-25 18:25:06 [debug    ] Buffering IOPub msg (type=status parent_id=1f0db508-79d97589f253daaec88a5991_24198_3) - known exec keys: ['1f0db508-79d97589f253daaec88a5991_24198_4', '1f0db508-79d97589f253daaec88a5991_24198_5'] (len=2)
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 2d040b00-5d3f-446d-853c-5773d71ebf5c
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb (PID: 24889)
+INFO     src.observability:observability.py:16 Finalize exec 7c651db3-e19b-4a1d-b2a1-b3ec1deb26b8 text_summary len: 374
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb (PID: 24889)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:06 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb
+2026-01-25 18:25:06 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_inspect_variable_integrat0/test_inspect.ipynb
+___________________________ test_cwd_is_notebook_dir ___________________________
+[gw4] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+session_manager_fixture = <src.session.SessionManager object at 0x71f45e75dac0>
+temp_notebook = '/tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb'
+
+    @pytest.mark.asyncio
+    async def test_cwd_is_notebook_dir(session_manager_fixture, temp_notebook):
+        manager = session_manager_fixture
+        await manager.start_kernel(temp_notebook)
+    
+        # code to check cwd
+        code = "import os; print(os.getcwd())"
+        exec_id = await manager.execute_cell_async(temp_notebook, 0, code)
+    
+        final_status = None
+        for _ in range(60):  # Increased to account for parallel execution load
+            await asyncio.sleep(0.5)
+            status = manager.get_execution_status(temp_notebook, exec_id)
+            if status["status"] == "completed":
+                final_status = status
+                break
+    
+        assert final_status is not None
+        # We expect the CWD to be the directory of possible notebook
+        expected_dir = str(Path(temp_notebook).parent.resolve())
+        # Normalize slashes for comparison
+        output_clean = final_status["output"].strip().replace("\\", "/")
+        expected_clean = expected_dir.replace("\\", "/")
+    
+        # The output might print it somewhat differently (case sensitivity on Windows), but let's check basic containment
+>       assert expected_clean.lower() in output_clean.lower()
+E       assert '/tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks' in '{"llm_summary": "", "raw_outputs": []}'
+E        +  where '/tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks' = <built-in method lower of str object at 0x71f45e790eb0>()
+E        +    where <built-in method lower of str object at 0x71f45e790eb0> = '/tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks'.lower
+E        +  and   '{"llm_summary": "", "raw_outputs": []}' = <built-in method lower of str object at 0x71f45e770d50>()
+E        +    where <built-in method lower of str object at 0x71f45e770d50> = '{"llm_summary": "", "raw_outputs": []}'.lower
+
+tests/test_comprehensive_async.py:137: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-01-25 18:25:04 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:04 [info     ] IOMultiplexer initialized (input_timeout=60s)
+------------------------------ Captured log setup ------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:04 [info     ] [KERNEL] Assigning UUID: 2527f943-df93-487e-a81b-c6b31cd50ba3
+2026-01-25 18:25:04 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks docker=False env=system
+2026-01-25 18:25:07 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb
+2026-01-25 18:25:07 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb
+Waiting for status change on 0ec404a2-a67b0c8f2cf588f352d50d2b_24201_4 with timeout=300
+2026-01-25 18:25:07 [debug    ] Buffering IOPub msg (type=status parent_id=0ec404a2-a67b0c8f2cf588f352d50d2b_24201_2) - known exec keys: ['0ec404a2-a67b0c8f2cf588f352d50d2b_24201_4'] (len=1)
+2026-01-25 18:25:07 [debug    ] Buffering IOPub msg (type=stream parent_id=0ec404a2-a67b0c8f2cf588f352d50d2b_24201_2) - known exec keys: ['0ec404a2-a67b0c8f2cf588f352d50d2b_24201_4'] (len=1)
+Finalizing 0ec404a2-a67b0c8f2cf588f352d50d2b_24201_4 status=completed cell_index=0
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 14729f5d-96f6-47be-a69c-103080413c37
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb (PID: 25025)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:08 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb
+2026-01-25 18:25:08 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw4/test_cwd_is_notebook_dir0/notebooks/async_test.ipynb
+______________________ test_autoreload_enabled_on_startup ______________________
+[gw3] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0')
+real_session_manager = <src.session.SessionManager object at 0x7e261e10f800>
+
+    @pytest.mark.asyncio
+    async def test_autoreload_enabled_on_startup(tmp_path, real_session_manager):
+        """
+        Validates that autoreload is automatically enabled when kernel starts.
+    
+        This test verifies:
+        1. Kernel can execute code after autoreload setup
+        2. Autoreload doesn't break kernel functionality
+        """
+        # 1. Create notebook
+        nb_path = tmp_path / "test_autoreload.ipynb"
+        notebook.create_notebook(str(nb_path))
+    
+        # 2. Start kernel (autoreload should be injected)
+        start_result = await real_session_manager.start_kernel(str(nb_path))
+        assert "Kernel started" in start_result
+    
+        # 3. Verify kernel is functional after autoreload injection
+        test_code = "x = 42\nprint(f'Value: {x}')"
+        notebook.append_cell(str(nb_path), test_code)
+    
+        exec_id = await real_session_manager.execute_cell_async(str(nb_path), 0, test_code)
+    
+        status = {"status": "not_found"}
+        for _ in range(40):  # Increased from 20 for parallel execution load
+            await asyncio.sleep(0.5)
+            status = real_session_manager.get_execution_status(str(nb_path), exec_id)
+            if status["status"] in ["completed", "error"]:
+                break
+    
+        assert (
+            status["status"] == "completed"
+        ), f"Kernel should be functional after autoreload. Got status: {status['status']}"
+>       assert (
+            "Value: 42" in status["output"]
+        ), f"Kernel should execute code correctly. Got output: {status['output']}"
+E       AssertionError: Kernel should execute code correctly. Got output: {"llm_summary": "", "raw_outputs": []}
+E       assert 'Value: 42' in '{"llm_summary": "", "raw_outputs": []}'
+
+tests/test_real_world.py:334: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-01-25 18:25:06 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:06 [info     ] IOMultiplexer initialized (input_timeout=60s)
+------------------------------ Captured log setup ------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:06 [info     ] [KERNEL] Assigning UUID: 583a4a8b-735d-4e7d-90ae-3737f606228d
+2026-01-25 18:25:06 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0 docker=False env=system
+2026-01-25 18:25:09 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb
+2026-01-25 18:25:09 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb
+Waiting for status change on 722219ff-c7c0564165c125845ae05085_24198_4 with timeout=300
+2026-01-25 18:25:09 [debug    ] Buffering IOPub msg (type=status parent_id=722219ff-c7c0564165c125845ae05085_24198_2) - known exec keys: ['722219ff-c7c0564165c125845ae05085_24198_4'] (len=1)
+2026-01-25 18:25:09 [debug    ] Buffering IOPub msg (type=stream parent_id=722219ff-c7c0564165c125845ae05085_24198_2) - known exec keys: ['722219ff-c7c0564165c125845ae05085_24198_4'] (len=1)
+Finalizing 722219ff-c7c0564165c125845ae05085_24198_4 status=completed cell_index=0
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: fdf66ff4-ab73-489d-9b5e-dbc2c8f2e7d8
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb (PID: 25149)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:10 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb
+2026-01-25 18:25:10 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_autoreload_enabled_on_sta0/test_autoreload.ipynb
+__________________________ test_multiple_asset_types ___________________________
+[gw3] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0')
+real_session_manager = <src.session.SessionManager object at 0x7e261e10dac0>
+
+    @pytest.mark.asyncio
+    @pytest.mark.optional
+    async def test_multiple_asset_types(tmp_path, real_session_manager):
+        """
+        Test that different asset types (PNG, SVG) are handled with priority.
+    
+        Priority: PDF > SVG > PNG > JPEG
+        When multiple formats exist, only the highest priority should be saved.
+    
+        Note: This test is marked as 'optional' because it requires matplotlib.
+        Run with: pytest -m optional
+        """
+        nb_path = tmp_path / "test_multi_assets.ipynb"
+        notebook.create_notebook(str(nb_path))
+    
+        # Start kernel
+        await real_session_manager.start_kernel(str(nb_path))
+    
+        # Create a cell that produces both PNG and SVG (SVG has higher priority)
+        multi_format_code = """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    plt.rcParams['svg.fonttype'] = 'none'  # Enable SVG text
+    
+    fig, ax = plt.subplots()
+    x = np.linspace(0, 2*np.pi, 100)
+    ax.plot(x, np.sin(x))
+    ax.set_title("Multi-format Test")
+    
+    # Display as both PNG and SVG
+    from IPython.display import display, SVG
+    display(fig)
+    plt.close(fig)
+    """
+    
+        notebook.append_cell(str(nb_path), multi_format_code)
+    
+        # Execute
+        exec_id = await real_session_manager.execute_cell_async(
+            str(nb_path), 0, multi_format_code
+        )
+    
+        # Wait for completion
+        status = {"status": "not_found"}
+        for _ in range(60):
+            await asyncio.sleep(0.5)
+            status = real_session_manager.get_execution_status(str(nb_path), exec_id)
+            if status["status"] in ["completed", "error"]:
+                break
+    
+        # Skip if matplotlib not available
+        if status["status"] == "error" and "matplotlib" in status.get("output", "").lower():
+            pytest.skip("Matplotlib not available in test environment")
+    
+        assert status["status"] == "completed", f"Execution should complete: {status}"
+    
+        # Check assets directory
+        assets_dir = tmp_path / "assets"
+        if assets_dir.exists():
+            asset_files = list(assets_dir.glob("asset_*"))
+>           assert len(asset_files) > 0, "At least one asset should be saved"
+E           AssertionError: At least one asset should be saved
+E           assert 0 > 0
+E            +  where 0 = len([])
+
+tests/test_real_world.py:424: AssertionError
+---------------------------- Captured stdout setup -----------------------------
+2026-01-25 18:25:10 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:10 [info     ] IOMultiplexer initialized (input_timeout=60s)
+------------------------------ Captured log setup ------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:10 [info     ] [KERNEL] Assigning UUID: fe678608-29e3-41af-baa9-9bf2172bf6da
+2026-01-25 18:25:10 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0 docker=False env=system
+2026-01-25 18:25:14 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb
+2026-01-25 18:25:14 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb
+Waiting for status change on c539a9e5-bd5f484cd93ffbfecd63c09c_24198_6 with timeout=300
+2026-01-25 18:25:14 [debug    ] Buffering IOPub msg (type=status parent_id=c539a9e5-bd5f484cd93ffbfecd63c09c_24198_4) - known exec keys: ['c539a9e5-bd5f484cd93ffbfecd63c09c_24198_6'] (len=1)
+2026-01-25 18:25:14 [debug    ] Buffering IOPub msg (type=stream parent_id=c539a9e5-bd5f484cd93ffbfecd63c09c_24198_4) - known exec keys: ['c539a9e5-bd5f484cd93ffbfecd63c09c_24198_6'] (len=1)
+Finalizing c539a9e5-bd5f484cd93ffbfecd63c09c_24198_6 status=completed cell_index=0
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 6a34f350-1dd5-4d1b-9ec1-1375e569f2d4
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb (PID: 25421)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:19 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb
+2026-01-25 18:25:19 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw3/test_multiple_asset_types0/test_multi_assets.ipynb
+__________ TestHTMLTableIntegration.test_small_dataframe_shows_inline __________
+[gw4] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+self = <tests.test_security_fixes.TestHTMLTableIntegration object at 0x71f45f4de0c0>
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0')
+
+        @pytest.mark.asyncio
+        async def test_small_dataframe_shows_inline(self, tmp_path):
+            """Small DataFrames should display as markdown tables."""
+            pytest.importorskip("pandas")
+    
+            manager = SessionManager()
+            nb_path = tmp_path / "test_table.ipynb"
+    
+            # Create notebook
+            nb = nbformat.v4.new_notebook()
+            nb.cells.append(nbformat.v4.new_code_cell("import pandas as pd"))
+            with open(nb_path, "w") as f:
+                nbformat.write(nb, f)
+    
+            try:
+                await manager.start_kernel(str(nb_path))
+    
+                # Create small DataFrame
+                code = """
+    import pandas as pd
+    df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
+    df.head()
+    """
+                result = await manager.run_simple_code(str(nb_path), code)
+    
+                # Should contain markdown table (Data Preview) if HTML conversion worked
+                # OR fallback message if conversion failed
+>               assert "[Data Preview]" in result or "[HTML Table detected" in result
+E               assert ('[Data Preview]' in '{"llm_summary": "", "raw_outputs": []}' or '[HTML Table detected' in '{"llm_summary": "", "raw_outputs": []}')
+
+tests/test_security_fixes.py:194: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:12 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:12 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:12 [info     ] [KERNEL] Assigning UUID: 402ae60d-9ccf-4ca6-b439-a4a6ae77b367
+2026-01-25 18:25:12 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0 docker=False env=system
+2026-01-25 18:25:11 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb
+2026-01-25 18:25:11 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb
+Waiting for status change on 82d70814-9ac61c459b78a16f36c9b32b_24201_4 with timeout=300
+2026-01-25 18:25:11 [debug    ] Buffering IOPub msg (type=status parent_id=82d70814-9ac61c459b78a16f36c9b32b_24201_2) - known exec keys: ['82d70814-9ac61c459b78a16f36c9b32b_24201_4'] (len=1)
+2026-01-25 18:25:11 [debug    ] Buffering IOPub msg (type=stream parent_id=82d70814-9ac61c459b78a16f36c9b32b_24201_2) - known exec keys: ['82d70814-9ac61c459b78a16f36c9b32b_24201_4'] (len=1)
+Finalizing 82d70814-9ac61c459b78a16f36c9b32b_24201_4 status=completed cell_index=-1
+2026-01-25 18:25:20 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb
+------------------------------ Captured log call -------------------------------
+WARNING  traitlets:client.py:125 Could not destroy zmq context for <jupyter_client.asynchronous.client.AsyncKernelClient object at 0x71f45e720a70>
+WARNING  traitlets:client.py:125 Could not destroy zmq context for <jupyter_client.asynchronous.client.AsyncKernelClient object at 0x71f45e981370>
+WARNING  traitlets:client.py:125 Could not destroy zmq context for <jupyter_client.asynchronous.client.AsyncKernelClient object at 0x71f45e9f7a70>
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: c173241f-94d0-439d-96b7-f2aba3d57fda
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb (PID: 25468)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:20 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw4/test_small_dataframe_shows_inl0/test_table.ipynb
+_______________________ test_get_variable_manifest_basic _______________________
+[gw0] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+    @pytest.mark.asyncio
+    async def test_get_variable_manifest_basic():
+        """Test basic variable manifest retrieval"""
+        session_manager = SessionManager()
+    
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nb_path = Path(tmpdir) / "test.ipynb"
+    
+            # Create minimal notebook
+            nb = nbformat.v4.new_notebook()
+            nb.cells.append(nbformat.v4.new_code_cell())
+            with open(nb_path, "w") as f:
+                nbformat.write(nb, f)
+    
+            # Start kernel
+            await session_manager.start_kernel(str(nb_path))
+    
+            # Create some variables
+            code = """
+    x = 42
+    name = "test"
+    data = [1, 2, 3, 4, 5]
+    mapping = {"a": 1, "b": 2, "c": 3}
+    """
+            await session_manager.run_simple_code(str(nb_path), code)
+    
+            # Get manifest
+            manifest_json = await session_manager.run_simple_code(
+                str(nb_path),
+                """
+    import json
+    import sys
+    
+    def get_size_str(obj):
+        try:
+            size = sys.getsizeof(obj)
+            if size < 1024:
+                return f"{size} B"
+            elif size < 1024 * 1024:
+                return f"{size / 1024:.1f} KB"
+            else:
+                return f"{size / (1024 * 1024):.1f} MB"
+        except:
+            return "?"
+    
+    manifest = []
+    for name in sorted(dir()):
+        if not name.startswith('_'):
+            try:
+                obj = globals()[name]
+                if not isinstance(obj, type(sys)):
+                    manifest.append({
+                        "name": name,
+                        "type": type(obj).__name__,
+                        "size": get_size_str(obj)
+                    })
+            except:
+                pass
+    
+    print(json.dumps(manifest))
+    """,
+            )
+    
+            # Parse result
+            result = json.loads(manifest_json)
+>           manifest = json.loads(result["llm_summary"])
+
+tests/test_variable_manifest.py:78: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:338: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7796e6fefef0>, s = '', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:356: JSONDecodeError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:21 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:21 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:21 [info     ] [KERNEL] Assigning UUID: bb5ad733-65e6-4146-852a-ee8fe0848d44
+2026-01-25 18:25:21 [info     ] [KERNEL] Started /tmp/tmpthhwn9hb/test.ipynb cwd=/tmp/tmpthhwn9hb docker=False env=system
+2026-01-25 18:25:24 [info     ] Starting IOPub listener for /tmp/tmpthhwn9hb/test.ipynb
+2026-01-25 18:25:24 [info     ] Starting stdin listener for /tmp/tmpthhwn9hb/test.ipynb
+Waiting for status change on 76b71fa7-50e9c2c87c705c000678a94a_24177_5 with timeout=300
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=76b71fa7-50e9c2c87c705c000678a94a_24177_3) - known exec keys: ['76b71fa7-50e9c2c87c705c000678a94a_24177_5'] (len=1)
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=stream parent_id=76b71fa7-50e9c2c87c705c000678a94a_24177_3) - known exec keys: ['76b71fa7-50e9c2c87c705c000678a94a_24177_5'] (len=1)
+Finalizing 76b71fa7-50e9c2c87c705c000678a94a_24177_5 status=completed cell_index=-1
+Waiting for status change on 76b71fa7-50e9c2c87c705c000678a94a_24177_6 with timeout=300
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: e71938a7-12f0-4436-9e3b-bf48487abe12
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/tmpthhwn9hb/test.ipynb (PID: 25808)
+WARNING  opentelemetry.exporter.otlp.proto.grpc.exporter:exporter.py:424 Transient error StatusCode.UNAVAILABLE encountered while exporting traces to localhost:4317, retrying in 1.13s.
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:26 [info     ] Stdin listener cancelled for /tmp/tmpthhwn9hb/test.ipynb
+2026-01-25 18:25:26 [info     ] IOPub listener cancelled for /tmp/tmpthhwn9hb/test.ipynb
+Finalizing 76b71fa7-50e9c2c87c705c000678a94a_24177_6 status=completed cell_index=-1
+__________________ test_get_variable_manifest_with_large_data __________________
+[gw6] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+    @pytest.mark.asyncio
+    async def test_get_variable_manifest_with_large_data():
+        """Test manifest with larger data structures"""
+        session_manager = SessionManager()
+    
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nb_path = Path(tmpdir) / "test.ipynb"
+    
+            # Create minimal notebook
+            nb = nbformat.v4.new_notebook()
+            nb.cells.append(nbformat.v4.new_code_cell())
+            with open(nb_path, "w") as f:
+                nbformat.write(nb, f)
+    
+            # Start kernel
+            await session_manager.start_kernel(str(nb_path))
+    
+            # Create large variables
+            code = """
+    large_list = list(range(10000))
+    large_dict = {i: i**2 for i in range(1000)}
+    text_data = "x" * 1000000  # 1MB string
+    """
+            await session_manager.run_simple_code(str(nb_path), code)
+    
+            # Get manifest
+            manifest_json = await session_manager.run_simple_code(
+                str(nb_path),
+                """
+    import json
+    import sys
+    
+    def get_size_str(obj):
+        try:
+            size = sys.getsizeof(obj)
+            if hasattr(obj, '__len__') and not isinstance(obj, (str, bytes)):
+                try:
+                    if isinstance(obj, (list, tuple, set)):
+                        size += sum(sys.getsizeof(item) for item in list(obj)[:100])
+                    elif isinstance(obj, dict):
+                        items = list(obj.items())[:100]
+                        size += sum(sys.getsizeof(k) + sys.getsizeof(v) for k, v in items)
+                except:
+                    pass
+    
+            if size < 1024:
+                return f"{size} B"
+            elif size < 1024 * 1024:
+                return f"{size / 1024:.1f} KB"
+            else:
+                return f"{size / (1024 * 1024):.1f} MB"
+        except:
+            return "?"
+    
+    manifest = []
+    for name in sorted(dir()):
+        if not name.startswith('_'):
+            try:
+                obj = globals()[name]
+                if not isinstance(obj, type(sys)):
+                    manifest.append({
+                        "name": name,
+                        "type": type(obj).__name__,
+                        "size": get_size_str(obj)
+                    })
+            except:
+                pass
+    
+    print(json.dumps(manifest))
+    """,
+            )
+    
+            # Parse result
+            result = json.loads(manifest_json)
+>           manifest = json.loads(result["llm_summary"])
+
+tests/test_variable_manifest.py:190: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:338: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7a6e5e270a70>
+s = '✅ SQL magics loaded: Use %%duckdb or %%sql to query DataFrames\n', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:356: JSONDecodeError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:21 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:21 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:21 [info     ] [KERNEL] Assigning UUID: 1e193ebc-383a-4b78-b72d-401f12e5b55b
+2026-01-25 18:25:21 [info     ] [KERNEL] Started /tmp/tmplaohti4k/test.ipynb cwd=/tmp/tmplaohti4k docker=False env=system
+2026-01-25 18:25:24 [info     ] Starting IOPub listener for /tmp/tmplaohti4k/test.ipynb
+2026-01-25 18:25:24 [info     ] Starting stdin listener for /tmp/tmplaohti4k/test.ipynb
+Waiting for status change on 833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5 with timeout=300
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_3) - known exec keys: ['833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5'] (len=1)
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=stream parent_id=833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_3) - known exec keys: ['833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5'] (len=1)
+Finalizing 833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5 status=completed cell_index=-1
+Waiting for status change on 833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_6 with timeout=300
+Finalizing 833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_6 status=completed cell_index=-1
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_3) - known exec keys: ['833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5', '833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_6'] (len=2)
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_4) - known exec keys: ['833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5', '833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_6'] (len=2)
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_4) - known exec keys: ['833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_5', '833ca64a-0eba4ea9728f6fdfeb89a5c6_24207_6'] (len=2)
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+WARNING  traitlets:client.py:125 Could not destroy zmq context for <jupyter_client.asynchronous.client.AsyncKernelClient object at 0x7a6e54329af0>
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 1cf2ed92-7949-4e20-ab86-ff6c97f95461
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/tmplaohti4k/test.ipynb (PID: 25805)
+INFO     src.observability:observability.py:16 Finalize exec a4d0ebb6-405e-4642-8413-53a1d076972e text_summary len: 247
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/tmplaohti4k/test.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/tmplaohti4k/test.ipynb (PID: 25805)
+INFO     src.observability:observability.py:16 Finalize exec ef15f7f9-4d0e-4b10-b3d5-08408449519b text_summary len: 38
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/tmplaohti4k/test.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/tmplaohti4k/test.ipynb (PID: 25805)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:27 [info     ] IOPub listener cancelled for /tmp/tmplaohti4k/test.ipynb
+2026-01-25 18:25:27 [info     ] Stdin listener cancelled for /tmp/tmplaohti4k/test.ipynb
+_______________________ test_variable_manifest_populates _______________________
+[gw7] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0')
+
+    @pytest.mark.asyncio
+    @pytest.mark.integration
+    async def test_variable_manifest_populates(tmp_path: Path):
+        test_nb = tmp_path / "test_var_dashboard.ipynb"
+        nb = nbformat.v4.new_notebook()
+        nb.cells = [
+            nbformat.v4.new_code_cell("x = 42"),
+            nbformat.v4.new_code_cell("message = 'Hello World'"),
+            nbformat.v4.new_code_cell("data = [1, 2, 3, 4, 5]"),
+        ]
+        nbformat.write(nb, test_nb)
+    
+        sm = SessionManager()
+        try:
+            await sm.start_kernel(str(test_nb))
+            # Execute cells
+            for i, cell in enumerate(nb.cells):
+                task_id = await sm.execute_cell_async(str(test_nb), i, cell.source)
+                # Wait for completion
+                for _ in range(200):  # up to ~20s
+                    status = sm.get_execution_status(str(test_nb), task_id)
+                    if status.get("status") in {"completed", "error"}:
+                        break
+                    await asyncio.sleep(0.1)
+    
+            # Collect manifest (with retry for timing issues)
+            manifest_code = _build_manifest_code()
+            manifest = []
+            for attempt in range(3):
+                output = await sm.run_simple_code(str(test_nb), manifest_code)
+                if output and not output.startswith("Error"):
+                    try:
+                        manifest = _extract_manifest_from_sanitized(output)
+                        if manifest:  # Successfully extracted
+                            break
+                    except json.JSONDecodeError:
+                        pass  # Retry
+                await asyncio.sleep(0.5)
+    
+>           assert (
+                manifest
+            ), f"Failed to extract manifest after retries. Last output: {output!r}"
+E           AssertionError: Failed to extract manifest after retries. Last output: '[INTEGRITY WARNING] Cell 0 executed out-of-order; highest executed Cell 3. This may indicate hidden state has been relied upon.{"llm_summary": "", "raw_outputs": []}{"llm_summary": "[{\\"name\\":\\"original_ps1\\",\\"type\\":\\"str\\",\\"size\\":\\"45 B\\"},{\\"name\\":\\"is_wsl\\",\\"type\\":\\"bool\\",\\"size\\":\\"28 B\\"},{\\"name\\":\\"x\\",\\"type\\":\\"int\\",\\"size\\":\\"28 B\\"},{\\"name\\":\\"message\\",\\"type\\":\\"str\\",\\"size\\":\\"52 B\\"},{\\"name\\":\\"data\\",\\"type\\":\\"list\\",\\"size\\":\\"104 B\\"}]\\n", "raw_outputs": [{"output_type": "stream", "metadata": {}, "name": "stdout", "text": "[{\\"name\\":\\"original_ps1\\",\\"type\\":\\"str\\",\\"size\\":\\"45 B\\"},{\\"name\\":\\"is_wsl\\",\\"type\\":\\"bool\\",\\"size\\":\\"28 B\\"},{\\"name\\":\\"x\\",\\"type\\":\\"int\\",\\"size\\":\\"28 B\\"},{\\"name\\":\\"message\\",\\"type\\":\\"str\\",\\"size\\":\\"52 B\\"},{\\"name\\":\\"data\\",\\"type\\":\\"list\\",\\"size\\":\\"104 B\\"}]\\n"}]}'
+E           assert []
+
+tests/test_variable_dashboard_integration.py:138: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:21 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:21 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:21 [info     ] [KERNEL] Assigning UUID: 67a042e8-2930-426e-b0ba-b78e15fb789a
+2026-01-25 18:25:21 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0 docker=False env=system
+2026-01-25 18:25:24 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+2026-01-25 18:25:24 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_5 with timeout=300
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=77a89f8f-4303c7299efaff376357fad8_24210_3) - known exec keys: ['77a89f8f-4303c7299efaff376357fad8_24210_5'] (len=1)
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=stream parent_id=77a89f8f-4303c7299efaff376357fad8_24210_3) - known exec keys: ['77a89f8f-4303c7299efaff376357fad8_24210_5'] (len=1)
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_5 status=completed cell_index=0
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_6 with timeout=300
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_6 status=completed cell_index=1
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_7 with timeout=300
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_7 status=completed cell_index=2
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_8 with timeout=300
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=77a89f8f-4303c7299efaff376357fad8_24210_3) - known exec keys: ['77a89f8f-4303c7299efaff376357fad8_24210_5', '77a89f8f-4303c7299efaff376357fad8_24210_6', '77a89f8f-4303c7299efaff376357fad8_24210_7', '77a89f8f-4303c7299efaff376357fad8_24210_8'] (len=4)
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_8 status=completed cell_index=-1
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=77a89f8f-4303c7299efaff376357fad8_24210_4) - known exec keys: ['77a89f8f-4303c7299efaff376357fad8_24210_5', '77a89f8f-4303c7299efaff376357fad8_24210_6', '77a89f8f-4303c7299efaff376357fad8_24210_7', '77a89f8f-4303c7299efaff376357fad8_24210_8'] (len=4)
+2026-01-25 18:25:26 [debug    ] Buffering IOPub msg (type=status parent_id=77a89f8f-4303c7299efaff376357fad8_24210_4) - known exec keys: ['77a89f8f-4303c7299efaff376357fad8_24210_5', '77a89f8f-4303c7299efaff376357fad8_24210_6', '77a89f8f-4303c7299efaff376357fad8_24210_7', '77a89f8f-4303c7299efaff376357fad8_24210_8'] (len=4)
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_9 with timeout=300
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_9 status=completed cell_index=-1
+Waiting for status change on 77a89f8f-4303c7299efaff376357fad8_24210_10 with timeout=300
+Finalizing 77a89f8f-4303c7299efaff376357fad8_24210_10 status=completed cell_index=-1
+2026-01-25 18:25:28 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+2026-01-25 18:25:28 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+2026-01-25 18:25:29 [info     ] [KERNEL] Stopped /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 5ad14fa1-502b-4173-b6c8-a7149de2a8e5
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+WARNING  opentelemetry.exporter.otlp.proto.grpc.exporter:exporter.py:424 Transient error StatusCode.UNAVAILABLE encountered while exporting traces to localhost:4317, retrying in 1.18s.
+INFO     src.observability:observability.py:16 Finalize exec 4aa4c548-e349-4e02-b636-e65f92787139 text_summary len: 374
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec 56593af6-2505-41e5-b771-2879d2ae6578 text_summary len: 38
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec edc921f8-adeb-4e26-b7d0-a55c7cf78568 text_summary len: 38
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec 4bfd4fa3-d7c2-4c69-9775-7a99d55a3f8c text_summary len: 38
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec 4aa4c548-e349-4e02-b636-e65f92787139 text_summary len: 1278
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec ee5e2717-ef32-4de6-9c01-827413fc83f5 text_summary len: 818
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec cfb5af54-9a15-42d7-bc13-5fbd7deed571 text_summary len: 165
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 Finalize exec cfb5af54-9a15-42d7-bc13-5fbd7deed571 text_summary len: 856
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw7/test_variable_manifest_populat0/test_var_dashboard.ipynb (PID: 25799)
+INFO     src.observability:observability.py:16 [ASSET CLEANUP] Prune result: Deleted 0 orphaned assets (0 bytes), kept 0 referenced assets
+_______________________ test_get_variable_manifest_empty _______________________
+[gw0] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+    @pytest.mark.asyncio
+    async def test_get_variable_manifest_empty():
+        """Test manifest with no user variables"""
+        session_manager = SessionManager()
+    
+        with tempfile.TemporaryDirectory() as tmpdir:
+            nb_path = Path(tmpdir) / "test.ipynb"
+    
+            # Create minimal notebook
+            nb = nbformat.v4.new_notebook()
+            nb.cells.append(nbformat.v4.new_code_cell())
+            with open(nb_path, "w") as f:
+                nbformat.write(nb, f)
+    
+            # Start kernel
+            await session_manager.start_kernel(str(nb_path))
+    
+            # Get manifest immediately (should be empty or minimal)
+            manifest_json = await session_manager.run_simple_code(
+                str(nb_path),
+                """
+    import json
+    import sys
+    
+    manifest = []
+    for name in sorted(dir()):
+        if not name.startswith('_'):
+            try:
+                obj = globals()[name]
+                if not isinstance(obj, type(sys)):
+                    manifest.append({
+                        "name": name,
+                        "type": type(obj).__name__,
+                        "size": "?"
+                    })
+            except:
+                pass
+    
+    print(json.dumps(manifest))
+    """,
+            )
+    
+            # Parse result
+            result = json.loads(manifest_json)
+>           manifest = json.loads(result["llm_summary"])
+
+tests/test_variable_manifest.py:259: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/__init__.py:346: in loads
+    return _default_decoder.decode(s)
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:338: in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <json.decoder.JSONDecoder object at 0x7796e6fefef0>, s = '', idx = 0
+
+    def raw_decode(self, s, idx=0):
+        """Decode a JSON document from ``s`` (a ``str`` beginning with
+        a JSON document) and return a 2-tuple of the Python
+        representation and the index in ``s`` where the document ended.
+    
+        This can be used to decode a JSON document from a string that may
+        have extraneous data at the end.
+    
+        """
+        try:
+            obj, end = self.scan_once(s, idx)
+        except StopIteration as err:
+>           raise JSONDecodeError("Expecting value", s, err.value) from None
+E           json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+
+/home/david/.pyenv/versions/3.12.10/lib/python3.12/json/decoder.py:356: JSONDecodeError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:26 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:26 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:26 [info     ] [KERNEL] Assigning UUID: ea0f07a7-6748-4c7b-82d5-b8e2bb3aa03c
+2026-01-25 18:25:26 [info     ] [KERNEL] Started /tmp/tmp4v_hcsgq/test.ipynb cwd=/tmp/tmp4v_hcsgq docker=False env=system
+2026-01-25 18:25:29 [info     ] Starting IOPub listener for /tmp/tmp4v_hcsgq/test.ipynb
+2026-01-25 18:25:29 [info     ] Starting stdin listener for /tmp/tmp4v_hcsgq/test.ipynb
+Waiting for status change on db3aaa97-0924501aa5807d6eb9dc8f75_24177_5 with timeout=300
+2026-01-25 18:25:29 [debug    ] Buffering IOPub msg (type=status parent_id=db3aaa97-0924501aa5807d6eb9dc8f75_24177_3) - known exec keys: ['db3aaa97-0924501aa5807d6eb9dc8f75_24177_5'] (len=1)
+2026-01-25 18:25:29 [debug    ] Buffering IOPub msg (type=stream parent_id=db3aaa97-0924501aa5807d6eb9dc8f75_24177_3) - known exec keys: ['db3aaa97-0924501aa5807d6eb9dc8f75_24177_5'] (len=1)
+Finalizing db3aaa97-0924501aa5807d6eb9dc8f75_24177_5 status=completed cell_index=-1
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 677b7a9e-ee30-4cab-b222-ddd94e2e43ff
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/tmp4v_hcsgq/test.ipynb (PID: 26084)
+--------------------------- Captured stdout teardown ---------------------------
+2026-01-25 18:25:30 [info     ] Stdin listener cancelled for /tmp/tmp4v_hcsgq/test.ipynb
+2026-01-25 18:25:30 [info     ] IOPub listener cancelled for /tmp/tmp4v_hcsgq/test.ipynb
+_________________________ test_streaming_basic_output __________________________
+[gw1] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0')
+
+    @pytest.mark.asyncio
+    async def test_streaming_basic_output(tmp_path):
+        manager = SessionManager()
+        nb_path = tmp_path / "test_streaming.ipynb"
+        nb_path.write_text(
+            """{
+            "cells": [{"cell_type": "code", "source": "import time\nfor i in range(3):\n    print(f'Step {i}')\n    time.sleep(0.05)", "metadata": {}, "outputs": []}],
+            "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3"}},
+            "nbformat": 4,
+            "nbformat_minor": 4
+        }"""
+        )
+    
+        await manager.start_kernel(str(nb_path))
+    
+        code = """
+    import time
+    for i in range(3):
+        print(f'Step {i}')
+        time.sleep(0.05)
+    """
+        exec_id = await manager.execute_cell_async(str(nb_path), 0, code)
+    
+        # Poll for outputs
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            session = manager.get_session(str(nb_path))
+            if session:
+                for _, data in session["executions"].items():
+                    if data.get("id") == exec_id and data.get("status") in [
+                        "completed",
+                        "error",
+                    ]:
+                        await manager.stop_kernel(str(nb_path))
+                        return
+    
+        await manager.stop_kernel(str(nb_path))
+>       assert False, "Execution did not complete in time"
+E       AssertionError: Execution did not complete in time
+E       assert False
+
+tests/test_streaming_features.py:47: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:11 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:11 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:11 [info     ] [KERNEL] Assigning UUID: dd542f52-b20f-42b3-82be-e39a8d5e30cf
+2026-01-25 18:25:19 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0 docker=False env=system
+2026-01-25 18:25:22 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+2026-01-25 18:25:22 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+Waiting for status change on d6966d5c-c65737a767f61d0baef09bfb_24180_5 with timeout=300
+2026-01-25 18:25:22 [debug    ] Buffering IOPub msg (type=status parent_id=d6966d5c-c65737a767f61d0baef09bfb_24180_3) - known exec keys: ['d6966d5c-c65737a767f61d0baef09bfb_24180_5'] (len=1)
+2026-01-25 18:25:22 [debug    ] Buffering IOPub msg (type=stream parent_id=d6966d5c-c65737a767f61d0baef09bfb_24180_3) - known exec keys: ['d6966d5c-c65737a767f61d0baef09bfb_24180_5'] (len=1)
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=d6966d5c-c65737a767f61d0baef09bfb_24180_3) - known exec keys: ['d6966d5c-c65737a767f61d0baef09bfb_24180_5'] (len=1)
+Finalizing d6966d5c-c65737a767f61d0baef09bfb_24180_5 status=completed cell_index=0
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=d6966d5c-c65737a767f61d0baef09bfb_24180_4) - known exec keys: ['d6966d5c-c65737a767f61d0baef09bfb_24180_5'] (len=1)
+2026-01-25 18:25:24 [debug    ] Buffering IOPub msg (type=status parent_id=d6966d5c-c65737a767f61d0baef09bfb_24180_4) - known exec keys: ['d6966d5c-c65737a767f61d0baef09bfb_24180_5'] (len=1)
+2026-01-25 18:25:32 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+2026-01-25 18:25:32 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+2026-01-25 18:25:33 [info     ] [KERNEL] Stopped /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: 4e0ffd82-720c-42ad-a502-8028aecdd157
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb (PID: 25671)
+INFO     src.observability:observability.py:16 Finalize exec efdf83ad-14ff-400d-84d9-bbfc612b9db7 text_summary len: 247
+WARNING  src.observability:observability.py:16 Could not compute hash: Notebook does not appear to be JSON: '{\n        "cells": [{"cell_type": "cod...
+ERROR    src.observability:observability.py:16 Failed to finalize execution: Notebook does not appear to be JSON: '{\n        "cells": [{"cell_type": "cod...
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb (PID: 25671)
+INFO     src.observability:observability.py:16 Finalize exec efdf83ad-14ff-400d-84d9-bbfc612b9db7 text_summary len: 617
+WARNING  src.observability:observability.py:16 Could not compute hash: Notebook does not appear to be JSON: '{\n        "cells": [{"cell_type": "cod...
+ERROR    src.observability:observability.py:16 Failed to finalize execution: Notebook does not appear to be JSON: '{\n        "cells": [{"cell_type": "cod...
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw1/test_streaming_basic_output0/test_streaming.ipynb (PID: 25671)
+INFO     src.observability:observability.py:16 [ASSET CLEANUP] Prune result: Deleted 0 orphaned assets (0 bytes), kept 0 referenced assets
+___________________ test_websocket_connection_and_execution ____________________
+[gw6] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw6/test_websocket_connection_and_0')
+
+    @pytest.mark.asyncio
+    async def test_websocket_connection_and_execution(tmp_path):
+        package_root = str(Path(__file__).parent.parent)
+        harness = MCPWebSocketHarness(cwd=package_root)
+    
+        try:
+>           await harness.start()
+
+tests/test_websocket_transport.py:269: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/test_websocket_transport.py:96: in start
+    raise e
+tests/test_websocket_transport.py:72: in start
+    await self._wait_for_port(10.0)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <tests.test_websocket_transport.MCPWebSocketHarness object at 0x7a6e54338740>
+timeout = 10.0
+
+    async def _wait_for_port(self, timeout):
+        """Wait for the server port to be ready by polling socket connectivity."""
+        start_time = asyncio.get_event_loop().time()
+        last_error = None
+    
+        # Simple, reliable approach: just poll the socket
+        while True:
+            try:
+                # Try to connect to the server
+                with socket.create_connection(("127.0.0.1", self.port), timeout=0.5):
+                    logger.info(f"Successfully connected to port {self.port}")
+                    return
+            except (ConnectionRefusedError, OSError, socket.timeout) as e:
+                last_error = e
+    
+            # Check timeout
+            elapsed = asyncio.get_event_loop().time() - start_time
+            if elapsed > timeout:
+                # Log any available output for debugging
+                await self._drain_output_for_debug()
+>               raise TimeoutError(
+                    f"Port {self.port} did not open within {timeout}s (last error: {last_error})"
+                )
+E               TimeoutError: Port 56085 did not open within 10.0s (last error: [Errno 111] Connection refused)
+
+tests/test_websocket_transport.py:118: TimeoutError
+----------------------------- Captured stdout call -----------------------------
+[WS HARNESS] launching server
+[WS HARNESS] server process started
+[WS HARNESS] waiting for port
+------------------------------ Captured log call -------------------------------
+INFO     tests.test_websocket_transport:test_websocket_transport.py:51 Starting server with command: /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python -u -m src.main --transport websocket --port 56085
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stdout: 2026-01-25 18:25:31 [warning  ] ⚠️  Kubernetes config not available, using local mode
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stderr: {"asctime": "2026-01-25 18:25:29,741", "name": "src.k8s_manager", "levelname": "WARNING", "message": "Kubernetes configuration not found or invalid; operating without Kubernetes: Invalid kube-config file. No configuration found.", "module": "k8s_manager", "funcName": "__init__", "taskName": null}
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stderr: INFO:     Started server process [26125]
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stderr: INFO:     Waiting for application startup.
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stderr: INFO:     Application startup complete.
+ERROR    tests.test_websocket_transport:test_websocket_transport.py:140 Server stderr: INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+_____________________________ test_is_kernel_busy ______________________________
+[gw5] linux -- Python 3.12.10 /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/bin/python
+
+tmp_path = PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0')
+
+    @pytest.mark.asyncio
+    async def test_is_kernel_busy(tmp_path):
+        """
+        [PERFORMANCE] Test is_kernel_busy method.
+        """
+        nb_path = tmp_path / "test.ipynb"
+        nb_path.write_text(
+            '{"cells": [], "metadata": {}, "nbformat": 4, "nbformat_minor": 2}'
+        )
+    
+        manager = SessionManager()
+        try:
+            await manager.start_kernel(str(nb_path))
+            await asyncio.sleep(2)
+    
+            # Initially kernel should not be busy
+            assert not manager.is_kernel_busy(
+                str(nb_path)
+            ), "Kernel should not be busy initially"
+    
+            # Start long-running operation
+            exec_id = await manager.execute_cell_async(
+                str(nb_path), -1, "import time; time.sleep(2)"
+            )
+    
+            # Give a moment for execution to start
+            await asyncio.sleep(0.2)
+    
+            # Kernel should now be busy
+>           assert manager.is_kernel_busy(
+                str(nb_path)
+            ), "Kernel should be busy during execution"
+E           AssertionError: Kernel should be busy during execution
+E           assert False
+E            +  where False = <bound method SessionManager.is_kernel_busy of <src.session.SessionManager object at 0x7da26167f1d0>>('/tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb')
+E            +    where <bound method SessionManager.is_kernel_busy of <src.session.SessionManager object at 0x7da26167f1d0>> = <src.session.SessionManager object at 0x7da26167f1d0>.is_kernel_busy
+E            +    and   '/tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb' = str(PosixPath('/tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb'))
+
+tests/test_security_audit_fixes.py:261: AssertionError
+----------------------------- Captured stdout call -----------------------------
+2026-01-25 18:25:35 [info     ] KernelLifecycle initialized (max_concurrent=10)
+2026-01-25 18:25:35 [info     ] IOMultiplexer initialized (input_timeout=60s)
+2026-01-25 18:25:35 [info     ] [KERNEL] Assigning UUID: 99d8c0f1-b81f-492a-ab99-04e34bfe413f
+2026-01-25 18:25:35 [info     ] [KERNEL] Started /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb cwd=/tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0 docker=False env=system
+2026-01-25 18:25:37 [info     ] Starting IOPub listener for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+2026-01-25 18:25:37 [info     ] Starting stdin listener for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+2026-01-25 18:25:37 [debug    ] Buffering IOPub msg (type=status parent_id=4f08062e-ac90bb8f9413a34ff547f53a_24204_1) - known exec keys: [] (len=0)
+2026-01-25 18:25:37 [debug    ] Buffering IOPub msg (type=stream parent_id=4f08062e-ac90bb8f9413a34ff547f53a_24204_1) - known exec keys: [] (len=0)
+2026-01-25 18:25:38 [debug    ] Buffering IOPub msg (type=status parent_id=4f08062e-ac90bb8f9413a34ff547f53a_24204_1) - known exec keys: [] (len=0)
+2026-01-25 18:25:38 [debug    ] Buffering IOPub msg (type=status parent_id=4f08062e-ac90bb8f9413a34ff547f53a_24204_2) - known exec keys: [] (len=0)
+2026-01-25 18:25:38 [debug    ] Buffering IOPub msg (type=status parent_id=4f08062e-ac90bb8f9413a34ff547f53a_24204_2) - known exec keys: [] (len=0)
+Waiting for status change on 4f08062e-ac90bb8f9413a34ff547f53a_24204_3 with timeout=300
+Finalizing 4f08062e-ac90bb8f9413a34ff547f53a_24204_3 status=completed cell_index=-1
+2026-01-25 18:25:39 [info     ] IOPub listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+2026-01-25 18:25:39 [info     ] Stdin listener cancelled for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+2026-01-25 18:25:40 [info     ] [KERNEL] Stopped /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+------------------------------ Captured log call -------------------------------
+INFO     src.observability:observability.py:16 Max concurrent kernels: 10
+INFO     src.observability:observability.py:16 Scheduled restore of persisted sessions on startup
+INFO     src.observability:observability.py:16 [OPS] Continuous asset pruner started (interval: 1h)
+INFO     src.observability:observability.py:16 Starting Asset Cleanup task (scan interval: 3600s)
+INFO     src.observability:observability.py:16 [KERNEL] Assigning UUID: a941d383-6bd1-4143-86fe-42685c8be253
+INFO     src.observability:observability.py:16 Autoreload and visualization config sent to kernel
+INFO     src.observability:observability.py:16 Path setup sent to kernel
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb (PID: 26427)
+INFO     src.observability:observability.py:16 Finalize exec 6cf918dc-0f74-4ed1-8407-904b66d8c917 text_summary len: 247
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb (PID: 26427)
+INFO     src.observability:observability.py:16 Finalize exec 6cf918dc-0f74-4ed1-8407-904b66d8c917 text_summary len: 494
+WARNING  src.kernel_state:kernel_state.py:112 Lock already held for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb
+INFO     src.kernel_state:kernel_state.py:97 Persisted session info for /tmp/pytest-of-david/pytest-128/popen-gw5/test_is_kernel_busy0/test.ipynb (PID: 26427)
+INFO     src.observability:observability.py:16 [ASSET CLEANUP] Prune result: Deleted 0 orphaned assets (0 bytes), kept 0 referenced assets
+=============================== warnings summary ===============================
+src/config.py:13: 10 warnings
+  /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/src/config.py:13: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'env'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    PORT: int = Field(8000, ge=1024, le=65535, env="MCP_PORT")
+
+src/config.py:14: 10 warnings
+  /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/src/config.py:14: PydanticDeprecatedSince20: Using extra keyword arguments on `Field` is deprecated and will be removed. Use `json_schema_extra` instead. (Extra keys: 'env'). Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.12/migration/
+    LOG_LEVEL: Literal["debug", "info", "warning", "error", "critical"] = Field(
+
+tests/test_e2e.py:8: 10 warnings
+  /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/tests/test_e2e.py:8: PytestUnknownMarkWarning: Unknown pytest.mark.e2e - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.e2e
+
+tests/test_variable_dashboard_integration.py:100: 10 warnings
+  /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/tests/test_variable_dashboard_integration.py:100: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests/test_variable_dashboard_integration.py:150: 10 warnings
+  /home/david/personal/mcp-server-jupyter/tools/mcp-server-jupyter/tests/test_variable_dashboard_integration.py:150: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests/test_git_awareness.py::TestCellIDOperations::test_edit_cell_heals_missing_id_using_expected_index
+tests/test_git_awareness.py::TestCellIDOperations::test_delete_cell_heals_missing_id_using_expected_index
+  /home/david/.cache/pypoetry/virtualenvs/mcp-server-jupyter-I6mhTYSU-py3.12/lib/python3.12/site-packages/nbformat/__init__.py:132: MissingIDFieldWarning: Cell is missing an id field, this will become a hard error in future nbformat versions. You may want to use `normalize()` on your notebooks before validations (available since nbformat 5.1.4). Previous versions of nbformat are fixing this issue transparently, and will stop doing so in the future.
+    validate(nb)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_production_features.py::test_get_server_status - assert 0 == 1
+FAILED tests/test_real_world.py::test_end_to_end_asset_extraction_and_provenance
+FAILED tests/test_async_integration.py::test_async_execution_flow - assert 'S...
+FAILED tests/test_real_world.py::test_inspect_variable_integration - json.dec...
+FAILED tests/test_comprehensive_async.py::test_cwd_is_notebook_dir - assert '...
+FAILED tests/test_real_world.py::test_autoreload_enabled_on_startup - Asserti...
+FAILED tests/test_real_world.py::test_multiple_asset_types - AssertionError: ...
+FAILED tests/test_security_fixes.py::TestHTMLTableIntegration::test_small_dataframe_shows_inline
+FAILED tests/test_variable_manifest.py::test_get_variable_manifest_basic - js...
+FAILED tests/test_variable_manifest.py::test_get_variable_manifest_with_large_data
+FAILED tests/test_variable_dashboard_integration.py::test_variable_manifest_populates
+FAILED tests/test_variable_manifest.py::test_get_variable_manifest_empty - js...
+FAILED tests/test_streaming_features.py::test_streaming_basic_output - Assert...
+FAILED tests/test_websocket_transport.py::test_websocket_connection_and_execution
+FAILED tests/test_security_audit_fixes.py::test_is_kernel_busy - AssertionErr...
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 15 failures !!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!! xdist.dsession.Interrupted: stopping after 10 failures !!!!!!!!!!!!
+15 failed, 614 passed, 7 skipped, 52 warnings in 86.86s (0:01:26)

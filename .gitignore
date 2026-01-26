@@ -1,0 +1,21 @@
+.venv/*
+**/__pycache__
+**/my-ai-memory.db
+**/.hypothesis/*
+
+# Auto-generated: Prevent notebook assets from polluting Git history
+assets/
+
+# Fat VSIX: Python wheels are bundled at build time, not committed
+vscode-extension/python_server/wheels/
+
+.coverage.*
+.coverage
+**/playwright-report/*
+**/dummy/*
+
+# Temporary diff and digest files
+diff.txt
+digest.txt
+node_modules/
+safe_screenshots/

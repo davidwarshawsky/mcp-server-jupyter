@@ -1,0 +1,124 @@
+---
+# rbac.yaml: Role-Based Access Control for MCP Pod Manager
+# Grants the MCP server permission to create, list, and delete kernel pods
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mcp-pod-manager-sa
+  namespace: default
+  labels:
+    app: mcp-server-manager
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: mcp-pod-manager-role
+  namespace: default
+  labels:
+    app: mcp-server-manager
+rules:
+# Pod management: create, list, delete, watch
+- apiGroups: [""]
+  resources: ["pods"]
+  # Least privilege: allow creation and read/list operations. Deletion should be audited and performed by an operator.
+  verbs: ["create", "get", "list", "watch"]
+# Pod logs: read logs from kernel pods (read-only)
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+# ConfigMaps: store kernel connection info (limited verbs)
+- apiGroups: [""]
+  resources: ["configmaps"]
+  verbs: ["create", "get", "list"]
+
+# NetworkPolicy: allow creating/listing network policies in the namespace
+- apiGroups: ["networking.k8s.io"]
+  resources: ["networkpolicies"]
+  verbs: ["create", "get", "list"]
+
+# Events: for audit trail
+- apiGroups: [""]
+  resources: ["events"]
+  verbs: ["create"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: mcp-pod-manager-binding
+  namespace: default
+subjects:
+- kind: ServiceAccount
+  name: mcp-pod-manager-sa
+  namespace: default
+roleRef:
+  kind: Role
+  name: mcp-pod-manager-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+# PodSecurityPolicy: Restrict what kernel pods can do
+apiVersion: policy/v1beta1
+kind: PodSecurityPolicy
+metadata:
+  name: mcp-kernel-psp
+  annotations:
+    seccomp.security.alpha.kubernetes.io/allowedProfileNames: 'runtime/default'
+    apparmor.security.beta.kubernetes.io/allowedProfileNames: 'runtime/default'
+    seccomp.security.alpha.kubernetes.io/defaultProfileName: 'runtime/default'
+    apparmor.security.beta.kubernetes.io/defaultProfileName: 'runtime/default'
+spec:
+  privileged: false
+  allowPrivilegeEscalation: false
+  requiredDropCapabilities:
+  - ALL
+  volumes:
+  - 'configMap'
+  - 'emptyDir'
+  - 'projected'
+  - 'secret'
+  - 'downwardAPI'
+  hostNetwork: false
+  hostIPC: false
+  hostPID: false
+  runAsUser:
+    rule: 'MustRunAsNonRoot'
+  seLinux:
+    rule: 'MustRunAs'
+    seLinuxOptions:
+      level: 's0:c123,c456'
+  supplementalGroups:
+    rule: 'RunAsAny'
+  fsGroup:
+    rule: 'RunAsAny'
+  readOnlyRootFilesystem: false
+
+---
+# ClusterRole: For reading PodSecurityPolicy (cluster-wide)
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: mcp-psp-restricted
+rules:
+- apiGroups: ['policy']
+  resources: ['podsecuritypolicies']
+  verbs: ['use']
+  resourceNames:
+  - mcp-kernel-psp
+
+---
+# ClusterRoleBinding: Grant PodSecurityPolicy to service account
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: mcp-psp-restricted-binding
+subjects:
+- kind: ServiceAccount
+  name: mcp-pod-manager-sa
+  namespace: default
+roleRef:
+  kind: ClusterRole
+  name: mcp-psp-restricted
+  apiGroup: rbac.authorization.k8s.io

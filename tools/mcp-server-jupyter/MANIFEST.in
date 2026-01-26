@@ -1,0 +1,29 @@
+# Include documentation and metadata files
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+
+# Include critical source modules for kernel injection
+include src/kernel_startup.py
+
+# Include prompt files for agent personas
+recursive-include src/prompts *.md
+
+# Exclude test files and cache
+global-exclude __pycache__
+global-exclude *.py[co]
+global-exclude .pytest_cache
+global-exclude .hypothesis
+global-exclude *.ipynb
+global-exclude assets/*
+
+# Exclude development artifacts
+exclude .gitignore
+exclude poetry.lock
+exclude uv.lock
+exclude test*.ipynb
+exclude integration_results_final.txt
+prune tests
+prune .vscode
+prune .mcp
+prune dummy

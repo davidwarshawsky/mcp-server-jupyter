@@ -1,0 +1,84 @@
+{
+	"servers": {
+		"tavily": {
+			"command": "npx",
+			"args": ["-y", "tavily-mcp@latest"],
+			"env": {
+				"TAVILY_API_KEY": "${env:TAVILY_API_KEY}"
+			},
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"exa-search-engine": {
+			"command": "npx",
+			"args": ["-y", "exa-mcp-server@latest"],
+			"env": {
+				"EXA_API_KEY": "${env:EXA_API_KEY}"
+			},
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"context7": {
+			"command": "npx",
+			"args": ["-y", "@upstash/context7-mcp@latest"],
+			"env": {
+				"CONTEXT7_API_KEY": "${env:CONTEXT7_API_KEY}"
+			},
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"firecrawl": {
+			"command": "npx",
+			"args": ["-y", "firecrawl-mcp"],
+			"env": {
+				"FIRECRAWL_API_KEY": "fc-ccd304b05fe-149c8b01f8b634cd7f0ba"
+			},
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"deepwiki": {
+			"type": "http",
+			"url": "https://mcp.deepwiki.com/sse",
+			"mcpAutoStarter": false,
+			"autoStart": false
+		},
+		"memory-sqlite": {
+			"command": "npx",
+			"args": ["-y", "mcp-memory-sqlite"],
+			"env": {
+				"DB_PATH": "${env:HOME}/Documents/my-ai-memory.db"
+			}
+		},
+		"thinking": {
+			"command": "npx",
+			"args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"aws-docs": {
+			"command": "uvx",
+			"args": ["awslabs.aws-documentation-mcp-server@latest"],
+			"type": "stdio",
+			"env": {
+				"FASTMCP_LOG_LEVEL": "ERROR",
+				"AWS_DOCUMENTATION_PARTITION": "aws"
+			},
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		},
+		"ddg-search": {
+			"command": "uvx",
+			"args": ["duckduckgo-mcp-server@latest"],
+			"type": "stdio",
+			"startupTimeout": 30000,
+			"mcpAutoStarter": true,
+			"autoStart": true
+		}
+	}
+}W

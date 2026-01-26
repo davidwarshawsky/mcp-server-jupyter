@@ -1,0 +1,13 @@
+.vscode/
+.vscode-test/
+src/
+test/
+out/test/
+scripts/
+*.vsix
+.gitignore
+.eslintrc.json
+tsconfig.json
+**/*.map
+**/*.ts
+!python_server/**

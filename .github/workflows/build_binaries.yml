@@ -1,0 +1,83 @@
+name: Build Standalone Binaries
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  build:
+    name: Build for ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Poetry
+        run: |
+          python -m pip install --upgrade pip
+          pip install poetry
+
+      - name: Install dependencies
+        run: |
+          cd tools/mcp-server-jupyter
+          poetry install --with dev
+
+      - name: Build binary (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd tools/mcp-server-jupyter
+          pyinstaller --name mcp-server-windows --onedir --clean src/main.py
+          powershell -Command "Compress-Archive -Path dist/mcp-server-windows -DestinationPath dist/mcp-server-windows.zip"
+
+      - name: Build binary (Linux/macOS)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd tools/mcp-server-jupyter
+          pyinstaller --name mcp-server-${{ matrix.os_name }} --onefile --clean src/main.py
+
+      - name: Sign Binary (Windows)
+        if: matrix.os == 'windows-latest'
+        env:
+          CERTIFICATE: ${{ secrets.WIN_CERTIFICATE }} # Base64 encoded PFX
+          CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          # Write cert to disk
+          echo $CERTIFICATE | base64 --decode > certificate.pfx
+          # Sign using signtool (available in windows-latest)
+          "C:\Program Files (x86)\Windows Kits\10\bin\10.0.17763.0\x86\signtool.exe" sign /f certificate.pfx /p $CERT_PASSWORD /tr http://timestamp.digicert.com /td sha256 /fd sha256 tools/mcp-server-jupyter/dist/mcp-server-windows/mcp-server-windows.exe
+
+      - name: Sign Binary (macOS)
+        if: matrix.os == 'macos-latest'
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }} # Base64 p12
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          echo $MACOS_CERTIFICATE | base64 --decode > certificate.p12
+          security create-keychain -p "" build.keychain
+          security import certificate.p12 -k build.keychain -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          
+          # Codesign
+          /usr/bin/codesign --force -s "Developer ID Application" tools/mcp-server-jupyter/dist/mcp-server-macos --options runtime
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: mcp-server-${{ matrix.os_name }}
+          path: |
+            tools/mcp-server-jupyter/dist/mcp-server-windows.zip
+            tools/mcp-server-jupyter/dist/mcp-server-ubuntu-latest
+            tools/mcp-server-jupyter/dist/mcp-server-macos-latest

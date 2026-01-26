@@ -1,0 +1,83 @@
+# -----------------------------
+# 1. Critical Exclusions (The 1M+ Token Culprits)
+# -----------------------------
+# Exclude all node_modules in any subdirectory
+**/node_modules/
+
+# Exclude compiled Python binaries and wheels (found in your tree)
+**/*.whl
+**/*.pyc
+**/__pycache__/
+
+# Exclude large lock files (they consume massive tokens but provide little logic)
+package-lock.json
+poetry.lock
+uv.lock
+yarn.lock
+pnpm-lock.yaml
+
+# -----------------------------
+# 2. Build & Compiled Outputs
+# -----------------------------
+# TypeScript/VSCode build output
+out/
+dist/
+build/
+lib/
+
+# Source maps (useless for LLM analysis)
+*.map
+*.js.map
+*.css.map
+
+# VS Code Extension packages
+*.vsix
+
+# -----------------------------
+# 3. Testing & Coverage Reports
+# -----------------------------
+# Python coverage reports (found in your tree)
+htmlcov/
+.coverage
+.pytest_cache/
+
+# JS/TS coverage and test reports
+coverage/
+test-results/
+playwright-report/
+blob-report/
+*.log
+
+# -----------------------------
+# 4. Assets & Media
+# -----------------------------
+assets/
+media/
+*.svg
+*.png
+*.jpg
+*.ttf
+*.woff
+*.woff2
+
+# -----------------------------
+# 5. Optional: Aggressive Code Reduction
+# -----------------------------
+# Uncomment these if you only want 'src' logic and not tests
+# test/
+# tests/
+# fixtures/
+
+# Exclude documentation if you only want code
+# docs/
+
+# -----------------------------
+# 6. Specific Project Temporary Folders
+# -----------------------------
+temp_test_handoff/
+temp_test_workspace/
+dummy/
+integration_results_final.txt
+digest.txt
+
+

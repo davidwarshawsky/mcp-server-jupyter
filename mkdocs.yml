@@ -1,0 +1,162 @@
+site_name: MCP Jupyter Server
+site_url: https://yourusername.github.io/mcp-jupyter-server
+repo_url: https://github.com/yourusername/mcp-jupyter-server
+repo_name: mcp-jupyter-server
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/logo.svg
+  favicon: assets/favicon.png
+  features:
+    - announce.dismiss
+    - content.action.edit
+    - content.action.view
+    - content.code.annotate  # Critical for explaining complex configs
+    - content.code.copy
+    - content.tabs.link
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+  palette:
+    # Light mode
+    - scheme: default
+      primary: teal
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [tools/mcp-server-jupyter/src]
+          options:
+            docstring_style: google
+            show_root_heading: true
+            show_source: true
+            show_root_toc_entry: false
+            heading_level: 2
+            members_order: source
+            show_signature_annotations: true
+            separate_signature: true
+
+markdown_extensions:
+  # Python Markdown
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+
+  # Python Markdown Extensions
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/yourusername/mcp-jupyter-server
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/mcp-server-jupyter/
+  analytics:
+    provider: google
+    property: G-XXXXXXXXXX  # Replace with your GA4 property
+  version:
+    provider: mike
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Installation: getting-started/installation.md
+    - Quick Start: getting-started/quickstart.md
+    - VS Code Extension: getting-started/vscode.md
+  - Superpowers:
+    - Overview: superpowers/index.md
+    - SQL Magic (%%duckdb): superpowers/sql-magic.md
+    - Asset Rendering: superpowers/asset-rendering.md
+    - Auto-EDA: superpowers/auto-eda.md
+    - Time Travel: superpowers/time-travel.md
+  - Architecture:
+    - Overview: architecture/index.md
+    - The Crucible: architecture/crucible.md
+    - The Reaper: architecture/reaper.md
+    - Asset Offloading: architecture/assets.md
+    - WebSocket Transport: architecture/websocket.md
+  - Consumer Prompts:
+    - Overview: prompts/index.md
+    - Jupyter Expert: prompts/jupyter-expert.md
+    - Autonomous Researcher: prompts/autonomous-researcher.md
+    - Auto Analyst: prompts/auto-analyst.md
+  - API Reference:
+    - Session Manager: api/session.md
+    - Notebook: api/notebook.md
+    - Tools: api/tools.md
+    - Data Tools: api/data-tools.md
+  - Comparison:
+    - vs Standard Jupyter: comparison/jupyter.md
+    - vs JupyterLab: comparison/jupyterlab.md
+    - vs Datalayer: comparison/datalayer.md
+  - Development:
+    - Contributing: development/contributing.md
+    - Testing: development/testing.md
+    - Release Process: development/release.md
+
+copyright: Copyright &copy; 2026 MCP Jupyter Server Contributors
