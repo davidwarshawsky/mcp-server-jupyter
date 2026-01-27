@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
-import { DatabaseService, ISnapshot } from './database';
+import { DatabaseManager } from './databaseManager';
+import { ISnapshot } from './database';
 
 export class SnapshotTreeDataProvider implements vscode.TreeDataProvider<SnapshotTreeItem> {
     private _onDidChangeTreeData: vscode.EventEmitter<SnapshotTreeItem | undefined | null | void> = new vscode.EventEmitter<SnapshotTreeItem | undefined | null | void>();
     readonly onDidChangeTreeData: vscode.Event<SnapshotTreeItem | undefined | null | void> = this._onDidChangeTreeData.event;
 
-    constructor(private databaseService: DatabaseService) {}
+    constructor(private dbManager: DatabaseManager) {}
 
     refresh(): void {
         this._onDidChangeTreeData.fire();
@@ -17,18 +18,32 @@ export class SnapshotTreeDataProvider implements vscode.TreeDataProvider<Snapsho
 
     async getChildren(element?: SnapshotTreeItem): Promise<SnapshotTreeItem[]> {
         if (element) {
-            // We have no nested items, so return empty array
             return [];
         }
 
-        const snapshots = await this.databaseService.getSnapshots();
-        return snapshots.map(snapshot => new SnapshotTreeItem(
-            snapshot,
-            vscode.TreeItemCollapsibleState.None
-        ));
+        const dbService = await this.dbManager.getActiveService();
+        if (!dbService || !dbService.isInitialized()) {
+            // Display a message when no workspace is open or DB is not initialized
+            return [new vscode.TreeItem('Open a folder to see snapshots', vscode.TreeItemCollapsibleState.None)];
+        }
+
+        try {
+            const snapshots = await dbService.getSnapshots();
+            if (snapshots.length === 0) {
+                return [new vscode.TreeItem('No snapshots saved for this workspace', vscode.TreeItemCollapsibleState.None)];
+            }
+            return snapshots.map(snapshot => new SnapshotTreeItem(
+                snapshot,
+                vscode.TreeItemCollapsibleState.None
+            ));
+        } catch (error) {
+            console.error('Error fetching snapshots:', error);
+            return [new vscode.TreeItem('Error loading snapshots', vscode.TreeItemCollapsibleState.None)];
+        }
     }
 }
 
+// ... (SnapshotTreeItem class remains the same)
 class SnapshotTreeItem extends vscode.TreeItem {
     constructor(
         public readonly snapshot: ISnapshot,
@@ -44,3 +59,4 @@ class SnapshotTreeItem extends vscode.TreeItem {
         };
     }
 }
+

@@ -1,10 +1,17 @@
 import * as vscode from 'vscode';
-import { DatabaseService, ISnapshot, ISnapshotVariable } from './database';
+import { DatabaseManager } from './databaseManager';
+import { ISnapshot, ISnapshotVariable } from './database';
 
 export class SnapshotViewer {
-    constructor(private databaseService: DatabaseService) {}
+    constructor(private dbManager: DatabaseManager) {}
 
     public async viewSnapshot(snapshot: ISnapshot): Promise<void> {
+        const dbService = await this.dbManager.getActiveService();
+        if (!dbService) {
+            vscode.window.showErrorMessage('Cannot view snapshot. No active workspace database.');
+            return;
+        }
+
         const panel = vscode.window.createWebviewPanel(
             'snapshotViewer',
             `Snapshot: ${snapshot.name}`,
@@ -12,10 +19,11 @@ export class SnapshotViewer {
             { enableScripts: true }
         );
 
-        const variables = await this.databaseService.getVariablesForSnapshot(snapshot.id);
+        const variables = await dbService.getVariablesForSnapshot(snapshot.id);
         panel.webview.html = this.getHtmlForWebview(snapshot, variables);
     }
 
+    // ... (getHtmlForWebview remains the same)
     private getHtmlForWebview(snapshot: ISnapshot, variables: ISnapshotVariable[]): string {
         const variableRows = variables.map(v => `
             <tr>

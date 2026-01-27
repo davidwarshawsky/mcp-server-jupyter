@@ -1,81 +1,45 @@
 import * as vscode from 'vscode';
-import { McpClient } from './mcpClient';
-import { MCPKernel } from './mcpKernel';
-import { SetupManager } from './setupManager';
-import { QuickStartWizard } from './quickStartWizard';
-import { DatabaseService } from './database';
-import { SnapshotTreeDataProvider } from './snapshotTreeDataProvider';
-import { SnapshotViewer } from './snapshotViewer';
+import { IFeature } from './features/feature.interface';
+import { SnapshotFeature } from './features/snapshot.feature';
+import { QuickStartFeature } from './features/quickstart.feature';
 
-let quickStartWizard: QuickStartWizard;
-let dbService: DatabaseService;
+// A list of all active features in the extension.
+// To add a new feature, simply create its class implementing IFeature and add it to this list.
+const features: IFeature[] = [
+    new SnapshotFeature(),
+    new QuickStartFeature(),
+];
 
-export async function activate(context: vscode.ExtensionContext) {
+/**
+ * This is the main entry point of the extension.
+ * It orchestrates the activation of all registered features.
+ */
+export function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "mcp-jupyter" is now active!');
 
-    // Initialize the database service
-    dbService = new DatabaseService(context);
-    await dbService.init();
-
-    // Initialize the core components
-    const setupManager = new SetupManager(context);
-    const mcpClient = McpClient.getInstance('ws://localhost:8888', 'test-session', new MCPKernel());
-    quickStartWizard = new QuickStartWizard(context, setupManager, mcpClient);
-
-    // Register the snapshot components
-    const snapshotTreeDataProvider = new SnapshotTreeDataProvider(dbService);
-    const snapshotViewer = new SnapshotViewer(dbService);
-
-    vscode.window.registerTreeDataProvider('mcp-jupyter-snapshots', snapshotTreeDataProvider);
-
-    // Register commands
-    context.subscriptions.push(
-        vscode.commands.registerCommand('mcp-jupyter.quickStart', () => quickStartWizard.show()),
-        vscode.commands.registerCommand('mcp-jupyter.viewSnapshot', (snapshot) => snapshotViewer.viewSnapshot(snapshot)),
-        vscode.commands.registerCommand('mcp-jupyter.saveSnapshot', async () => {
-            const snapshotName = await vscode.window.showInputBox({ prompt: 'Enter a name for the snapshot' });
-            if (snapshotName) {
-                // In a real implementation, we would get the variables from the MCPKernel
-                const dummyVariables = [
-                    { name: 'df', type: 'DataFrame', preview: '[100 rows x 5 cols]', timestamp: Math.floor(Date.now() / 1000) },
-                    { name: 'x', type: 'int', preview: '42', timestamp: Math.floor(Date.now() / 1000) }
-                ];
-                const activeNotebook = vscode.window.activeNotebookEditor?.notebook.uri.fsPath ?? 'unknown';
-                await dbService.saveSnapshot(snapshotName, activeNotebook, dummyVariables);
-                snapshotTreeDataProvider.refresh();
-            }
-        }),
-        vscode.commands.registerCommand('mcp-jupyter.clearSnapshots', async () => {
-            await dbService.clearAllSnapshots();
-            snapshotTreeDataProvider.refresh();
-        })
-    );
-
-    // Automatically show the wizard if setup has not been completed
-    quickStartWizard.showIfNeeded();
-
-    // Register the kernel
-    context.subscriptions.push(
-        vscode.notebook.registerNotebookKernelProvider(
-            { viewType: 'mcp-jupyter-notebook' },
-            {
-                provideKernels: async () => {
-                    const isSetupComplete = context.globalState.get('mcp.hasCompletedSetup', false);
-                    if (isSetupComplete) {
-                        return [new MCPKernel()];
-                    }
-                    return [];
-                }
-            }
-        )
-    );
+    // Activate all features
+    features.forEach(feature => {
+        try {
+            feature.activate(context);
+        } catch (err) {
+            console.error(`Error activating feature: ${err.message}`);
+            // Optionally, show a VS Code error message to the user
+            // vscode.window.showErrorMessage(`Failed to activate a feature. See console for details.`);
+        }
+    });
 }
 
+/**
+ * This is the main exit point of the extension.
+ * It orchestrates the deactivation of all registered features.
+ */
 export function deactivate() {
-    if (quickStartWizard) {
-        quickStartWizard.dispose();
-    }
-    if (dbService) {
-        dbService.close();
-    }
+    // Deactivate all features in reverse order
+    features.slice().reverse().forEach(feature => {
+        try {
+            feature.deactivate();
+        } catch (err) {
+            console.error(`Error deactivating feature: ${err.message}`);
+        }
+    });
 }

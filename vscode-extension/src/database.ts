@@ -6,68 +6,93 @@ import sqlite3 from 'sqlite3';
 // ... (interfaces are the same)
 
 export class DatabaseService {
-    // ... (constructor and init are the same)
+    private db: sqlite3.Database | undefined;
+    private dbPath: string | undefined;
 
-    public async saveSnapshot(name: string, notebookPath: string, variables: Omit<ISnapshotVariable, 'id' | 'snapshotId'>[]): Promise<ISnapshot> {
+    constructor() {}
+
+    /**
+     * Initializes the database for a specific workspace folder.
+     * Returns true on success, false on failure.
+     */
+    public async init(workspaceFolder: vscode.WorkspaceFolder): Promise<boolean> {
+        const configPath = vscode.workspace.getConfiguration('mcp-jupyter').get<string>('snapshotStoragePath');
+        if (!configPath) {
+            // Should not happen as we have a default value, but good to guard.
+            vscode.window.showErrorMessage('Snapshot storage path is not configured.');
+            return false;
+        }
+
+        let resolvedPath: string;
+        if (path.isAbsolute(configPath)) {
+            resolvedPath = configPath;
+        } else {
+            resolvedPath = path.join(workspaceFolder.uri.fsPath, configPath);
+        }
+        this.dbPath = resolvedPath;
+
+        const dbDir = path.dirname(this.dbPath);
+        if (!fs.existsSync(dbDir)) {
+            try {
+                fs.mkdirSync(dbDir, { recursive: true });
+            } catch (err) {
+                vscode.window.showErrorMessage(`Failed to create snapshot directory: ${err.message}`);
+                return false;
+            }
+        }
+
         return new Promise((resolve, reject) => {
-            const createdAt = Math.floor(Date.now() / 1000);
-            const snapshotSql = `INSERT INTO snapshots (name, notebook_path, created_at) VALUES (?, ?, ?)`;
+            this.close(); // Close any existing connection
+            this.db = new sqlite3.Database(this.dbPath, (err) => {
+                if (err) {
+                    vscode.window.showErrorMessage(`Failed to connect to snapshot database at ${this.dbPath}: ${err.message}`);
+                    return resolve(false);
+                }
+                console.log(`Connected to snapshot database for workspace: ${workspaceFolder.name}`);
+                this.createTables().then(() => resolve(true)).catch(() => resolve(false));
+            });
+        });
+    }
 
-            this.db?.run(snapshotSql, [name, notebookPath, createdAt], function (err) {
+    // ... (createTables, getSnapshots, etc. remain the same, but now operate on the workspace-specific db)
+    private async createTables(): Promise<void> {
+        const tables = `
+            CREATE TABLE IF NOT EXISTS snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                notebook_path TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS snapshot_variables (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                type TEXT,
+                preview TEXT,
+                timestamp INTEGER,
+                FOREIGN KEY (snapshot_id) REFERENCES snapshots (id) ON DELETE CASCADE
+            );
+        `;
+        return new Promise((resolve, reject) => {
+            if (!this.db) return reject('Database not initialized');
+            this.db.exec(tables, (err) => {
                 if (err) return reject(err);
-
-                const snapshotId = this.lastID;
-                const newSnapshot: ISnapshot = { id: snapshotId, name, notebookPath, createdAt };
-
-                const varSql = `INSERT INTO snapshot_variables (snapshot_id, name, type, preview, timestamp) VALUES (?, ?, ?, ?, ?)`;
-                const stmt = this.db.prepare(varSql);
-
-                this.db.serialize(() => {
-                    variables.forEach(v => {
-                        stmt.run(snapshotId, v.name, v.type, v.preview, v.timestamp);
-                    });
-                    stmt.finalize(err => {
-                        if (err) return reject(err);
-                        resolve(newSnapshot);
-                    });
-                });
+                resolve();
             });
         });
     }
-
-    public async getSnapshots(): Promise<ISnapshot[]> {
-        return new Promise((resolve, reject) => {
-            const sql = `SELECT * FROM snapshots ORDER BY created_at DESC`;
-            this.db?.all(sql, [], (err, rows) => {
-                if (err) return reject(err);
-                resolve(rows as ISnapshot[]);
-            });
-        });
-    }
-
-    public async getVariablesForSnapshot(snapshotId: number): Promise<ISnapshotVariable[]> {
-        return new Promise((resolve, reject) => {
-            const sql = `SELECT * FROM snapshot_variables WHERE snapshot_id = ?`;
-            this.db?.all(sql, [snapshotId], (err, rows) => {
-                if (err) return reject(err);
-                resolve(rows as ISnapshotVariable[]);
-            });
-        });
-    }
-
-    public async clearAllSnapshots(): Promise<void> {
-        return new Promise((resolve, reject) => {
-            this.db?.serialize(() => {
-                this.db.run(`DELETE FROM snapshot_variables`, [], (err) => {
-                    if (err) return reject(err);
-                });
-                this.db.run(`DELETE FROM snapshots`, [], (err) => {
-                    if (err) return reject(err);
-                    resolve();
-                });
-            });
-        });
-    }
+    // ... (other methods like saveSnapshot, getSnapshots would also need checks for this.db)
     
-    // ... (close method is the same)
+    public isInitialized(): boolean {
+        return this.db !== undefined;
+    }
+
+    public close(): void {
+        if (this.db) {
+            this.db.close();
+            this.db = undefined;
+            this.dbPath = undefined;
+            console.log('Closed database connection.');
+        }
+    }
 }

@@ -15,6 +15,10 @@
             {
                 "command": "mcp-jupyter.clearSnapshots",
                 "title": "MCP Jupyter: Clear All Session Snapshots"
+            },
+            {
+                "command": "mcp-jupyter.saveSnapshot",
+                "title": "MCP Jupyter: Save Session Snapshot"
             }
         ],
         "notebookKernelProviders": [
@@ -41,6 +45,16 @@
                     "type": "tree"
                 }
             ]
+        },
+        "configuration": {
+            "title": "MCP Jupyter",
+            "properties": {
+                "mcp-jupyter.snapshotStoragePath": {
+                    "type": "string",
+                    "default": ".mcp/snapshots.sqlite",
+                    "description": "Path to the snapshot database file. Can be an absolute path or a path relative to the workspace root."
+                }
+            }
         }
     }
 }
