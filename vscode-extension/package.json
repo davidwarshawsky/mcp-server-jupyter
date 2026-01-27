@@ -10,17 +10,88 @@
         "Other"
     ],
     "activationEvents": [
-        "onCommand:mcp-jupyter-vscode.start"
+        "onCommand:mcp-jupyter-vscode.start",
+        "onView:mcpSessions"
     ],
     "main": "./out/extension.js",
     "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "mcp-jupyter-sidebar",
+                    "title": "MCP Jupyter",
+                    "icon": "resources/icon.svg"
+                }
+            ]
+        },
+        "views": {
+            "mcp-jupyter-sidebar": [
+                {
+                    "id": "mcpSessions",
+                    "name": "Active Kernels",
+                    "visibility": "visible",
+                    "contextualTitle": "MCP Jupyter Sessions"
+                },
+                {
+                    "id": "mcpVariables",
+                    "name": "Variables",
+                    "visibility": "visible",
+                    "contextualTitle": "Kernel Variables"
+                }
+            ]
+        },
         "commands": [
             {
                 "command": "mcp-jupyter-vscode.start",
                 "title": "Start MCP Jupyter"
+            },
+            {
+                "command": "mcp-jupyter.attachSession",
+                "title": "Attach to Kernel",
+                "icon": "$(plug)"
+            },
+            {
+                "command": "mcp-jupyter.refreshSessions",
+                "title": "Refresh Sessions",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "mcp-jupyter.refreshVariables",
+                "title": "Refresh Variables",
+                "icon": "$(refresh)"
+            },
+            {
+                "command": "mcp-jupyter.stopKernel",
+                "title": "Stop Kernel",
+                "icon": "$(stop-circle)"
             }
-        ]
-    },
+        ],
+        "menus": {
+            "view/title": [
+                {
+                    "command": "mcp-jupyter.refreshSessions",
+                    "when": "view == mcpSessions",
+                    "group": "navigation"
+                },
+                {
+                    "command": "mcp-jupyter.refreshVariables",
+                    "when": "view == mcpVariables",
+                    "group": "navigation"
+                }
+            ],
+            "view/item/context": [
+                {
+                    "command": "mcp-jupyter.attachSession",
+                    "when": "view == mcpSessions && viewItem == mcpSession",
+                    "group": "inline"
+                },
+                {
+                    "command": "mcp-jupyter.stopKernel",
+                    "when": "view == mcpSessions && viewItem == mcpSession",
+                    "group": "inline"
+                }
+            ]
+        }
     "scripts": {
         "vscode:prepublish": "npm run esbuild-base -- --minify",
         "esbuild": "npm run esbuild-base -- --sourcemap --watch",

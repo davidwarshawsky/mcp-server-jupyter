@@ -62,6 +62,8 @@ class PersistenceManager:
                     started_at TIMESTAMP,
                     completed_at TIMESTAMP,
                     error_message TEXT,
+                    execution_count INTEGER,
+                    outputs_json TEXT,
                     retries INTEGER DEFAULT 0
                 )
             """)
@@ -175,15 +177,39 @@ class PersistenceManager:
             )
             conn.commit()
 
-    def mark_task_complete(self, task_id: str):
-        """Mark a task as completed and remove it from the queue."""
+    def mark_task_complete(self, task_id: str, outputs_json: Optional[str] = None, execution_count: Optional[int] = None):
+        """
+        [OUTPUT REHYDRATION] Mark a task as completed and optionally save outputs.
+        
+        Args:
+            task_id: The execution task ID
+            outputs_json: JSON-serialized cell outputs (from Jupyter kernel)
+            execution_count: The execution count from the kernel
+        """
         now = datetime.utcnow().isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                "UPDATE execution_queue SET status = 'completed', completed_at = ? WHERE task_id = ?",
-                (now, task_id),
-            )
+            if outputs_json is not None or execution_count is not None:
+                # Update with outputs and execution count
+                update_clause = "UPDATE execution_queue SET status = 'completed', completed_at = ?"
+                params = [now, task_id]
+                
+                if outputs_json is not None:
+                    update_clause += ", outputs_json = ?"
+                    params.insert(1, outputs_json)
+                
+                if execution_count is not None:
+                    update_clause += ", execution_count = ?"
+                    params.insert(1 if outputs_json is None else 2, execution_count)
+                
+                update_clause += " WHERE task_id = ?"
+                conn.execute(update_clause, params)
+            else:
+                # Backwards compatible: just mark complete
+                conn.execute(
+                    "UPDATE execution_queue SET status = 'completed', completed_at = ? WHERE task_id = ?",
+                    (now, task_id),
+                )
             conn.commit()
 
     def mark_task_failed(self, task_id: str, error: str):

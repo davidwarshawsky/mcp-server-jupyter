@@ -157,8 +157,15 @@ class ExecutionScheduler:
             # Best-effort
             pass
 
-    async def process_queue(self, nb_path: str, session_data: Dict[str, Any], execute_callback):
-        """Process items from `execution_queue` sequentially until a None shutdown signal."""
+    async def process_queue(self, nb_path: str, session_data: Dict[str, Any], execute_callback, persistence=None):
+        """Process items from `execution_queue` sequentially until a None shutdown signal.
+        
+        Args:
+            nb_path: Notebook path
+            session_data: Session data dict
+            execute_callback: Async callback to execute code
+            persistence: Optional PersistenceManager for task lifecycle tracking
+        """
         q = session_data.get("execution_queue")
         if q is None:
             return
@@ -172,6 +179,7 @@ class ExecutionScheduler:
             # Each item should be a dict with cell_index, code, exec_id
             try:
                 # Call execute_callback and then wait for cell execution (sequential)
+                # [STATE AMNESIA FIX] Pass persistence to track task lifecycle
                 await self._execute_cell(
                     nb_path=nb_path,
                     session_data=session_data,
@@ -179,6 +187,7 @@ class ExecutionScheduler:
                     code=item.get("code"),
                     exec_id=item.get("exec_id"),
                     execute_callback=execute_callback,
+                    persistence=persistence,
                 )
             except Exception:
                 # Ensure that exceptions in processing a cell don't kill the loop

@@ -10,6 +10,7 @@ import { QuickStartWizard } from './quickStartWizard';
 import { HealthCheckDashboard } from './healthCheckDashboard';
 import { ExecutionViewProvider } from './executionView';
 import { AuditLogViewer } from './auditLogViewer';
+import { SessionViewProvider } from './sessionView';
 
 let mcpClient: McpClient;
 let notebookController: McpNotebookController;
@@ -21,6 +22,7 @@ let syncCodeLensProvider: SyncCodeLensProvider;
 let quickStartWizard: QuickStartWizard;
 let healthCheckDashboard: HealthCheckDashboard;
 let executionViewProvider: ExecutionViewProvider;
+let sessionViewProvider: SessionViewProvider;
 let auditLogViewer: AuditLogViewer;
 const notebooksNeedingSync = new Set<string>();
 
@@ -104,6 +106,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     });
     context.subscriptions.push(executionView);
     context.subscriptions.push(executionViewProvider);
+
+    // [SESSION DISCOVERY] Register session view provider
+    // This provides the "Active Kernels" sidebar showing running kernels
+    sessionViewProvider = new SessionViewProvider(mcpClient);
+    const sessionView = vscode.window.createTreeView('mcpSessions', {
+      treeDataProvider: sessionViewProvider,
+      showCollapseAll: false
+    });
+    context.subscriptions.push(sessionView);
+    context.subscriptions.push(sessionViewProvider);
 
     // [WEEK 4] Audit log viewer
     auditLogViewer = new AuditLogViewer(mcpClient);
@@ -203,6 +215,51 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
       vscode.languages.registerCodeLensProvider(
         { pattern: '**/*.ipynb' },
         syncCodeLensProvider
+      )
+    );
+
+    // [AUTOCOMPLETE PROXY] Register completion provider for Python code cells
+    // This proxies completions from the actual kernel, not just file parsing
+    context.subscriptions.push(
+      vscode.languages.registerCompletionItemProvider(
+        { language: 'python', notebook: 'jupyter-notebook' },
+        {
+          async provideCompletionItems(document, position, token) {
+            // Only provide completions if an MCP kernel is active
+            const notebook = vscode.workspace.notebookDocuments.find(
+              nb => nb.uri.fsPath === document.uri.fsPath
+            );
+            if (!notebook) return undefined;
+
+            try {
+              // Get code up to cursor
+              const code = document.getText();
+              const offset = document.offsetAt(position);
+
+              // Call kernel completions via MCP tool
+              const result = await mcpClient.callTool('get_completions', {
+                notebook_path: notebook.uri.fsPath,
+                code: code,
+                cursor_pos: offset
+              });
+
+              const completionsData = JSON.parse(result.content[0].text);
+              if (!completionsData.matches || completionsData.matches.length === 0) {
+                return undefined;
+              }
+
+              // Convert kernel matches to VS Code completion items
+              return completionsData.matches.map((match: string) =>
+                new vscode.CompletionItem(match, vscode.CompletionItemKind.Variable)
+              );
+            } catch (e) {
+              // Silently fail - completions are optional
+              console.debug('[COMPLETIONS] Error:', e);
+              return undefined;
+            }
+          }
+        },
+        '.' // Trigger on dot (for attribute access like df.)
       )
     );
 
@@ -331,6 +388,85 @@ export async function activate(context: vscode.ExtensionContext): Promise<Extens
     context.subscriptions.push(
       vscode.commands.registerCommand('mcp-jupyter.refreshExecutions', () => {
         executionViewProvider.refresh();
+      })
+    );
+
+    // [SESSION DISCOVERY] Refresh sessions command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.refreshSessions', () => {
+        sessionViewProvider.refresh();
+      })
+    );
+
+    // [SESSION DISCOVERY] Refresh variables command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.refreshVariables', () => {
+        variableDashboard.refresh();
+      })
+    );
+
+    // [SESSION DISCOVERY] Attach session command - migrate kernel to current notebook
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.attachSession', async (item: any) => {
+        const activeEditor = vscode.window.activeNotebookEditor;
+        if (!activeEditor) {
+          vscode.window.showErrorMessage('Open a notebook first to attach this kernel.');
+          return;
+        }
+
+        const currentPath = activeEditor.notebook.uri.fsPath;
+        
+        // Safety check - warn user about migration
+        const confirm = await vscode.window.showWarningMessage(
+          `Attach kernel (PID ${item.pid}) to current notebook?`,
+          { modal: true, detail: `This will migrate the kernel from:\n${item.fullPath}\n\nTO:\n${currentPath}` },
+          'Attach & Migrate',
+          'Cancel'
+        );
+
+        if (confirm === 'Attach & Migrate') {
+          try {
+            const res = await mcpClient.callTool('attach_session', {
+              target_notebook_path: currentPath,
+              source_pid: item.pid
+            });
+            
+            const result = JSON.parse(res.content[0].text);
+            if (result.success) {
+              vscode.window.showInformationMessage(`✅ Attached! Migrated from ${result.old_path}`);
+              // Refresh UI
+              sessionViewProvider.refresh();
+              vscode.commands.executeCommand('mcp-jupyter.refreshVariables');
+            } else {
+              vscode.window.showErrorMessage(`Failed to attach: ${result.error}`);
+            }
+          } catch (e) {
+            vscode.window.showErrorMessage(`Attach error: ${e}`);
+          }
+        }
+      })
+    );
+
+    // [SESSION DISCOVERY] Stop kernel command
+    context.subscriptions.push(
+      vscode.commands.registerCommand('mcp-jupyter.stopKernel', async (item: any) => {
+        const confirm = await vscode.window.showWarningMessage(
+          `Stop kernel (PID ${item.pid})?`,
+          { modal: true, detail: `This will terminate: ${item.fullPath}` },
+          'Stop Kernel',
+          'Cancel'
+        );
+
+        if (confirm === 'Stop Kernel') {
+          try {
+            // Call stop_kernel on the notebook path
+            await mcpClient.stopKernel(item.fullPath);
+            vscode.window.showInformationMessage(`✅ Stopped kernel for ${path.basename(item.fullPath)}`);
+            sessionViewProvider.refresh();
+          } catch (e) {
+            vscode.window.showErrorMessage(`Failed to stop kernel: ${e}`);
+          }
+        }
       })
     );
 

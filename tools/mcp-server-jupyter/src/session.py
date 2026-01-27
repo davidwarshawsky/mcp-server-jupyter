@@ -596,6 +596,229 @@ class SessionManager:
         logger.info(f"[SECURITY] Validated mount path: {resolved_root}")
         return resolved_root
 
+    def get_session_by_pid(self, pid: int) -> Optional[str]:
+        """
+        [UI TOOL] Find notebook path associated with a specific kernel PID.
+        
+        Used by the VS Code extension to locate "ghost" sessions that might
+        have been created when a notebook was renamed or moved.
+        
+        Args:
+            pid: Process ID of the kernel
+            
+        Returns:
+            Absolute path to the notebook, or None if not found
+        """
+        for nb_path, session in self.sessions.items():
+            kernel_proc = _get_kernel_process(session['km'])
+            if kernel_proc and kernel_proc.pid == pid:
+                return nb_path
+        return None
+
+    async def migrate_session(self, old_path: str, new_path: str) -> bool:
+        """
+        [RENAME FIX] Move a running kernel from one file path to another.
+        
+        Scenario: User finishes work on Friday (draft.ipynb) and renames it
+        to final.ipynb on Monday. This method allows the user to keep the
+        existing kernel and its variables.
+        
+        Updates:
+        - In-memory session dictionary (remove old_path, add new_path)
+        - SQLite persistence (execution_queue, asset_leases)
+        - Disk-based session state file
+        
+        Args:
+            old_path: Original notebook path (with variables)
+            new_path: New notebook path (where user is working)
+            
+        Returns:
+            True if migration succeeded, False if old session not found
+            
+        Raises:
+            ValueError: If new_path already has an active session
+        """
+        import sqlite3
+        
+        old_abs = str(Path(old_path).resolve())
+        new_abs = str(Path(new_path).resolve())
+        
+        if old_abs not in self.sessions:
+            logger.warning(f"[MIGRATE] Session not found for {old_abs}")
+            return False
+            
+        if new_abs in self.sessions:
+            raise ValueError(f"[MIGRATE] Target session {new_path} already active")
+
+        logger.info(f"[MIGRATE] Moving kernel from {old_abs} → {new_abs}")
+        
+        # 1. Move memory state
+        session = self.sessions.pop(old_abs)
+        self.sessions[new_abs] = session
+        
+        # 2. Update Persistence (Database)
+        # Update notebook_path in execution_queue and asset_leases tables
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "UPDATE execution_queue SET notebook_path = ? WHERE notebook_path = ?",
+                    (new_abs, old_abs)
+                )
+                conn.execute(
+                    "UPDATE asset_leases SET notebook_path = ? WHERE notebook_path = ?",
+                    (new_abs, old_abs)
+                )
+                conn.commit()
+                logger.info(f"[MIGRATE] Updated SQLite references")
+        except Exception as e:
+            logger.error(f"[MIGRATE] Failed to update database: {e}")
+            # Revert memory state on DB failure
+            self.sessions.pop(new_abs)
+            self.sessions[old_abs] = session
+            return False
+        
+        # 3. Update Session Lock on Disk
+        self.state_manager.remove_session(old_abs)
+        
+        # 4. Persist under new name
+        km = session['km']
+        kernel_proc = _get_kernel_process(km)
+        env_info = session.get('env_info', {})
+        
+        if kernel_proc:
+            self.state_manager.persist_session(
+                new_abs,
+                km.connection_file,
+                kernel_proc.pid,
+                env_info
+            )
+            logger.info(f"[MIGRATE] Persisted session under new path")
+        
+        logger.info(f"[MIGRATE] Migration complete: {old_abs} → {new_abs}")
+        return True
+
+    def get_all_sessions(self) -> list:
+        """
+        [UI TOOL] List all running kernels for the Sidebar UI.
+        
+        Returns a list of session metadata suitable for display in
+        the VS Code "Active Kernels" sidebar.
+        
+        Returns:
+            List of dicts with keys: notebook_path, kernel_id, pid, start_time, status
+        """
+        sessions = []
+        
+        for nb_path, data in self.sessions.items():
+            try:
+                env_info = data.get('env_info', {})
+                kernel_proc = _get_kernel_process(data['km'])
+                pid = kernel_proc.pid if kernel_proc else None
+                
+                sessions.append({
+                    "notebook_path": nb_path,
+                    "kernel_id": getattr(data['km'], 'kernel_id', 'unknown'),
+                    "pid": pid,
+                    "start_time": env_info.get('start_time'),
+                    "status": "running"
+                })
+            except Exception as e:
+                logger.error(f"[SESSIONS] Error serializing session {nb_path}: {e}")
+                continue
+                
+        return sessions
+
+    def get_execution_history(self, notebook_path: str, limit: int = 50) -> list:
+        """
+        [REHYDRATION] Get recent execution outputs to populate blank cells on reload.
+        
+        When a user reconnects to a notebook on Monday, the cell outputs were
+        cleared by VS Code. This method retrieves the execution history from
+        the persistence layer so we can show the user what happened.
+        
+        Args:
+            notebook_path: Path to the notebook
+            limit: Maximum number of history entries to return
+            
+        Returns:
+            List of execution records with cell_index, completion time, error status
+        """
+        import sqlite3
+        
+        abs_path = str(Path(notebook_path).resolve())
+        history = []
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                # Get tasks that have completed (successfully or with error)
+                cursor = conn.execute("""
+                    SELECT cell_index, created_at, started_at, completed_at, status, error 
+                    FROM execution_queue 
+                    WHERE notebook_path = ? AND status IN ('completed', 'failed')
+                    ORDER BY created_at DESC LIMIT ?
+                """, (abs_path, limit))
+                
+                for row in cursor.fetchall():
+                    history.append({
+                        "cell_index": row["cell_index"],
+                        "created_at": row["created_at"],
+                        "started_at": row["started_at"],
+                        "completed_at": row["completed_at"],
+                        "status": row["status"],
+                        "error": row["error"]
+                    })
+        except Exception as e:
+            logger.error(f"[HISTORY] Failed to fetch execution history: {e}")
+            
+        return history
+
+    def get_notebook_history(self, notebook_path: str) -> list:
+        """
+        [OUTPUT REHYDRATION] Retrieve the full visual history of notebook execution.
+        
+        When a user "Attaches" to an old session, VS Code shows blank cells because
+        the outputs were cleared on close. This method retrieves the persisted outputs
+        so we can re-populate the notebook UI to match the kernel state.
+        
+        Returns:
+            List of dicts with: cell_index, execution_count, outputs_json (Jupyter format)
+        """
+        import sqlite3
+        
+        abs_path = str(Path(notebook_path).resolve())
+        history = []
+        
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                
+                # Get all completed tasks with their outputs
+                cursor = conn.execute("""
+                    SELECT cell_index, execution_count, outputs_json
+                    FROM execution_queue 
+                    WHERE notebook_path = ? AND status = 'completed' AND outputs_json IS NOT NULL
+                    ORDER BY cell_index ASC
+                """, (abs_path,))
+                
+                for row in cursor.fetchall():
+                    try:
+                        outputs = json.loads(row["outputs_json"]) if row["outputs_json"] else []
+                        history.append({
+                            "cell_index": row["cell_index"],
+                            "execution_count": row["execution_count"],
+                            "outputs": outputs
+                        })
+                    except json.JSONDecodeError:
+                        logger.warning(f"[REHYDRATE] Failed to parse outputs for cell {row['cell_index']}")
+                        continue
+                        
+        except Exception as e:
+            logger.error(f"[REHYDRATE] Failed to fetch notebook history: {e}")
+            
+        return history
+
     async def start_kernel(
         self,
         nb_path: str,
@@ -1162,11 +1385,13 @@ class SessionManager:
             kc = session_data["kc"]
             return kc.execute(code)
 
-        # Delegate to ExecutionScheduler
+        # [STATE AMNESIA FIX] Pass persistence manager to scheduler
+        # This ensures task lifecycle is tracked (running → complete/failed)
         await self.execution_scheduler.process_queue(
             nb_path=nb_path,
             session_data=session_data,
             execute_callback=execute_callback,
+            persistence=self.persistence,
         )
 
     async def _finalize_execution_async(self, nb_path: str, exec_data: Dict):
@@ -1324,6 +1549,20 @@ class SessionManager:
             "status": "queued",
             "queued_time": asyncio.get_event_loop().time(),
         }
+
+        # [STATE AMNESIA FIX] Persist task to disk BEFORE queuing in memory
+        # This ensures task survives server crash before execution starts
+        try:
+            self.persistence.enqueue_execution(
+                notebook_path=nb_path,
+                cell_index=cell_index,
+                code=code,
+                task_id=exec_id
+            )
+        except Exception as e:
+            logger.error(f"[PERSISTENCE] Failed to persist task {exec_id}: {e}")
+            # Log but don't fail - allow execution to proceed without persistence
+            # (degraded mode, but doesn't block user)
 
         # Create execution request
         exec_request = {"cell_index": cell_index, "code": code, "exec_id": exec_id}

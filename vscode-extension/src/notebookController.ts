@@ -365,6 +365,72 @@ export class McpNotebookController {
       return existingPromise;
     }
 
+    // [SESSION DISCOVERY] Check if server has an active session before starting
+    try {
+      const sessionCheck = await this.mcpClient.callTool('find_active_session', {
+        notebook_path: notebookPath
+      });
+
+      const sessionInfo = JSON.parse(sessionCheck.content[0].text);
+
+      if (sessionInfo.found && sessionInfo.status === 'running') {
+        const startTime = new Date(sessionInfo.start_time).toLocaleString();
+
+        // Prompt user: Resume or Start Fresh?
+        const choice = await vscode.window.showInformationMessage(
+          `Found active kernel for this notebook (Started: ${startTime}). Resume session?`,
+          '✅ Resume Session',
+          '🔄 Start Fresh (Restart)'
+        );
+
+        if (choice === '✅ Resume Session') {
+          // Just connect to existing kernel, don't restart
+          vscode.window.showInformationMessage('Resuming existing session...');
+          this.notebookKernels.set(notebookPath, true); // Mark as "started" (attached)
+          
+          // [REHYDRATION] Refresh variables immediately
+          this.variableDashboard?.refresh();
+          
+          // [REHYDRATION] Optionally fetch execution history
+          try {
+            const histRes = await this.mcpClient.callTool('get_execution_history', {
+              notebook_path: notebookPath
+            });
+            const history = JSON.parse(histRes.content[0].text);
+            // Could use this to show user a summary of what happened
+            if (history.length > 0) {
+              const lastExecution = history[0];
+              vscode.window.showInformationMessage(
+                `Last execution: Cell ${lastExecution.cell_index} - ${lastExecution.status}`
+              );
+            }
+          } catch (e) {
+            // Silently fail - history is optional
+            console.warn('Failed to fetch execution history:', e);
+          }
+          
+          // [OUTPUT REHYDRATION] Restore cell outputs from persistence
+          await this.rehydrateNotebookOutputs(notebook);
+          
+          return;
+        } else if (choice === '🔄 Start Fresh (Restart)') {
+          // User wants a fresh kernel - kill the old one
+          try {
+            await this.mcpClient.stopKernel(notebookPath);
+          } catch (e) {
+            console.warn('Failed to stop old kernel:', e);
+          }
+          // Fall through to normal startup
+        } else {
+          // User cancelled - don't start anything
+          return;
+        }
+      }
+    } catch (e) {
+      // Fallback: If check fails, just try starting normally
+      console.warn('Failed to check existing session:', e);
+    }
+
     // Start kernel and track the promise
     const startPromise = this.doStartKernel(notebook);
     this.kernelStartPromises.set(notebookPath, startPromise);
@@ -373,6 +439,134 @@ export class McpNotebookController {
       await startPromise;
     } finally {
       this.kernelStartPromises.delete(notebookPath);
+    }
+  }
+
+  /**
+   * [OUTPUT REHYDRATION] Restore cell outputs from persistence.
+   * 
+   * When user resumes a session, VS Code has cleared the cell outputs.
+   * This method retrieves the persisted outputs from the server and
+   * re-populates the notebook UI so it matches the kernel state.
+   */
+  private async rehydrateNotebookOutputs(notebook: vscode.NotebookDocument): Promise<void> {
+    try {
+      const nbPath = notebook.uri.fsPath;
+      
+      // Fetch full notebook history with outputs
+      const historyRes = await this.mcpClient.callTool('get_notebook_history', {
+        notebook_path: nbPath
+      });
+      
+      const historyText = historyRes.content[0].text;
+      const history = JSON.parse(historyText);
+      
+      if (!history || history.length === 0) {
+        console.log('[REHYDRATE] No history to restore');
+        return;
+      }
+      
+      console.log(`[REHYDRATE] Restoring ${history.length} cell outputs for ${path.basename(nbPath)}`);
+      
+      // Process each cell with output history
+      for (const entry of history) {
+        const cellIndex = entry.cell_index;
+        if (cellIndex >= notebook.cellCount) {
+          continue; // Cell may have been deleted
+        }
+        
+        const cell = notebook.cellAt(cellIndex);
+        if (cell.kind !== vscode.NotebookCellKind.Code) {
+          continue; // Only code cells have outputs
+        }
+        
+        try {
+          // Reconstruct VS Code NotebookCellOutput from Jupyter format
+          const outputs: vscode.NotebookCellOutput[] = [];
+          
+          if (entry.outputs && Array.isArray(entry.outputs)) {
+            for (const jupyterOutput of entry.outputs) {
+              const items: vscode.NotebookCellOutputItem[] = [];
+              
+              // Handle different output types
+              if (jupyterOutput.output_type === 'stream') {
+                // Stream output (stdout/stderr)
+                const text = Array.isArray(jupyterOutput.text) 
+                  ? jupyterOutput.text.join('') 
+                  : jupyterOutput.text;
+                items.push(
+                  new vscode.NotebookCellOutputItem(Buffer.from(text), 'text/plain')
+                );
+              } else if (jupyterOutput.output_type === 'execute_result' || jupyterOutput.output_type === 'display_data') {
+                // Rich media output (plots, tables, etc.)
+                const data = jupyterOutput.data || {};
+                
+                // Keep interactive MIME types (don't convert to PNG)
+                const preferredMimes = [
+                  'application/vnd.plotly.v1+json',
+                  'application/vnd.vega.v5+json',
+                  'text/html',
+                  'text/markdown',
+                  'image/png',
+                  'image/jpeg',
+                  'text/plain'
+                ];
+                
+                for (const mime of preferredMimes) {
+                  if (mime in data) {
+                    const content = (data as any)[mime];
+                    const contentStr = typeof content === 'string' 
+                      ? content 
+                      : JSON.stringify(content);
+                    items.push(
+                      new vscode.NotebookCellOutputItem(Buffer.from(contentStr), mime)
+                    );
+                    break; // Use first matching MIME
+                  }
+                }
+              } else if (jupyterOutput.output_type === 'error') {
+                // Error output
+                const traceback = jupyterOutput.traceback || [];
+                const text = traceback.join('\n');
+                items.push(
+                  new vscode.NotebookCellOutputItem(Buffer.from(text), 'text/plain')
+                );
+              }
+              
+              if (items.length > 0) {
+                outputs.push(new vscode.NotebookCellOutput(items));
+              }
+            }
+          }
+          
+          // Apply outputs to cell
+          if (outputs.length > 0) {
+            const edit = new vscode.WorkspaceEdit();
+            const nbEdit = vscode.NotebookEdit.replaceOutput(cellIndex, outputs);
+            edit.set(notebook.uri, [nbEdit]);
+            await vscode.workspace.applyEdit(edit);
+            
+            // Set execution order if available
+            if (entry.execution_count !== null && entry.execution_count !== undefined) {
+              const nbEdit2 = vscode.NotebookEdit.updateCellMetadata(
+                cellIndex,
+                { custom: { executionCount: entry.execution_count } }
+              );
+              const edit2 = new vscode.WorkspaceEdit();
+              edit2.set(notebook.uri, [nbEdit2]);
+              await vscode.workspace.applyEdit(edit2);
+            }
+          }
+        } catch (e) {
+          console.warn(`[REHYDRATE] Failed to restore cell ${cellIndex}:`, e);
+          continue;
+        }
+      }
+      
+      console.log('[REHYDRATE] Cell outputs restored successfully');
+    } catch (e) {
+      console.warn('[REHYDRATE] Failed to restore notebook outputs:', e);
+      // Non-critical - don't fail the reconnect
     }
   }
 
