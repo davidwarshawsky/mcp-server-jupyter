@@ -1,35 +1,46 @@
 {
-  "name": "mcp-jupyter-monorepo",
-  "private": true,
-  "workspaces": [
-    "vscode-extension",
-    "tools/mcp-server-jupyter"
-  ],
-  "scripts": {
-    "//": "--- SETUP: Run this first ---",
-    "install:all": "npm ci && (cd vscode-extension && npm ci) && (cd tools/mcp-server-jupyter && poetry install --no-root)",
-    "//": "--- DEVELOPMENT: Use these for active development ---",
-    "dev": "npm-run-all --parallel dev:ext dev:server",
-    "dev:ext": "npm --workspace=vscode-extension run dev",
-    "dev:server": "cd tools/mcp-server-jupyter && poetry run mcp_server",
-    "//": "--- BUILDING: Create production artifacts ---",
-    "build": "npm run clean && npm-run-all --sequential build:ext build:server",
-    "build:ext": "npm --workspace=vscode-extension run build",
-    "build:server": "cd tools/mcp-server-jupyter && poetry build",
-    "//": "--- QUALITY & TESTING ---",
-    "lint": "npm-run-all --parallel lint:ts lint:py",
-    "lint:ts": "npm --workspace=vscode-extension run lint",
-    "lint:py": "cd tools/mcp-server-jupyter && poetry run black . && poetry run ruff check . --fix --unsafe-fixes",
-    "test": "npm-run-all --sequential test:ext test:py",
-    "test:ext": "npm --workspace=vscode-extension run test",
-    "test:py": "cd tools/mcp-server-jupyter && poetry run pytest",
-    "//": "--- SECURITY & COMPLIANCE ---",
-    "security:audit": "npm audit --audit-level=high",
-    "sbom": "node ./scripts/generate-sbom.cjs",
-    "//": "--- UTILITIES ---",
-    "clean": "rm -rf vscode-extension/out/ vscode-extension/dist/ tools/mcp-server-jupyter/dist/ bom.json"
-  },
-  "devDependencies": {
-    "npm-run-all": "^4.1.5"
-  }
+    "name": "mcp-jupyter",
+    "displayName": "MCP Jupyter",
+    "description": "An AI-augmented Jupyter Notebook experience.",
+    "version": "0.0.1",
+    "engines": {
+        "vscode": "^1.64.0"
+    },
+    "contributes": {
+        "commands": [
+            {
+                "command": "mcp-jupyter.quickStart",
+                "title": "MCP Jupyter: Quick Start"
+            },
+            {
+                "command": "mcp-jupyter.clearSnapshots",
+                "title": "MCP Jupyter: Clear All Session Snapshots"
+            }
+        ],
+        "notebookKernelProviders": [
+            {
+                "id": "mcp-kernel",
+                "displayName": "MCP Kernel",
+                "notebookType": "mcp-jupyter-notebook"
+            }
+        ],
+        "viewsContainers": {
+            "activitybar": [
+                {
+                    "id": "mcp-jupyter-sidebar",
+                    "title": "MCP Jupyter",
+                    "icon": "./media/icon.svg"
+                }
+            ]
+        },
+        "views": {
+            "mcp-jupyter-sidebar": [
+                {
+                    "id": "mcp-jupyter-snapshots",
+                    "name": "Snapshots",
+                    "type": "tree"
+                }
+            ]
+        }
+    }
 }
