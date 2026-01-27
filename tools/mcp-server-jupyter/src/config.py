@@ -14,9 +14,6 @@ class ServerConfig(BaseSettings):
         default="info"
     )
 
-    # Kubernetes settings
-    K8S_NAMESPACE: str = "default"
-
     # Operational limits (defaults provided for tests/contracts)
     MCP_MEMORY_LIMIT_BYTES: int = int(os.getenv("MCP_MEMORY_LIMIT_BYTES", str(8 * 1024 * 1024 * 1024)))
     MCP_IO_POOL_SIZE: int = int(os.getenv("MCP_IO_POOL_SIZE", "4"))

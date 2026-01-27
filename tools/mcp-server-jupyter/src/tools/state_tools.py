@@ -382,3 +382,29 @@ except Exception as e:
                 "error": "Failed to delete checkpoint",
                 "message": str(e)
             })
+
+    # ========================================================================
+    # PHASE 3: RESILIENT TRAINING TEMPLATES
+    # ========================================================================
+    @mcp.tool()
+    def get_training_template(framework: str = "pytorch") -> str:
+        """
+        [PHASE 3] Returns a Python code template for long-running training jobs
+        that automatically handles saving/resuming from checkpoints.
+
+        Use this when the user asks to "Train a model" to ensure it survives crashes
+        and can resume from the latest checkpoint without losing progress.
+
+        Args:
+            framework: Deep learning framework ('pytorch', 'tensorflow', 'sklearn')
+
+        Returns:
+            Code template as a string that the user can use directly
+
+        Examples:
+            get_training_template("pytorch") -> Returns PyTorch training template
+            get_training_template("tensorflow") -> Returns TensorFlow training template
+        """
+        from src.utils import get_training_template as utils_get_template
+        
+        return utils_get_template(framework)

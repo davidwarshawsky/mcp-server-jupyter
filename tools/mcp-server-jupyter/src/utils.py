@@ -996,3 +996,423 @@ def offload_text_to_asset(raw_text: str, asset_dir: str, max_inline_chars: int, 
     }
 
     return stub_text, asset_path, metadata
+
+
+# ============================================================================
+# PHASE 1: HYBRID ASSET/THUMBNAIL STRATEGY (Resilient Artifact Management)
+# ============================================================================
+# [CONFIG] Thresholds for output sanitization
+MAX_TEXT_BYTES = 10 * 1024  # 10 KB
+MAX_IMAGE_BYTES = 1 * 1024 * 1024  # 1 MB
+
+
+def sanitize_outputs_resilient(
+    outputs: List[Any], asset_dir: str
+) -> tuple[str, List[dict]]:
+    """
+    Sanitizes notebook outputs using Hybrid Strategy:
+    - Text > 10KB -> Offloaded to .txt file
+    - Images > 1MB -> Offloaded to .png/.jpg file + replaced with HTML <img> tag
+    - Interactive JSON -> Offloaded to .json file + replaced with HTML Link
+
+    This prevents notebook bloat while maintaining portability.
+
+    Args:
+        outputs: List of notebook cell outputs
+        asset_dir: Directory to store offloaded assets
+
+    Returns:
+        (llm_summary_str, raw_outputs_list) where llm_summary is a string
+        describing what was offloaded and raw_outputs is the sanitized output list
+    """
+    llm_summary = []
+    raw_outputs = []
+    asset_path_obj = Path(asset_dir)
+    asset_path_obj.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger(__name__)
+
+    for out in outputs:
+        # Normalize output to dict
+        out_dict = out if isinstance(out, dict) else asdict(out)
+
+        # 1. HANDLE LARGE TEXT
+        if "text" in out_dict:
+            text = out_dict["text"]
+            if isinstance(text, str) and len(text.encode("utf-8")) > MAX_TEXT_BYTES:
+                # Offload logic
+                content_hash = hashlib.sha256(text.encode()).hexdigest()[:16]
+                asset_name = f"log_{content_hash}.txt"
+                asset_file = asset_path_obj / asset_name
+                asset_file.write_text(text, encoding="utf-8")
+
+                # Replace with stub
+                out_dict["text"] = f"[System: Large output ({len(text)} chars) offloaded to assets/{asset_name}]"
+                llm_summary.append(f"[Log offloaded: assets/{asset_name}]")
+                logger.debug(
+                    f"Offloaded large text output ({len(text)} bytes) to {asset_name}"
+                )
+            else:
+                # Keep inline
+                if isinstance(text, str):
+                    preview = (
+                        text[:500] + "..." if len(text) > 500 else text
+                    )
+                    llm_summary.append(preview)
+
+        # 2. HANDLE RICH MEDIA (Images/JSON)
+        if "data" in out_dict:
+            data = out_dict["data"]
+            new_data = data.copy()  # Don't mutate original while iterating
+
+            for mime, content in data.items():
+
+                # A. Handle Interactive Data (Plotly/Vega) - ALWAYS OFFLOAD
+                if "json" in mime or "javascript" in mime:
+                    content_str = (
+                        json.dumps(content)
+                        if isinstance(content, dict)
+                        else str(content)
+                    )
+                    content_hash = hashlib.sha256(content_str.encode()).hexdigest()[
+                        :16
+                    ]
+                    asset_name = f"viz_{content_hash}.json"
+                    (asset_path_obj / asset_name).write_text(content_str)
+
+                    # Replace with HTML Link (Portable!)
+                    link_html = f"""
+<div style="border:1px solid #ccc; padding:10px;">
+    <strong>Interactive Visualization</strong><br/>
+    <a href="assets/{asset_name}" target="_blank">Open {asset_name}</a>
+    <br/><small>(Data too large for inline embedding)</small>
+</div>
+"""
+                    new_data["text/html"] = link_html
+                    del new_data[mime]  # Remove the heavy JSON from the notebook
+                    llm_summary.append(f"[Interactive viz offloaded: assets/{asset_name}]")
+                    logger.debug(
+                        f"Offloaded interactive visualization to {asset_name}"
+                    )
+
+                # B. Handle Large Images (Base64)
+                elif mime.startswith("image/"):
+                    # content is base64 string
+                    try:
+                        img_bytes = base64.b64decode(content)
+
+                        if len(img_bytes) > MAX_IMAGE_BYTES:
+                            ext = mime.split("/")[-1].split("+")[0]
+                            content_hash = hashlib.sha256(img_bytes).hexdigest()[:16]
+                            asset_name = f"img_{content_hash}.{ext}"
+                            (asset_path_obj / asset_name).write_bytes(img_bytes)
+
+                            # Replace with standard HTML IMG tag
+                            img_html = (
+                                f'<img src="assets/{asset_name}" alt="Large Image"/>'
+                            )
+                            new_data["text/html"] = img_html
+                            del new_data[mime]  # Remove heavy base64
+                            llm_summary.append(
+                                f"[Large image offloaded: assets/{asset_name}]"
+                            )
+                            logger.debug(
+                                f"Offloaded large image ({len(img_bytes)} bytes) to {asset_name}"
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to process image data: {e}")
+
+            out_dict["data"] = new_data
+
+        raw_outputs.append(out_dict)
+
+    # Check asset directory limits after offloading
+    try:
+        check_asset_limits(asset_path_obj)
+    except Exception as e:
+        logger.warning(f"Asset limit check failed: {e}")
+
+    return "\n".join(llm_summary), raw_outputs
+
+
+# ============================================================================
+# PHASE 2: ENVIRONMENT LOCKFILE SYSTEM
+# ============================================================================
+async def update_lockfile(pod_name: str = "local", k8s_executor=None) -> tuple[bool, str]:
+    """
+    Snapshots the current environment via 'pip freeze' and saves to `.mcp-requirements.lock`.
+    Local-only implementation: non-local execution paths were removed with the local-first pivot.
+
+    Args:
+        pod_name: Ignored for local mode (defaults to 'local').
+
+    Returns:
+        (success: bool, message: str)
+    """
+    logger = logging.getLogger(__name__)
+
+    try:
+        # Always run pip freeze locally in the current environment
+        import subprocess
+
+        result = subprocess.run(
+            ["pip", "freeze"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False, f"pip freeze failed: {result.stderr}"
+
+        lockfile_path = Path(".mcp-requirements.lock")
+        lockfile_path.write_text(result.stdout)
+        logger.info(f"Lockfile updated at {lockfile_path}")
+        return True, f"Lockfile updated: {lockfile_path}"
+
+    except Exception as e:
+        logger.error(f"Failed to update lockfile: {e}")
+        return False, f"Lockfile update failed: {e}"
+
+
+def generate_lockfile_startup_script() -> str:
+    """
+    Generates a shell script that enforces the lockfile during kernel startup.
+    This ensures the kernel uses exact pinned versions.
+
+    Returns:
+        Shell script string
+    """
+    return """
+# [RESILIENCE] Environment Restoration
+if [ -f .mcp-requirements.lock ]; then
+    echo "[MCP] Found lockfile, enforcing environment..."
+    pip install -r .mcp-requirements.lock --no-deps --quiet
+    echo "[MCP] Environment restored from lockfile"
+else
+    echo "[MCP] No lockfile found, using current environment"
+fi
+"""
+
+
+# ============================================================================
+# PHASE 3: RESILIENT TRAINING TEMPLATES
+# ============================================================================
+def get_training_template(framework: str = "pytorch") -> str:
+    """
+    Returns a Python code template for long-running training jobs that
+    automatically handles saving/resuming from checkpoints.
+
+    Use this when the agent needs to train a model to ensure it survives crashes
+    and can resume from the latest checkpoint.
+
+    Args:
+        framework: Framework name ('pytorch', 'tensorflow', 'sklearn')
+
+    Returns:
+        Code template as a string
+    """
+    logger = logging.getLogger(__name__)
+
+    if framework.lower() == "pytorch":
+        return """
+# 🛡️ RESILIENT PYTORCH TRAINING PATTERN
+import torch
+import os
+import glob
+from pathlib import Path
+
+# Configuration
+CHECKPOINT_DIR = Path("assets/checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_NAME = "model"
+SAVE_EVERY_N_EPOCHS = 5
+KEEP_LAST_N_CHECKPOINTS = 3
+
+def get_latest_checkpoint():
+    '''Find the most recent checkpoint file and return path + epoch number'''
+    files = list(CHECKPOINT_DIR.glob(f"{MODEL_NAME}_epoch_*.pt"))
+    if not files:
+        return None, 0
+    latest = max(files, key=os.path.getctime)
+    epoch = int(latest.stem.split("_epoch_")[-1])
+    return str(latest), epoch
+
+def cleanup_old_checkpoints():
+    '''Keep only the last N checkpoints to save disk space'''
+    files = sorted(CHECKPOINT_DIR.glob(f"{MODEL_NAME}_epoch_*.pt"), 
+                   key=os.path.getctime, reverse=True)
+    for old_file in files[KEEP_LAST_N_CHECKPOINTS:]:
+        try:
+            old_file.unlink()
+            print(f"Deleted old checkpoint: {old_file.name}")
+        except Exception as e:
+            print(f"Warning: Could not delete {old_file.name}: {e}")
+
+# 1. RESUME LOGIC - Load from checkpoint if available
+print("=" * 60)
+print("🔄 TRAINING WITH CHECKPOINT RECOVERY")
+print("=" * 60)
+
+latest_ckpt, start_epoch = get_latest_checkpoint()
+
+# TODO: Define your model here
+# model = MyCustomModel()
+model = None  # REPLACE WITH YOUR MODEL
+
+if model is None:
+    raise ValueError("Please define your model before running this template")
+
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model = model.to(device)
+
+if latest_ckpt:
+    print(f"🔄 Resuming from {latest_ckpt} (Epoch {start_epoch})")
+    checkpoint = torch.load(latest_ckpt)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    start_epoch += 1
+else:
+    print("🚀 Starting fresh training")
+    start_epoch = 1
+
+# 2. TRAINING LOOP
+print(f"Training from epoch {start_epoch} to 100...")
+for epoch in range(start_epoch, 101):
+    # TODO: Implement your training loop here
+    # loss = train_one_epoch(model, data_loader, optimizer, device)
+    loss = 0.0  # REPLACE WITH ACTUAL TRAINING
+    
+    print(f"Epoch {epoch}/100 - Loss: {loss:.4f}")
+    
+    # 3. FREQUENT CHECKPOINTING
+    if epoch % SAVE_EVERY_N_EPOCHS == 0:
+        save_path = CHECKPOINT_DIR / f"{MODEL_NAME}_epoch_{epoch}.pt"
+        torch.save(
+            {
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "loss": loss,
+            },
+            save_path,
+        )
+        print(f"💾 Saved checkpoint: {save_path}")
+        cleanup_old_checkpoints()
+
+print("✅ Training complete!")
+"""
+
+    elif framework.lower() == "tensorflow":
+        return """
+# 🛡️ RESILIENT TENSORFLOW TRAINING PATTERN
+import tensorflow as tf
+from pathlib import Path
+import os
+
+# Configuration
+CHECKPOINT_DIR = Path("assets/checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_NAME = "model"
+SAVE_EVERY_N_EPOCHS = 5
+
+# TODO: Define your model here
+# model = tf.keras.Sequential([...])
+model = None  # REPLACE WITH YOUR MODEL
+
+if model is None:
+    raise ValueError("Please define your model before running this template")
+
+model.compile(
+    optimizer=tf.keras.optimizers.Adam(learning_rate=0.001),
+    loss="sparse_categorical_crossentropy",
+    metrics=["accuracy"],
+)
+
+# 1. CHECKPOINT CALLBACK - Automatic saving
+checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+    filepath=str(CHECKPOINT_DIR / f"{MODEL_NAME}_epoch_{{epoch:02d}}.h5"),
+    save_freq="epoch",
+    save_best_only=False,
+)
+
+# 2. TRAINING WITH CHECKPOINTING
+print("=" * 60)
+print("🔄 TRAINING WITH CHECKPOINT RECOVERY")
+print("=" * 60)
+
+# TODO: Load your training data
+# train_dataset = tf.data.Dataset.from_tensor_slices((x_train, y_train))
+train_dataset = None  # REPLACE WITH YOUR DATA
+
+if train_dataset is None:
+    raise ValueError("Please load your training data before running this template")
+
+history = model.fit(
+    train_dataset,
+    epochs=100,
+    callbacks=[checkpoint_callback],
+    verbose=1,
+)
+
+print("✅ Training complete!")
+"""
+
+    elif framework.lower() == "sklearn":
+        return """
+# 🛡️ RESILIENT SKLEARN TRAINING PATTERN
+import pickle
+from pathlib import Path
+import os
+
+# Configuration
+CHECKPOINT_DIR = Path("assets/checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_NAME = "model"
+
+# TODO: Define your model here
+# from sklearn.ensemble import RandomForestClassifier
+# model = RandomForestClassifier(n_estimators=100)
+model = None  # REPLACE WITH YOUR MODEL
+
+if model is None:
+    raise ValueError("Please define your model before running this template")
+
+# 1. LOAD CHECKPOINT IF EXISTS
+checkpoint_path = CHECKPOINT_DIR / f"{MODEL_NAME}_checkpoint.pkl"
+
+print("=" * 60)
+print("🔄 TRAINING WITH CHECKPOINT RECOVERY")
+print("=" * 60)
+
+if checkpoint_path.exists():
+    print(f"🔄 Loading previous model from {checkpoint_path}")
+    with open(checkpoint_path, "rb") as f:
+        model = pickle.load(f)
+else:
+    print("🚀 Starting fresh model training")
+
+# TODO: Load your training data
+# X_train, y_train = load_data()
+X_train = None  # REPLACE WITH YOUR DATA
+y_train = None  # REPLACE WITH YOUR LABELS
+
+if X_train is None or y_train is None:
+    raise ValueError("Please load your training data before running this template")
+
+# 2. TRAINING
+print("Training model...")
+model.fit(X_train, y_train)
+
+# 3. SAVE CHECKPOINT
+with open(checkpoint_path, "wb") as f:
+    pickle.dump(model, f)
+print(f"💾 Model saved to {checkpoint_path}")
+
+print("✅ Training complete!")
+"""
+
+    else:
+        logger.warning(f"Unknown framework: {framework}")
+        return f"# Template only available for pytorch, tensorflow, sklearn. Requested: {framework}"

@@ -57,7 +57,7 @@ fi
 echo ""
 echo "🔐 Ensuring filesystem permissions..."
 
-# If running in Kubernetes, volumes might be mounted as root
+# If volumes are mounted by the host or orchestration they may be owned by root; handle gracefully
 # This fixes permission issues on restarts
 if [ -d "${MCP_DATA_DIR:-/data/mcp}" ]; then
     DATA_DIR="${MCP_DATA_DIR:-/data/mcp}"

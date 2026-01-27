@@ -63,7 +63,7 @@ async def _run_startup_janitor():
 async def lifespan(app: FastAPI):
     # Run the previous startup logic here. Use lifespan instead of the
     # deprecated @app.on_event("startup").
-    check_k8s_connectivity()
+    # Local-first deployment: no external orchestration checks on startup
     
     # [DAY 3 OPT 3.2] Run Janitor on startup
     await _run_startup_janitor()
@@ -219,41 +219,7 @@ def get_session_manager():
 
 connection_manager = ConnectionManager()
 
-import os
-import socket
-from .kernel_lifecycle import is_kubernetes_available
-from .constants import K8S_NAMESPACE, SERVICE_DNS_SUFFIX
 
-
-def is_running_in_k8s() -> bool:
-    return os.getenv("KUBERNETES_SERVICE_HOST") is not None
-
-
-def check_k8s_connectivity():
-    """
-    [OPS] Validate networking environment for Kubernetes mode.
-    If we are running locally but trying to connect to K8s DNS, warn the user.
-    """
-    if not is_kubernetes_available():
-        return
-
-    if is_running_in_k8s():
-        logger.info("Running inside Kubernetes cluster; skipping local DNS heuristics")
-        return
-
-    # Running locally - check DNS resolution of cluster service name
-    test_dns = f"kubernetes.{K8S_NAMESPACE}.{SERVICE_DNS_SUFFIX}"
-    try:
-        socket.gethostbyname(test_dns)
-        logger.info(f"✅ Local development: Cluster DNS resolution working for namespace '{K8S_NAMESPACE}'")
-    except socket.gaierror:
-        logger.warning(
-            f"⚠️  WARNING: KUBERNETES CONNECTIVITY ISSUE DETECTED for namespace '{K8S_NAMESPACE}'\n"
-            "   You are running 'mcp-server-jupyter' locally, but K8s DNS resolution failed.\n"
-            "   Since 'kubectl port-forward' support was removed for security, you MUST use\n"
-            "   a tool like Telepresence or a VPN to resolve cluster DNS addresses (e.g., .svc.cluster.local).\n"
-            "   Kernels may start but the server will fail to connect to them without cluster DNS resolution."
-        )
 
 
 # ---- Re-exported utilities for tests and tooling ----

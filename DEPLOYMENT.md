@@ -56,13 +56,6 @@ If you want, I can (A) update the GitHub Actions workflows to run the same build
 
 ---
 
-## Kubernetes Network Requirements (Production)
-
-The production architecture uses **Direct Pod Networking** and **NetworkPolicies** for security. Please ensure the following to avoid surprises in production or local development.
-
-1. **CNI Requirement**
-   - Your Kubernetes cluster must use a CNI that supports `NetworkPolicy` enforcement (e.g., **Calico**, **Cilium**, **Antrea**).
-   - ❌ **Flannel** and some basic CNIs do NOT enforce NetworkPolicies; the resources will be created but ignored, leaving kernels exposed.
 
 2. **DNS Requirement**
    - The MCP Server connects to kernels via Headless Service DNS (`jupyter-kernel-svc-<id>.<namespace>.svc.cluster.local`).

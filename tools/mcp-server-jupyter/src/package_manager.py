@@ -1,4 +1,8 @@
 import logging
+import asyncio
+from pathlib import Path
+from typing import Optional, Tuple
+
 try:
     from policy_engine import PolicyEngine
 except Exception:
@@ -7,20 +11,12 @@ except Exception:
         def check_package(self, name, version=None):
             return True, "Allowed (fallback)", {}
 
-try:
-    from k8s_manager import K8sManager  # We need to interact with the pod
-except Exception:
-    class K8sManager:
-        def __init__(self):
-            self.core_v1 = None
-
 logger = logging.getLogger(__name__)
 
 
 class PackageManager:
     def __init__(self):
         self.policy_engine = PolicyEngine()
-        self.k8s_manager = K8sManager()
 
     async def install_package_and_update_requirements(
         self, session_id: str, package_name: str, version: str | None
@@ -38,59 +34,83 @@ class PackageManager:
         if not is_approved:
             return False, reason
 
-        # If approved, proceed with installation inside the pod
-        pod_name = self.k8s_manager._get_pod_name(session_id)
-        if not pod_name:
-            return False, "Could not find the kernel pod for this session."
-
+        # Install package locally (local-only mode)
         req_spec = f"{package_name}{f'=={version}' if version else ''}"
 
-        # Command to install the package
-        install_command = ["pip", "install", req_spec]
-        try:
-            await self._execute_command_in_pod(pod_name, install_command)
-            logger.info(f"Successfully installed {req_spec} in pod {pod_name}")
-        except Exception as e:
-            return False, f"Failed to install package in pod: {e}"
+        import subprocess
 
-        # Command to update requirements.txt
-        # Using shell to handle file I/O
-        update_reqs_command = [
-            "/bin/bash",
-            "-c",
-            f"echo '{req_spec}' >> /home/jovyan/work/requirements.txt",
-        ]
+        install_proc = subprocess.run(["pip", "install", req_spec], capture_output=True, text=True)
+        if install_proc.returncode != 0:
+            logger.error(f"Failed to install {req_spec}: {install_proc.stderr}")
+            return False, f"Failed to install package locally: {install_proc.stderr}"
+
+        # Append to requirements.txt in current working directory
         try:
-            await self._execute_command_in_pod(pod_name, update_reqs_command)
-            logger.info(
-                f"Successfully updated requirements.txt for session {session_id}"
-            )
+            with open("requirements.txt", "a", encoding="utf-8") as reqf:
+                reqf.write(f"{req_spec}\n")
+            logger.info(f"Successfully updated requirements.txt for session {session_id}")
         except Exception as e:
-            # This is a non-fatal error; the package is installed but not persisted.
-            # A more robust system might try to retry or alert.
-            logger.warning(f"Failed to update requirements.txt in pod: {e}")
-            return (
-                True,
-                f"Package installed, but failed to update requirements.txt: {e}",
-            )
+            logger.warning(f"Failed to update local requirements.txt: {e}")
+            return True, f"Package installed, but failed to update requirements.txt: {e}"
+
+        # Update lockfile locally
+        try:
+            success, msg = await self._update_lockfile(pod_name="local")
+            if not success:
+                logger.warning(f"Failed to update lockfile: {msg}")
+        except Exception as e:
+            logger.warning(f"Lockfile update threw an exception: {e}")
 
         return True, f"Successfully installed {req_spec} and updated requirements.txt."
 
-    async def _execute_command_in_pod(self, pod_name: str, command: list[str]):
-        """Helper to execute a shell command inside a specific pod."""
-        from kubernetes.stream import stream
+    async def _update_lockfile(
+        self, pod_name: Optional[str] = None
+    ) -> Tuple[bool, str]:
+        """
+        [PHASE 2] Updates the lockfile by running 'pip freeze'.
+        Ensures exact reproducibility on restart.
 
-        resp = stream(
-            self.k8s_manager.core_v1.connect_get_namespaced_pod_exec,
-            pod_name,
-            "default",
-            command=command,
-            stderr=True,
-            stdin=False,
-            stdout=True,
-            tty=False,
-        )
-        logger.debug(
-            f"Exec in pod {pod_name} command '{' '.join(command)}' output: {resp}"
-        )
-        # A real implementation should check the command's exit code
+        Args:
+        "pod_name: Ignored in local-first mode; package installs are performed locally."
+        Returns:
+            (success: bool, message: str)
+        """
+        try:
+            if pod_name is None or pod_name == "local":
+                # Local mode: use subprocess
+                import subprocess
+
+                result = subprocess.run(
+                    ["pip", "freeze"],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    logger.warning(f"pip freeze failed: {result.stderr}")
+                    return False, f"pip freeze failed: {result.stderr}"
+
+                lockfile_path = Path(".mcp-requirements.lock")
+                lockfile_path.write_text(result.stdout)
+                logger.info(f"Lockfile updated at {lockfile_path}")
+                return True, f"Lockfile updated at {lockfile_path}"
+            else:
+                # K8s mode: execute in pod
+                cmd = [
+                    "/bin/bash",
+                    "-c",
+                    "pip freeze > /home/jovyan/work/.mcp-requirements.lock",
+                ]
+                await self._execute_command_in_pod(pod_name, cmd)
+                logger.info(f"Lockfile updated in pod {pod_name}")
+                return True, f"Lockfile updated in pod {pod_name}"
+
+        except Exception as e:
+            logger.error(f"Failed to update lockfile: {e}")
+            return False, f"Lockfile update failed: {e}"
+
+    # Kubernetes-specific package installation helpers removed.
+    # Use the local install implementation above (subprocess-based) for a
+    # local-first environment. If you need remote installs, implement an
+    # explicit executor and call _update_lockfile as needed.

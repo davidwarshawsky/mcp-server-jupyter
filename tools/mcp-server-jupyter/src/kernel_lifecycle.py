@@ -3,7 +3,7 @@ Kernel Lifecycle Management
 ============================
 
 Phase 2.1 Refactoring: Extract kernel process management from SessionManager.
-Phase 3.0 Refactoring: Add Kubernetes support for production deployments.
+Phase 3.0 Refactoring: Orchestration support (historical) — removed.
 
 This module handles:
 - Starting kernels (local Python, venv, conda, Docker, Kubernetes)
@@ -33,19 +33,13 @@ import structlog
 import shutil
 import subprocess
 
-# Kubernetes support (optional - only imported if running in K8s)
-try:
-    from kubernetes import client, config, watch
-    from kubernetes.stream import stream
-
-    KUBERNETES_AVAILABLE = True
-except ImportError:
-    client = config = watch = stream = None
-    KUBERNETES_AVAILABLE = False
+# Orchestration support removed for local-first mode.
+# All orchestration and in-cluster helpers were intentionally removed.
+# If you need to re-enable Kubernetes features, please consult git history
+# and reintroduce them behind an explicit feature flag.
 
 from . import utils
 from .docker_security import get_default_config
-from .constants import K8S_MOUNT_PATH, CONNECTION_FILE_PATH, K8S_NAMESPACE, SERVICE_DNS_SUFFIX
 
 logger = structlog.get_logger(__name__)
 
@@ -66,49 +60,10 @@ def safe_path(p: Path) -> str:
     return Path(p).resolve().as_posix()
 
 
-def get_kubernetes_api():
-    """
-    Initializes and returns the Kubernetes Core V1 API client.
-
-    Tries to load config in this order:
-    1. In-cluster service account (for pods running in K8s)
-    2. kube-config file (for local development)
-
-    Returns None if Kubernetes is not available or not configured.
-    """
-    if not KUBERNETES_AVAILABLE:
-        return None
-
-    try:
-        # Load config from in-cluster service account (production)
-        config.load_incluster_config()
-        logger.info("✅ Kubernetes in-cluster config loaded (production mode)")
-    except config.ConfigException:
-        try:
-            # Fallback to kube-config file (local development)
-            config.load_kube_config()
-            logger.info("✅ Kubernetes kube-config loaded (development mode)")
-        except config.ConfigException:
-            logger.warning("⚠️  Kubernetes config not available, using local mode")
-            return None
-
-    return client.CoreV1Api()
-
-
-def is_kubernetes_available() -> bool:
-    """Returns True if running in a Kubernetes environment."""
-    return KUBERNETES_AVAILABLE and get_kubernetes_api() is not None
-
-
-def is_running_in_k8s() -> bool:
-    """Lightweight check for in-cluster execution based on env var.
-
-    Returns True when the process is inside a Kubernetes environment (has
-    service host environment variable set). This is intentionally lightweight
-    so it can be used early during startup without contacting the API.
-    """
-    return os.getenv("KUBERNETES_SERVICE_HOST") is not None
-
+# Orchestration helpers removed — local-only mode
+# Historical helpers for Kubernetes detection and API access were removed
+# as part of the local-first pivot. If you need them, reintroduce behind
+# an explicit feature flag.
 
 class KernelLifecycle:
     """
@@ -134,19 +89,14 @@ class KernelLifecycle:
         self.active_kernels: Dict[str, Dict[str, Any]] = {}
         logger.info(f"KernelLifecycle initialized (max_concurrent={max_concurrent})")
 
-    async def start_kernel_kubernetes(
-        self,
-        kernel_id: str,
-        namespace: str | None = None,
-        cpu_request: str = "200m",
-        memory_request: str = "256Mi",
-        cpu_limit: str = "1000m",
-        memory_limit: str = "2048Mi",
-    ) -> Dict[str, Any]:
-        # Use configured default namespace when not provided
-        namespace = namespace or K8S_NAMESPACE
+    async def start_kernel_kubernetes(self, *args, **kwargs) -> Dict[str, Any]:
+        """Kubernetes support removed.
+
+        This deployment target is local-only. For reproducibility and simplicity,
+        Kubernetes orchestration code was intentionally removed. Attempting to
+        start a kernel in Kubernetes will raise an informative error.
         """
-        Start a kernel in Kubernetes as an isolated pod.
+        raise RuntimeError("Kubernetes support removed: start_kernel_kubernetes is no longer available.")
 
         CRITICAL IMPLEMENTATION GAP:
         This demonstrates the architectural shift but does not yet implement:
@@ -684,6 +634,11 @@ class KernelLifecycle:
         kernel_env["MCP_KERNEL_ID"] = kernel_uuid
         logger.info(f"[KERNEL] Assigning UUID: {kernel_uuid}")
 
+        # [PHASE 2] Enforce lockfile for reproducibility
+        if Path(".mcp-requirements.lock").exists():
+            logger.info("[PHASE 2] Found lockfile, enforcing exact environment")
+            kernel_env["MCP_USE_LOCKFILE"] = "1"
+
         if venv_path:
             venv = Path(venv_path)
             if venv.exists():
@@ -714,7 +669,7 @@ class KernelLifecycle:
         venv_path: Optional[str] = None,
         docker_image: Optional[str] = None,
         agent_id: Optional[str] = None,
-        use_kubernetes: bool = False,
+        use_kubernetes: bool = False,  # Note: Kubernetes support removed; this flag is ignored
     ) -> AsyncKernelManager:
         """
         Start a new Jupyter kernel (local, Docker, or Kubernetes).
@@ -741,25 +696,9 @@ class KernelLifecycle:
                 f"Stop an existing kernel first."
             )
 
-        # Try Kubernetes first if requested and available
-        if use_kubernetes and is_kubernetes_available():
-            try:
-                logger.info(f"Starting kernel {kernel_id} in Kubernetes...")
-                k8s_info = await self.start_kernel_kubernetes(
-                    kernel_id=kernel_id,
-                    namespace="default",
-                    cpu_request="200m",
-                    memory_request="256Mi",
-                    cpu_limit="1000m",
-                    memory_limit="2048Mi",
-                )
-                logger.info(f"✅ Kubernetes kernel started: {k8s_info['pod_name']}")
-                return (
-                    k8s_info  # Return K8s connection info instead of AsyncKernelManager
-                )
-            except Exception as e:
-                logger.warning(f"Kubernetes startup failed, falling back to local: {e}")
-                # Fall through to local kernel startup
+        # Kubernetes orchestration removed: explicit local/Docker launches only.
+        if use_kubernetes:
+            raise RuntimeError("Kubernetes support removed: this deployment is local-only.")
 
         # Handle agent workspace isolation
         if agent_id:

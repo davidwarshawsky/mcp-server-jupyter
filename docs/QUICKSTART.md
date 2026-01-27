@@ -172,11 +172,11 @@ To connect to a remote MCP server:
 pip install "mcp-server-jupyter[superpowers]"
 ```
 
-### Local Kubernetes Development (if using kubeconfig)
+### Local Development
 
-If you are running the MCP server locally using your cluster kubeconfig (not in-cluster), the server will detect you are not running inside Kubernetes and will default kernel pod connections to `127.0.0.1` to make local workflows predictable. Use `kubectl port-forward` or a VPN/Telepresence to expose the kernel pod port(s) to localhost. This avoids flaky cluster DNS resolution during development and provides a clear local debugging workflow.
+For local development we recommend running via Docker Compose or a local Python environment. The server will default to using loopback addresses for local kernel connections and provides predictable, debuggable behavior without orchestration. If you need to connect to a remote environment, use SSH tunnels or VPN tooling appropriate for your setup.
 
-Note: In production (in-cluster), MCP uses a headless Service for stable DNS; that behavior is unchanged when the server runs inside the cluster.
+Note: Production orchestration (e.g., Kubernetes) is out-of-scope for the default repository layout; consult your operations team for custom deployment manifests if you require non-local orchestration.
 
 ### Need Help?
 

@@ -17,87 +17,50 @@ docker tag mcp-jupyter:latest your-registry/mcp-jupyter:latest
 docker push your-registry/mcp-jupyter:latest
 ```
 
-### Step 2: Update Kubernetes Manifests
+### Step 2: Local / Docker Compose Deployment
 
-Edit `deployments/kubernetes/production/deployment.yaml`:
+For local or small-scale deployments we recommend using Docker Compose or a simple Docker run. This keeps development and CI fast and avoids the complexity of orchestration.
+
+Edit `docker-compose.yml` (or your local compose override) to set the image and bind mounts:
 
 ```yaml
-# Line ~35, update image path
-image: your-registry/mcp-jupyter:latest  # Change this
+services:
+  mcp-jupyter:
+    image: your-registry/mcp-jupyter:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/data/mcp:rw
+    environment:
+      - MCP_DATA_DIR=/data/mcp
+      - LOG_LEVEL=INFO
 ```
 
-### Step 3: Deploy to Kubernetes
+Bring the stack up:
 
 ```bash
-cd deployments/kubernetes/production
+# Start the service
+docker compose up -d --build
 
-# Create resources
-kubectl apply -f deployment.yaml
+# Wait for the service to be healthy (check logs if needed)
+docker compose logs -f mcp-jupyter
 
-# Wait for pod to be ready (takes ~30-60s)
-kubectl wait --for=condition=ready pod \
-  -l app=mcp-jupyter \
-  -n default \
-  --timeout=300s
-
-# Verify deployment
-kubectl get pods -o wide
-kubectl get pvc
-kubectl get svc
-```
-
-### Step 4: Verify Deployment
-
-```bash
-# Check logs (should show pre-flight checks)
-kubectl logs -f deployment/mcp-jupyter-server
-
-# Port forward to test locally
-kubectl port-forward svc/mcp-jupyter-service 3000:3000 &
-
-# Test health endpoint
+# Test health endpoint locally
 curl http://localhost:3000/health
-
-# Kill port-forward
-pkill -f "port-forward"
 ```
 
-### Step 5: Test Checkpoint Functionality
+### Verifying Checkpoint Functionality (local)
 
 ```bash
-# Port forward again
-kubectl port-forward svc/mcp-jupyter-service 3000:3000 &
+# Save a checkpoint from a notebook as usual (see API docs)
+# Check that checkpoints land in the mounted data directory
+ls -la ./data/checkpoints/
 
-# In VS Code Jupyter notebook:
-import pandas as pd
-
-# Create test data
-df = pd.DataFrame({"x": range(100), "y": range(100, 200)})
-
-# Save checkpoint
-save_environment(
-    notebook_path="/workspace/test.ipynb",
-    checkpoint_name="test_save",
-    variables=["df"]
-)
-# ✅ Should see: Checkpoint 'test_save' saved successfully
-
-# Verify checkpoint exists
-kubectl exec <pod-name> -- ls -la /data/mcp/checkpoints/ | grep test_save
-
-# Delete variable
-del df
-
-# Load checkpoint
-load_environment(
-    notebook_path="/workspace/test.ipynb",
-    checkpoint_name="test_save"
-)
-
-# Verify restoration
-print(df.shape)  # Should print (100, 2)
-# ✅ Should see: Restored 1 variables.
+# To inspect files locally
+cat ./data/checkpoints/<checkpoint-name>/manifest.json
 ```
+
+> Note: earlier versions of this guide included Kubernetes manifests (deployments and storage classes). The project now follows a local-first deployment model; Kubernetes manifests have been removed from the repository. For large-scale production deployments, consult the deployment section in the project documentation or reach out for a custom setup.
 
 ---
 
@@ -115,168 +78,84 @@ Set these in your pod/container:
 
 ---
 
-## Persistent Storage
+## Persistent Storage (Local)
 
-### Azure AKS (AzureDisk)
+For local deployments we recommend using a host bind mount or a named Docker volume. This keeps data easy to inspect and backup.
 
-```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: mcp-storage
-provisioner: kubernetes.io/azure-disk
-parameters:
-  skuName: Premium_LRS
-  kind: Managed
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mcp-jupyter-data-pvc
-spec:
-  storageClassName: mcp-storage
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
-```
-
-### AWS EKS (EBS)
+Docker bind mount example (docker-compose):
 
 ```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: mcp-storage
-provisioner: ebs.csi.aws.com
-parameters:
-  type: gp3
-  iops: "3000"
-  throughput: "125"
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mcp-jupyter-data-pvc
-spec:
-  storageClassName: mcp-storage
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
+services:
+  mcp-jupyter:
+    volumes:
+      - ./data:/data/mcp:rw
 ```
 
-### Google GKE (GCE Persistent Disk)
+Named volume example (docker-compose):
 
 ```yaml
-apiVersion: storage.k8s.io/v1
-kind: StorageClass
-metadata:
-  name: mcp-storage
-provisioner: kubernetes.io/gce-pd
-parameters:
-  type: pd-ssd
-  replication-type: regional-pd
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mcp-jupyter-data-pvc
-spec:
-  storageClassName: mcp-storage
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
+volumes:
+  mcp-data:
+    driver: local
+
+services:
+  mcp-jupyter:
+    volumes:
+      - mcp-data:/data/mcp
 ```
 
-### On-Premise (Local Storage)
-
-```yaml
-apiVersion: v1
-kind: PersistentVolume
-metadata:
-  name: mcp-jupyter-pv
-spec:
-  capacity:
-    storage: 100Gi
-  accessModes:
-    - ReadWriteOnce
-  hostPath:
-    path: /mnt/data/mcp
-    type: Directory
----
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: mcp-jupyter-data-pvc
-spec:
-  accessModes:
-    - ReadWriteOnce
-  resources:
-    requests:
-      storage: 100Gi
-  selector:
-    matchLabels:
-      pv: mcp-jupyter
-```
+Notes:
+- If you need a cloud-backed production setup, consult your cloud provider's documentation for provisioning block storage (EBS, Azure Disk, GCE PD) and map that to your orchestration platform of choice. Kubernetes-specific storage manifests have been removed from this repository.
 
 ---
 
-## Troubleshooting
+## Troubleshooting (Local / Docker Compose)
 
-### Pod Won't Start
+### Service Won't Start
 
 ```bash
-# Check logs
-kubectl logs <pod-name>
+# Check runtime logs
+docker compose logs -f mcp-jupyter
 
 # Common issues:
 # - "Address already in use :3000" → Entrypoint didn't kill old process
-#   Fix: Check fuser availability: kubectl exec <pod> -- which fuser
-#
+#   Fix: Check if another process is listening on the port: lsof -i :3000
 # - "Permission denied /data/mcp" → Volume mount ownership issue
-#   Fix: Check entrypoint chown: kubectl exec <pod> -- ls -la /data
-#
+#   Fix: Inspect host mount: ls -la ./data
 # - "ModuleNotFoundError: dill" → dill not installed
-#   Fix: Rebuild Docker image: docker build -t mcp-jupyter:latest .
+#   Fix: Rebuild Docker image and restart: docker compose build mcp-jupyter && docker compose up -d
 ```
 
-### Pod Crashes
+### Service Crashes
 
 ```bash
-# Check previous logs (if pod restarted)
-kubectl logs <pod-name> --previous
+# Check previous logs (if the container restarted)
+docker compose logs --no-log-prefix --tail=200 mcp-jupyter
 
-# Check events
-kubectl describe pod <pod-name>
+# Inspect container status
+docker compose ps
 
-# Check resource usage
-kubectl top pod <pod-name>
+# Check live resource usage
+docker stats $(docker compose ps -q mcp-jupyter)
 
-# If out of memory, increase limits in deployment.yaml:
-# limits:
-#   memory: "8Gi"  # Increase this
+# If out of memory, increase memory limits via your host or use a larger machine.
 ```
 
 ### Checkpoint Verification Failed
 
 ```bash
-# Check HMAC signature error in logs
-kubectl logs <pod-name> | grep "signature mismatch"
+# Check logs for signature errors
+docker compose logs mcp-jupyter | grep "signature mismatch"
 
 # Possible causes:
 # - File corrupted (bad storage)
 # - File tampered with (security issue)
-# - Different SESSION_SECRET on different pod (shouldn't happen)
+# - Different SESSION_SECRET between runs (check your environment variables)
 
 # Recovery:
 # - Delete corrupted checkpoint: delete_checkpoint(notebook, "corrupted_name")
 # - Restore from backup if available
-# - Contact support if critical data
+# - Inspect files in ./data/checkpoints
 ```
 
 ---
@@ -291,7 +170,7 @@ Add to your Prometheus scrape config:
 scrape_configs:
   - job_name: 'mcp-jupyter'
     static_configs:
-      - targets: ['mcp-jupyter-service.default:3000']
+      - targets: ['localhost:3000']
     metrics_path: '/metrics'
     scrape_interval: 30s
 ```
@@ -338,7 +217,7 @@ fi
 
 ```bash
 # If pod loses PVC, restore from backup:
-kubectl exec <new-pod> -- bash -c \
+docker compose exec mcp-jupyter bash -c \
   'aws s3 sync s3://backup-bucket/mcp-checkpoints/ /data/mcp/checkpoints/'
 ```
 
@@ -346,12 +225,12 @@ kubectl exec <new-pod> -- bash -c \
 
 ```bash
 # Backup execution queue
-kubectl exec <pod-name> -- sqlite3 /data/mcp/sessions/state.db ".dump" \
+docker compose exec mcp-jupyter sqlite3 /data/mcp/sessions/state.db ".dump" \
   | gzip > state_db_backup.sql.gz
 
 # Restore
 gzip -d state_db_backup.sql.gz
-kubectl exec <pod-name> -- sqlite3 /data/mcp/sessions/state.db < state_db_backup.sql
+docker compose exec -T mcp-jupyter sqlite3 /data/mcp/sessions/state.db < state_db_backup.sql
 ```
 
 ---
@@ -393,21 +272,20 @@ env:
 
 ## Cleanup
 
-### Delete Deployment
+### Remove Local Deployment
 
 ```bash
-# Remove all resources
-kubectl delete -f deployments/kubernetes/production/deployment.yaml
+# Stop and remove the local compose stack
+docker compose down -v
 
-# Note: PVC is NOT deleted automatically (data protection)
-# Delete manually if no longer needed:
-kubectl delete pvc mcp-jupyter-data-pvc
+# Note: the '-v' flag will remove named volumes created by compose. If you
+# used a host bind (recommended for data persistence), the files remain.
 ```
 
 ### Delete Specific Checkpoints
 
 ```bash
-# In kernel
+# In local environment (or within a running container)
 delete_checkpoint(notebook_path, "old_checkpoint_name")
 ```
 
@@ -417,9 +295,9 @@ delete_checkpoint(notebook_path, "old_checkpoint_name")
 
 For issues:
 
-1. Check logs: `kubectl logs deployment/mcp-jupyter-server`
-2. Check events: `kubectl describe deployment mcp-jupyter-server`
-3. Check PVC: `kubectl describe pvc mcp-jupyter-data-pvc`
-4. Check node: `kubectl describe node <node-name>`
+1. Check logs: `docker compose logs -f mcp-jupyter`
+2. Check container status: `docker compose ps`
+3. Inspect data directory: `ls -la ./data/checkpoints`
+4. Check service health endpoint: `curl http://localhost:3000/health`
 
 See `COMPLETE_REMEDIATION.md` for detailed architecture documentation.

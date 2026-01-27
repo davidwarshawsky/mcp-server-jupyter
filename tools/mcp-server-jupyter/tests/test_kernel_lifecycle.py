@@ -43,73 +43,12 @@ def temp_notebook_dir(tmp_path):
 import pytest
 
 
-@pytest.mark.asyncio
-async def test_is_running_in_k8s_false_by_default(monkeypatch):
-    """is_running_in_k8s() should be False when no env var is set."""
-    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    from src.kernel_lifecycle import is_running_in_k8s
-
-    assert is_running_in_k8s() is False
-
-
-@pytest.mark.asyncio
-async def test_is_running_in_k8s_true_when_env_set(monkeypatch):
-    """is_running_in_k8s() should be True when env var is present."""
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
-    from src.kernel_lifecycle import is_running_in_k8s
-
-    assert is_running_in_k8s() is True
 
 
 import json
 from types import SimpleNamespace
 
 
-@pytest.mark.asyncio
-async def test_start_kernel_kubernetes_local_fallback(monkeypatch, tmp_path):
-    """start_kernel_kubernetes should return 127.0.0.1 when not running in-cluster (local dev)."""
-    # Simulate available Kubernetes API but not in-cluster environment
-    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "")
-
-    # Make is_kubernetes_available return True so method proceeds
-    monkeypatch.setattr("src.kernel_lifecycle.is_kubernetes_available", lambda: True)
-
-    # Fake API with minimal methods needed
-    class FakeAPI:
-        def create_namespaced_pod(self, body, namespace):
-            return None
-
-        def read_namespaced_pod_status(self, name, namespace):
-            ns = SimpleNamespace()
-            ns.status = SimpleNamespace(phase="Running", conditions=[SimpleNamespace(type="Ready", status="True")])
-            return ns
-
-        def read_namespaced_pod_log(self, name, namespace):
-            return "fake logs"
-
-        # Minimal attribute used by stream invocation
-        def connect_get_namespaced_pod_exec(self, *args, **kwargs):
-            # Not actually executed since stream is patched, but present for attribute access
-            return None
-
-    monkeypatch.setattr("src.kernel_lifecycle.get_kubernetes_api", lambda: FakeAPI())
-
-    # patch stream to return a valid connection JSON string
-    monkeypatch.setattr("src.kernel_lifecycle.stream", lambda *args, **kwargs: json.dumps({"shell_port": 12345}))
-
-    from src.kernel_lifecycle import KernelLifecycle, is_running_in_k8s
-
-    # Ensure env detection says we're not in cluster
-    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
-    assert is_running_in_k8s() is False
-
-    kl = KernelLifecycle()
-    info = await kl.start_kernel_kubernetes(kernel_id="foo", namespace="default")
-
-    assert info["status"] == "running"
-    # Local fallback should rewrite 'ip' to loopback and include a note
-    assert info.get("ip") == "127.0.0.1"
-    assert "local_dev" in info.get("note", "")
 
 
 class TestKernelLifecycleBasics:
