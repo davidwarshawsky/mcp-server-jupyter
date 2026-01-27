@@ -4,6 +4,7 @@ import nbformat
 import os
 from pathlib import Path
 from src.session import SessionManager
+from tests.test_helpers import extract_output_content
 
 
 @pytest.mark.asyncio
@@ -31,6 +32,9 @@ async def test_async_execution_flow():
         print(f"Starting kernel for {nb_path}...")
         res = await manager.start_kernel(str(nb_path))
         print(res)
+        
+        # Wait for kernel to fully initialize (SQL magics, etc.)
+        await asyncio.sleep(2)
 
         # 2. Run Async
         print("Submitting async task...")
@@ -82,8 +86,10 @@ async def test_async_execution_flow():
         print(f"Output: {final_status.get('output', '')}")
 
         assert final_status["status"] == "completed"
-        assert "Start" in final_status["output"]
-        assert "End" in final_status["output"]
+        # Extract content from JSON output format
+        output_content = extract_output_content(final_status.get("output", ""))
+        assert "Start" in output_content, f"Expected 'Start' in output. Got: {output_content}"
+        assert "End" in output_content, f"Expected 'End' in output. Got: {output_content}"
 
     finally:
         await manager.shutdown_all()

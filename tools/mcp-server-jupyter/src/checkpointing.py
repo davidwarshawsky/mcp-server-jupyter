@@ -140,7 +140,7 @@ class CheckpointManager:
             
             # 4. Write Metadata
             metadata = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "signature": signature,
                 "notebook": notebook_path,
                 "name": name,

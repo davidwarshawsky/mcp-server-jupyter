@@ -4,6 +4,7 @@ import asyncio
 import nbformat
 from pathlib import Path
 from src.session import SessionManager
+from tests.test_helpers import extract_output_content
 
 
 @pytest_asyncio.fixture
@@ -113,6 +114,9 @@ async def test_cancellation(session_manager_fixture, temp_notebook):
 async def test_cwd_is_notebook_dir(session_manager_fixture, temp_notebook):
     manager = session_manager_fixture
     await manager.start_kernel(temp_notebook)
+    
+    # Wait for kernel to fully initialize
+    await asyncio.sleep(2)
 
     # code to check cwd
     code = "import os; print(os.getcwd())"
@@ -129,9 +133,11 @@ async def test_cwd_is_notebook_dir(session_manager_fixture, temp_notebook):
     assert final_status is not None
     # We expect the CWD to be the directory of possible notebook
     expected_dir = str(Path(temp_notebook).parent.resolve())
+    # Extract content from JSON output format
+    output_content = extract_output_content(final_status.get("output", ""))
     # Normalize slashes for comparison
-    output_clean = final_status["output"].strip().replace("\\", "/")
+    output_clean = output_content.strip().replace("\\", "/")
     expected_clean = expected_dir.replace("\\", "/")
 
     # The output might print it somewhat differently (case sensitivity on Windows), but let's check basic containment
-    assert expected_clean.lower() in output_clean.lower()
+    assert expected_clean.lower() in output_clean.lower(), f"Expected '{expected_clean}' in output. Got: {output_clean}"

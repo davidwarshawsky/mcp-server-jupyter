@@ -7,6 +7,7 @@ import asyncio
 import nbformat
 from src.session import SessionManager
 from src.utils import _convert_small_html_table_to_markdown
+from tests.test_helpers import extract_output_content
 
 
 class TestEvalSecurityFix:
@@ -180,6 +181,9 @@ class TestHTMLTableIntegration:
 
         try:
             await manager.start_kernel(str(nb_path))
+            
+            # Wait for kernel to fully initialize
+            await asyncio.sleep(2)
 
             # Create small DataFrame
             code = """
@@ -188,10 +192,14 @@ df = pd.DataFrame({'A': [1, 2, 3], 'B': [4, 5, 6]})
 df.head()
 """
             result = await manager.run_simple_code(str(nb_path), code)
+            
+            # Extract content from JSON output format
+            result_content = extract_output_content(result)
 
             # Should contain markdown table (Data Preview) if HTML conversion worked
             # OR fallback message if conversion failed
-            assert "[Data Preview]" in result or "[HTML Table detected" in result
+            assert "[Data Preview]" in result_content or "[HTML Table detected" in result_content, \
+                f"Expected DataFrame preview in output. Got: {result_content}"
 
         finally:
             await manager.shutdown_all()

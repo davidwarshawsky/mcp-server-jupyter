@@ -19,7 +19,7 @@ def read_asset(asset_path: str, lines: Optional[List[int]] = None, search: Optio
     directly from code/tests that do not have an MCP runtime available.
     """
     # [DAY 3 OPT 3.3] Enforce HARD CAPS on return payload size
-    MAX_RETURN_CHARS = 100_000  # 100KB hard limit
+    MAX_RETURN_CHARS = 20_000  # 20KB hard limit
     MAX_RETURN_LINES = 500
 
     max_lines = min(max_lines, MAX_RETURN_LINES)
@@ -50,7 +50,7 @@ def read_asset(asset_path: str, lines: Optional[List[int]] = None, search: Optio
                 # [DAY 3 OPT 3.3] Apply hard cap BEFORE returning
                 if len(content) > MAX_RETURN_CHARS:
                     content = content[:MAX_RETURN_CHARS]
-                    content += f"\n\n[SYSTEM] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
+                    content += f"\n\n[Truncated] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
                     content += f"\n[SYSTEM] Refine your search query to get more specific results."
                 
                 return json.dumps({"content": content, "file_size_bytes": file_size, "matches": len(matches)})
@@ -75,9 +75,7 @@ def read_asset(asset_path: str, lines: Optional[List[int]] = None, search: Optio
                 # [DAY 3 OPT 3.3] Apply hard cap BEFORE returning
                 if len(content) > MAX_RETURN_CHARS:
                     content = content[:MAX_RETURN_CHARS]
-                    content += f"\n\n[SYSTEM] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
-                    content += f"\n[SYSTEM] Use 'lines' parameter to paginate (e.g., lines=[1000, 1100])."
-
+                    content += f"\n\n[Truncated] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
                 return json.dumps({"content": content, "file_size_bytes": file_size, "line_range": [start_line, min(end_line, last_line)], "lines_returned": len(selected_lines)})
 
             else:
@@ -92,9 +90,7 @@ def read_asset(asset_path: str, lines: Optional[List[int]] = None, search: Optio
                 # [DAY 3 OPT 3.3] Apply hard cap BEFORE returning
                 if len(content) > MAX_RETURN_CHARS:
                     content = content[:MAX_RETURN_CHARS]
-                    content += f"\n\n[SYSTEM] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
-                    content += f"\n[SYSTEM] Use 'lines' or 'search' parameters for targeted retrieval."
-
+                    content += f"\n\n[Truncated] Output truncated. Exceeded {MAX_RETURN_CHARS//1024}KB limit."
                 return json.dumps({"content": content, "file_size_bytes": file_size, "lines_returned": len(content_lines), "note": "Use 'lines' or 'search' parameters for targeted retrieval"})
 
     except Exception as e:

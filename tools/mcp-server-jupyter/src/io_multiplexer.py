@@ -170,6 +170,24 @@ class IOMultiplexer:
         """
         # Identify which execution this belongs to
         parent_id = msg.get("parent_header", {}).get("msg_id")
+
+        # Quick fuzzy-match: Sometimes kernels send slightly different msg_id suffixes
+        # (e.g. ..._4 vs ..._6). Try to match based on base prefix to avoid buffering
+        # messages unnecessarily when an execution key is present with same base.
+        if parent_id and executions and parent_id not in executions:
+            try:
+                base = parent_id.rsplit("_", 1)[0]
+                for k in executions.keys():
+                    if k.startswith(base) or k.rsplit("_", 1)[0] == base:
+                        # Rewrite parent_id to the matched key and continue processing
+                        logger.debug(
+                            f"Fuzzy-matched IOPub parent_id {parent_id} -> {k}"
+                        )
+                        parent_id = k
+                        break
+            except Exception:
+                pass
+
         if not parent_id or parent_id not in executions:
             # [NETWORK FIX] Buffer with ring buffer (size-bounded, not time-based)
             # If the client is slow to register, we wait up to 1000 messages
@@ -183,11 +201,12 @@ class IOMultiplexer:
                 msg_with_context = dict(msg)
                 msg_with_context["_nb_path"] = nb_path
                 
-                # Ring buffer: store in deque with max size
+                # Ring buffer: store (timestamp, message) in deque with max size
                 if parent_id not in self._message_buffer:
                     self._message_buffer[parent_id] = deque(maxlen=self._max_orphaned_per_id)
-                
-                self._message_buffer[parent_id].append(msg_with_context)
+
+                timestamp = asyncio.get_event_loop().time()
+                self._message_buffer[parent_id].append((timestamp, msg_with_context))
             except Exception:
                 pass
             return
@@ -197,7 +216,7 @@ class IOMultiplexer:
         # with races where some messages arrived before registration.
         if parent_id in getattr(self, "_message_buffer", {}):
             buffered_deque = self._message_buffer.pop(parent_id, deque())
-            for buffered_msg in buffered_deque:
+            for _, buffered_msg in buffered_deque:
                 try:
                     # Process buffered messages by routing them through
                     # the same code path (avoid recursion loops by calling
@@ -223,6 +242,7 @@ class IOMultiplexer:
         # Route by message type
         if msg_type == "status":
             await self._handle_status(
+                parent_id,
                 nb_path,
                 exec_data,
                 content,
@@ -249,6 +269,7 @@ class IOMultiplexer:
 
     async def _handle_status(
         self,
+        parent_id: str,
         nb_path: str,
         exec_data: Dict[str, Any],
         content: Dict[str, Any],
@@ -268,6 +289,56 @@ class IOMultiplexer:
             # [OBSERVABILITY FIX] Signal completion event so waiting coroutine wakes up
             if "completion_event" in exec_data:
                 exec_data["completion_event"].set()
+
+            # Before finalizing, check if there are any buffered messages for this parent
+            # that arrived before the execution was registered. Process them now to ensure
+            # they are included in the finalization step.
+            try:
+                # Exact match for any buffered messages
+                if parent_id in getattr(self, "_message_buffer", {}):
+                    entries = self._message_buffer.pop(parent_id, deque())
+                    for _, buffered_msg in entries:
+                        try:
+                            nb_path_from_msg = buffered_msg.pop("_nb_path", "")
+                            await self._route_message(
+                                nb_path=nb_path_from_msg,
+                                msg=buffered_msg,
+                                executions={parent_id: exec_data},
+                                session_data=session_data,
+                                finalize_callback=finalize_callback,
+                                broadcast_callback=None,
+                                notification_callback=notification_callback,
+                                persist_callback=persist_callback,
+                            )
+                        except Exception:
+                            pass
+
+                # Fuzzy prefix matches: also process buffered messages that share
+                # the same base prefix (handles cases like msg_id_3 vs msg_id_5)
+                try:
+                    parent_base = parent_id.rsplit("_", 1)[0]
+                    keys_to_check = [k for k in list(self._message_buffer.keys()) if k and k.rsplit("_", 1)[0] == parent_base]
+                    for k in keys_to_check:
+                        entries = self._message_buffer.pop(k, deque())
+                        for _, buffered_msg in entries:
+                            try:
+                                nb_path_from_msg = buffered_msg.pop("_nb_path", "")
+                                await self._route_message(
+                                    nb_path=nb_path_from_msg,
+                                    msg=buffered_msg,
+                                    executions={parent_id: exec_data},
+                                    session_data=session_data,
+                                    finalize_callback=finalize_callback,
+                                    broadcast_callback=None,
+                                    notification_callback=notification_callback,
+                                    persist_callback=persist_callback,
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
 
             # Wait for finalization event (synchronizes with queue processor)
             if "finalization_event" in exec_data:
@@ -476,9 +547,55 @@ class IOMultiplexer:
                     # Ignore errors processing buffered messages
                     pass
 
-        # Process stale messages: ignore them (they don't have matching executions)
-        # The kernel may send messages for msg_ids that don't match our registered
-        # executions due to implicit kernel initialization messages
+        # Process stale messages: route them to a recent execution as a best-effort
+        # If messages are older than 1s and no matching execution exists, we assume
+        # they may belong to a just-completed or recently started execution. Route
+        # them to the most recently active execution to avoid losing outputs.
+        try:
+            if executions:
+                # Pick the best candidate: prefer running executions, then highest last_activity
+                candidates = []
+                for key, data in executions.items():
+                    candidates.append((key, data))
+
+                # Prefer running executions
+                running = [c for c in candidates if c[1].get("status") == "running"]
+                if running:
+                    fallback_key, fallback_exec = running[0]
+                else:
+                    # Use last_activity timestamp if available, else last key
+                    candidates_sorted = sorted(
+                        candidates,
+                        key=lambda kv: kv[1].get("last_activity", 0),
+                        reverse=True,
+                    )
+                    fallback_key, fallback_exec = candidates_sorted[0]
+
+                # Route each stale entry to the fallback execution
+                for parent_id, entries in to_process_stale.items():
+                    try:
+                        for _, buffered_msg in entries:
+                            try:
+                                nb_path_from_msg = buffered_msg.pop("_nb_path", "")
+                                # Route using a small executions mapping that maps the
+                                # chosen fallback_key to the fallback_exec data
+                                await self._route_message(
+                                    nb_path=nb_path_from_msg,
+                                    msg=buffered_msg,
+                                    executions={fallback_key: fallback_exec},
+                                    session_data=session_data,
+                                    finalize_callback=finalize_callback,
+                                    broadcast_callback=broadcast_callback,
+                                    notification_callback=notification_callback,
+                                    persist_callback=persist_callback,
+                                )
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception:
+            # Best-effort: never allow buffered message routing to raise
+            pass
 
     async def listen_stdin(
         self,

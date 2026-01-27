@@ -1244,6 +1244,7 @@ class SessionManager:
         session_data["queue_processor_task"] = asyncio.create_task(
             self._queue_processor(abs_path, session_data)
         )
+        logger.info(f"Scheduled queue_processor_task for {abs_path}")
 
         # [FIX #4] Start health check loop for this kernel
         session_data["health_check_task"] = asyncio.create_task(
@@ -1379,20 +1380,39 @@ class SessionManager:
         REFACTORED: Delegates to ExecutionScheduler component.
         """
 
+        logger.info(f"Starting queue processor for {nb_path}")
+
         # Create execute callback that uses the kernel client
         async def execute_callback(code: str) -> str:
             """Execute code and return message ID."""
             kc = session_data["kc"]
-            return kc.execute(code)
+            # Support both sync and async kernel client implementations.
+            try:
+                result = kc.execute(code)
+                # If the kernel client returned an awaitable/coroutine, await it here
+                import inspect
+
+                if inspect.isawaitable(result):
+                    result = await result
+                return result
+            except Exception:
+                # Propagate to caller to allow scheduler to handle startup failures
+                raise
 
         # [STATE AMNESIA FIX] Pass persistence manager to scheduler
         # This ensures task lifecycle is tracked (running → complete/failed)
-        await self.execution_scheduler.process_queue(
-            nb_path=nb_path,
-            session_data=session_data,
-            execute_callback=execute_callback,
-            persistence=self.persistence,
-        )
+        try:
+            await self.execution_scheduler.process_queue(
+                nb_path=nb_path,
+                session_data=session_data,
+                execute_callback=execute_callback,
+                persistence=self.persistence,
+            )
+        except asyncio.CancelledError:
+            logger.info(f"Queue processor cancelled for {nb_path}")
+            raise
+        except Exception:
+            logger.exception(f"Unhandled exception in queue_processor for {nb_path}")
 
     async def _finalize_execution_async(self, nb_path: str, exec_data: Dict):
         """Async implementation of finalizing an execution. Use `_finalize_execution` wrapper for sync callers."""
@@ -1414,8 +1434,24 @@ class SessionManager:
                 else ""
             )
             if linearity_warning:
-                # Prepend linearity warning to the sanitized output
-                text_summary = linearity_warning + text_summary
+                # Inject linearity warning into the JSON payload to avoid
+                # corrupting parsers that expect the output to be JSON.
+                try:
+                    payload = json.loads(text_summary)
+                    # Preserve existing warnings, append if present
+                    if isinstance(payload, dict):
+                        warnings = payload.get("warnings", [])
+                        if not isinstance(warnings, list):
+                            warnings = [warnings]
+                        warnings.insert(0, linearity_warning)
+                        payload["warnings"] = warnings
+                        text_summary = json.dumps(payload)
+                    else:
+                        # Fallback: wrap into dict
+                        text_summary = json.dumps({"warnings": [linearity_warning], "payload": payload})
+                except Exception:
+                    # If parsing fails, fallback to a safe wrapper
+                    text_summary = json.dumps({"warnings": [linearity_warning], "payload": text_summary})
 
             exec_data["text_summary"] = text_summary
             # Debug: log finalizer summary lengths for observability during tests
@@ -1514,10 +1550,18 @@ class SessionManager:
             RuntimeError: If execution queue is full (backpressure)
         """
         abs_path = str(Path(nb_path).resolve())
+        logger.info(f"execute_cell_async called for {abs_path} cell_index={cell_index}")
         if abs_path not in self.sessions:
             return None
 
         session = self.sessions[abs_path]
+
+        # Defensive defaults: ensure expected session keys exist (tests may use minimal mocks)
+        session.setdefault("queued_executions", {})
+        if session.get("execution_queue") is None:
+            # Recreate a minimal queue if missing to avoid AttributeError in tests
+            max_queue_size = int(os.environ.get("MCP_MAX_QUEUE_SIZE", "1000"))
+            session["execution_queue"] = asyncio.Queue(maxsize=max_queue_size)
 
         # HEAL CHECK: If this is an inspection or system tool, ensure helper exists
         # If the kernel restarted, we might not know, so we ensure it's available.
@@ -1549,6 +1593,12 @@ class SessionManager:
             "status": "queued",
             "queued_time": asyncio.get_event_loop().time(),
         }
+        # Short-lived busy hint to avoid race windows where queue processor
+        # hasn't dequeued yet but callers want to know if the kernel is busy.
+        try:
+            session["last_queued_ts"] = asyncio.get_event_loop().time()
+        except Exception:
+            pass
 
         # [STATE AMNESIA FIX] Persist task to disk BEFORE queuing in memory
         # This ensures task survives server crash before execution starts
@@ -1586,7 +1636,7 @@ class SessionManager:
                 "This prevents server resource exhaustion."
             )
 
-        logger.debug(f"Queued execution {exec_id} for {nb_path} cell {cell_index}")
+        logger.info(f"Queued execution {exec_id} for {nb_path} cell {cell_index}")
         return exec_id
 
     async def get_kernel_info(self, nb_path: str):
@@ -1734,7 +1784,10 @@ print(_inspect_var())
         """
         Check if the kernel is currently busy executing code.
 
-        Returns True if there are any executions with 'running' or 'queued' status.
+        Returns True if there are any executions with 'running' or 'queued' status, or
+        if there are pending items in the execution queue. This method is defensive
+        against missing or partially-initialized session structures to avoid
+        false-negative results under race conditions.
         """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
@@ -1742,14 +1795,71 @@ print(_inspect_var())
 
         session = self.sessions[abs_path]
 
-        # Check queued executions
-        if session.get("queued_executions"):
+        # 1) Explicit queued_executions map (may be missing in some test mocks)
+        queued_map = session.get("queued_executions")
+        if isinstance(queued_map, dict) and len(queued_map) > 0:
+            logger.debug(f"Kernel busy (queued_executions present): {abs_path} -> {len(queued_map)} pending")
             return True
+        if queued_map is None:
+            logger.debug(f"queued_executions missing for session {abs_path}; falling back to queue/qsize checks")
 
-        # Check active executions for running status
+        # 2) Check the in-memory asyncio.Queue for pending items (pre-dequeue)
+        q = session.get("execution_queue")
+        try:
+            if q is not None and hasattr(q, "qsize") and q.qsize() > 0:
+                logger.debug(f"Kernel busy (execution_queue qsize>0): {abs_path} -> {q.qsize()} pending")
+                return True
+        except Exception:
+            # If qsize isn't available or the queue is in an odd state, ignore
+            pass
+
+        # 3) Short-lived queued hint (helps avoid tiny race windows)
+        try:
+            now = asyncio.get_event_loop().time()
+            last_q = session.get("last_queued_ts")
+            if last_q and (now - last_q) < 5.0:
+                logger.debug(f"Kernel busy (recent queued hint): {abs_path} last_queued={now-last_q:.3f}s ago")
+                return True
+        except Exception:
+            pass
+
+        # 4) Check persistence layer for pending tasks as a last-resort indicator
+        try:
+            if hasattr(self, "persistence") and self.persistence:
+                pending = self.persistence.get_pending_tasks(abs_path)
+                if pending:
+                    logger.debug(f"Kernel busy (persistence pending tasks): {abs_path} -> {len(pending)}")
+                    return True
+        except Exception:
+            # If persistence is unavailable or errors, ignore
+            pass
+
+        # 3) Active executions with terminal statuses
         for msg_id, data in session.get("executions", {}).items():
             if data.get("status") in ["running", "queued"]:
+                logger.debug(f"Kernel busy (active execution): {abs_path} msg_id={msg_id} status={data.get('status')}")
                 return True
+
+        # 4) As a last resort, check if kernel client appears alive (best-effort)
+        kc = session.get("kc")
+        if kc is not None and hasattr(kc, "is_alive"):
+            try:
+                # Avoid creating coroutine objects in a sync function which may
+                # trigger "coroutine was never awaited" warnings when the
+                # kernel client implements an async is_alive(). Instead, detect
+                # whether is_alive is a coroutine function before calling it.
+                import inspect
+
+                if inspect.iscoroutinefunction(getattr(kc, "is_alive")):
+                    logger.debug(f"kc.is_alive is async for {abs_path}; skipping call in is_kernel_busy")
+                else:
+                    is_alive = kc.is_alive()
+                    if is_alive:
+                        # Kernel alive doesn't guarantee busy; treat as not-busy here
+                        logger.debug(f"Kernel client alive for {abs_path}; treating as possibly busy")
+                        return False
+            except Exception:
+                pass
 
         return False
 

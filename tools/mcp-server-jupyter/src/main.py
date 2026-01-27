@@ -146,6 +146,9 @@ class ConnectionManager:
             # Clean up completed tasks
             task.add_done_callback(background_tasks.discard)
 
+        # Yield briefly so background tasks have a chance to run in tests
+        await asyncio.sleep(0)
+
     async def _send_to_connection(self, conn, msg):
         """Helper to send message to a single connection, removing on failure."""
         try:
@@ -552,13 +555,39 @@ async def _stdio_server():
 if __name__ == "__main__":
     # If transport specified on CLI, follow original HTTP/WebSocket server behavior
     import sys
+    import argparse
 
-    if "--transport" in sys.argv:
-        asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--transport", choices=["websocket", "stdio"], default=None)
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--host", type=str, default=None)
+    args, unknown = parser.parse_known_args()
+
+    # Allow CLI overrides for host/port for test harness and manual runs
+    if args.port is not None:
+        try:
+            object.__setattr__(config, "PORT", int(args.port))
+        except Exception:
+            pass
+    if args.host:
+        try:
+            object.__setattr__(config, "HOST", args.host)
+        except Exception:
+            pass
+
+    if args.transport:
+        # Launch the selected transport
+        if args.transport == "websocket":
+            asyncio.run(main())
+        else:
+            # stdio server
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_stdio_server())
+            finally:
+                loop.close()
     else:
         # Default to stdio JSON-RPC for test harness compatibility
-        import asyncio
-
         loop = asyncio.new_event_loop()
         try:
             loop.run_until_complete(_stdio_server())

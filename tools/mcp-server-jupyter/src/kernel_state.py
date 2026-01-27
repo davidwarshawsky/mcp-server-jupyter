@@ -253,7 +253,20 @@ class KernelStateManager:
                         # [P0 FIX #4] UUID Check is MANDATORY - no fallback to create_time
                         if kernel_uuid:
                             try:
-                                proc_env = proc.environ()
+                                # Try psutil first, but fallback to reading /proc/<pid>/environ
+                                try:
+                                    proc_env = proc.environ()
+                                except Exception:
+                                    proc_env = {}
+                                if not proc_env:
+                                    try:
+                                        with open(f"/proc/{kernel_pid}/environ", "rb") as f:
+                                            raw = f.read().decode(errors="ignore")
+                                            parts = raw.split("\x00")
+                                            proc_env = {p.split("=",1)[0]: p.split("=",1)[1] for p in parts if "=" in p}
+                                    except Exception:
+                                        proc_env = {}
+
                                 if proc_env.get("MCP_KERNEL_ID") == kernel_uuid:
                                     should_kill = True
                                     logger.info(
@@ -261,11 +274,31 @@ class KernelStateManager:
                                         f"(UUID: {kernel_uuid[:8]}...)"
                                     )
                                 else:
-                                    logger.warning(
-                                        f"[REAPER] PID {kernel_pid} exists but UUID mismatch. "
-                                        f"Expected {kernel_uuid[:8]}..., got {proc_env.get('MCP_KERNEL_ID', 'NONE')[:8] if proc_env.get('MCP_KERNEL_ID') else 'NONE'}... "
-                                        "Skipping (possible PID recycling)."
-                                    )
+                                    # As a fallback, check recorded pid_create_time. If the process
+                                    # creation time matches the persisted pid_create_time, it's
+                                    # very likely the same process and safe to kill even when the
+                                    # environment variable wasn't found (some platforms restrict access).
+                                    recorded_create_time = data.get("pid_create_time")
+                                    try:
+                                        proc_create_time = proc.create_time()
+                                    except Exception:
+                                        proc_create_time = None
+
+                                    if (
+                                        recorded_create_time
+                                        and proc_create_time
+                                        and abs(proc_create_time - recorded_create_time) < 1.0
+                                    ):
+                                        should_kill = True
+                                        logger.warning(
+                                            f"[REAPER] PID {kernel_pid} env UUID not readable, but create_time matches persisted record. Reaping PID."
+                                        )
+                                    else:
+                                        logger.warning(
+                                            f"[REAPER] PID {kernel_pid} exists but UUID mismatch. "
+                                            f"Expected {kernel_uuid[:8]}..., got {proc_env.get('MCP_KERNEL_ID', 'NONE')[:8] if proc_env.get('MCP_KERNEL_ID') else 'NONE'}... "
+                                            "Skipping (possible PID recycling)."
+                                        )
                             except (psutil.AccessDenied, psutil.NoSuchProcess) as e:
                                 logger.error(
                                     f"[REAPER] Cannot verify UUID for PID {kernel_pid}: {e}. "

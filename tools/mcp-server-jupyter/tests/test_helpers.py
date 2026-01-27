@@ -3,9 +3,58 @@ Test helper functions for assertion and validation.
 """
 
 import asyncio
+import json
+import re
 import nbformat
 from pathlib import Path
 from typing import Dict, Any, List
+
+
+def extract_output_content(output: str) -> str:
+    """
+    Extract meaningful content from execution output.
+    
+    The output may be:
+    1. A JSON string with llm_summary field
+    2. Plain text
+    
+    This function extracts the llm_summary content or returns the original
+    string if it's not JSON.
+    """
+    if not output:
+        return output
+    
+    try:
+        data = json.loads(output)
+        if isinstance(data, dict) and "llm_summary" in data:
+            return data["llm_summary"]
+        return output
+    except (json.JSONDecodeError, TypeError):
+        return output
+
+
+def extract_json_from_text(text: str) -> str:
+    """
+    Extract JSON array or object from text that may contain preamble.
+    
+    The kernel may output informational messages (like SQL magic loading)
+    before the actual JSON output. This function finds and extracts the
+    first valid JSON array or object from the text.
+    """
+    if not text:
+        return text
+    
+    # Try to find a JSON array
+    array_match = re.search(r'\[[\s\S]*\]', text)
+    if array_match:
+        return array_match.group(0)
+    
+    # Try to find a JSON object  
+    obj_match = re.search(r'\{[\s\S]*\}', text)
+    if obj_match:
+        return obj_match.group(0)
+    
+    return text
 
 
 def assert_notebook_valid(nb_path: str) -> None:

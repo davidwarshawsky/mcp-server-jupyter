@@ -17,6 +17,7 @@ import json
 import nbformat
 from src.session import SessionManager
 from src import notebook
+from tests.test_helpers import extract_output_content
 
 
 @pytest_asyncio.fixture
@@ -50,6 +51,9 @@ async def test_end_to_end_asset_extraction_and_provenance(
     # 2. Start kernel
     start_result = await real_session_manager.start_kernel(str(nb_path))
     assert "Kernel started" in start_result
+    
+    # Wait for kernel to fully initialize (SQL magics, etc.)
+    await asyncio.sleep(2)
 
     # 3. Check if matplotlib is available, skip if not
     check_code = "import matplotlib; import numpy; print('OK')"
@@ -138,7 +142,9 @@ plt.show()
 
     # 10. Check cell output contains some indication of plot creation
     # (either asset reference or confirmation message)
-    output_text = status["output"] or ""
+    output_raw = status["output"] or ""
+    # Extract content from JSON output format
+    output_text = extract_output_content(output_raw)
     has_plot_output = (
         "[PNG SAVED:" in output_text
         or "asset_" in output_text.lower()
@@ -205,6 +211,9 @@ async def test_inspect_variable_integration(tmp_path, real_session_manager):
 
     # 2. Start kernel
     await real_session_manager.start_kernel(str(nb_path))
+    
+    # Wait for kernel to fully initialize
+    await asyncio.sleep(2)
 
     # 3. Create test variables
     setup_code = """
@@ -314,6 +323,9 @@ async def test_autoreload_enabled_on_startup(tmp_path, real_session_manager):
     # 2. Start kernel (autoreload should be injected)
     start_result = await real_session_manager.start_kernel(str(nb_path))
     assert "Kernel started" in start_result
+    
+    # Wait for kernel to fully initialize
+    await asyncio.sleep(2)
 
     # 3. Verify kernel is functional after autoreload injection
     test_code = "x = 42\nprint(f'Value: {x}')"
@@ -331,9 +343,11 @@ async def test_autoreload_enabled_on_startup(tmp_path, real_session_manager):
     assert (
         status["status"] == "completed"
     ), f"Kernel should be functional after autoreload. Got status: {status['status']}"
+    # Extract content from JSON output format
+    output_content = extract_output_content(status.get("output", ""))
     assert (
-        "Value: 42" in status["output"]
-    ), f"Kernel should execute code correctly. Got output: {status['output']}"
+        "Value: 42" in output_content
+    ), f"Kernel should execute code correctly. Got output: {output_content}"
 
     # 4. Check if autoreload magic is available (optional check)
     # This is informational - even if autoreload failed to load, kernel should still work
@@ -350,7 +364,8 @@ async def test_autoreload_enabled_on_startup(tmp_path, real_session_manager):
             break
 
     # Log autoreload status but don't fail if it's not loaded
-    if "True" in status2["output"]:
+    status2_output = extract_output_content(status2.get("output", ""))
+    if "True" in status2_output:
         print("+ Autoreload module is loaded")
     else:
         print("i Autoreload module not detected (may still work via IPython magic)")

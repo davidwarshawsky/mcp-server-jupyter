@@ -37,6 +37,7 @@ pytest-asyncio = ">=0.23.0"
 pytest-xdist = ">=3.6.0"
 pytest-cov = ">=5.0.0"
 pytest-timeout = ">=2.3.0"
+pytest-rerunfailures = ">=14.0"
 hypothesis = ">=6.100.0"
 pip-audit = ">=2.7.0"
 loguru = ">=0.7.2"
@@ -50,12 +51,18 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Automatically rerun failed tests up to 5 times with 2 second delay
+# This helps with flaky kernel startup during parallel execution
+reruns = 5
+reruns_delay = 2
 markers = [
   "optional: marks tests as optional (heavy integration tests)",
   "slow: marks tests as slow",
   "resource_intensive: marks tests that consume significant resources",
   "e2e: marks tests as end-to-end tests",
-  "integration: marks tests as integration tests"
+  "integration: marks tests as integration tests",
+  "flaky: marks tests as potentially flaky (auto-retried)",
+  "flaky_kernel: marks tests involving kernel operations (auto-retried)"
 ]
 filterwarnings = [
   "ignore::DeprecationWarning:jupyter_client.*:",

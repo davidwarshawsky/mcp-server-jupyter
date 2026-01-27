@@ -8,6 +8,7 @@ from src.session import SessionManager
 from pathlib import Path
 import tempfile
 import nbformat
+from tests.test_helpers import extract_json_from_text as extract_json_from_output
 
 
 @pytest.mark.asyncio
@@ -73,9 +74,11 @@ print(json.dumps(manifest))
 """,
         )
 
-        # Parse result
+        # Parse result - extract JSON from output which may contain preamble
         result = json.loads(manifest_json)
-        manifest = json.loads(result["llm_summary"])
+        llm_summary = result["llm_summary"]
+        json_text = extract_json_from_output(llm_summary)
+        manifest = json.loads(json_text)
 
         # Verify structure
         assert isinstance(manifest, list)
@@ -185,9 +188,11 @@ print(json.dumps(manifest))
 """,
         )
 
-        # Parse result
+        # Parse result - extract JSON from output which may contain preamble
         result = json.loads(manifest_json)
-        manifest = json.loads(result["llm_summary"])
+        llm_summary = result["llm_summary"]
+        json_text = extract_json_from_output(llm_summary)
+        manifest = json.loads(json_text)
 
         # Find large variables
         large_list_var = next((v for v in manifest if v["name"] == "large_list"), None)
@@ -254,9 +259,11 @@ print(json.dumps(manifest))
 """,
         )
 
-        # Parse result
+        # Parse result - extract JSON from output which may contain preamble
         result = json.loads(manifest_json)
-        manifest = json.loads(result["llm_summary"])
+        llm_summary = result["llm_summary"]
+        json_text = extract_json_from_output(llm_summary)
+        manifest = json.loads(json_text)
 
         # Should be valid list (possibly empty or with builtins)
         assert isinstance(manifest, list)

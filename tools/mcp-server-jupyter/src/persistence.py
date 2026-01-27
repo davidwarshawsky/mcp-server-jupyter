@@ -17,7 +17,7 @@ import uuid
 import logging
 from pathlib import Path
 from typing import Optional, Dict, List, Any, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +113,7 @@ class PersistenceManager:
         if not task_id:
             task_id = str(uuid.uuid4())
         
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -168,7 +168,7 @@ class PersistenceManager:
 
     def mark_task_running(self, task_id: str):
         """Mark a task as currently running."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -186,7 +186,7 @@ class PersistenceManager:
             outputs_json: JSON-serialized cell outputs (from Jupyter kernel)
             execution_count: The execution count from the kernel
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
             if outputs_json is not None or execution_count is not None:
@@ -214,7 +214,7 @@ class PersistenceManager:
 
     def mark_task_failed(self, task_id: str, error: str):
         """Mark a task as failed with an error message."""
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -242,7 +242,7 @@ class PersistenceManager:
             notebook_path: Notebook that references it
             lease_duration_hours: How long to keep the asset (default 24h)
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expires = now + timedelta(hours=lease_duration_hours)
         
         with sqlite3.connect(self.db_path) as conn:
@@ -277,7 +277,7 @@ class PersistenceManager:
         Returns:
             List of asset paths with expired leases
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
@@ -309,7 +309,7 @@ class PersistenceManager:
         
         Call this periodically to keep the DB from growing indefinitely.
         """
-        cutoff = datetime.utcnow() - timedelta(hours=age_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=age_hours)
         
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(

@@ -883,6 +883,15 @@ class KernelLifecycle:
             logger.warning(f"[KERNEL] Cannot stop {kernel_id}: not found")
             return False
 
+        # Debugging aid: log call stack so we can trace who is requesting kernel shutdown
+        try:
+            import traceback
+
+            stack = "\n".join(traceback.format_stack(limit=10))
+            logger.info(f"stop_kernel called for {kernel_id}; call stack:\n{stack}")
+        except Exception:
+            pass
+
         kernel_info = self.active_kernels[kernel_id]
         km = kernel_info["km"]
 

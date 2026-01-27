@@ -6,9 +6,17 @@ try:
     from python_json_logger import jsonlogger
 except Exception:
     try:
-        from pythonjsonlogger import jsonlogger  # fallback
+        # pythonjsonlogger v3.x moved jsonlogger to pythonjsonlogger.json
+        from pythonjsonlogger.json import JsonFormatter as _JsonFormatter
+        # Create a shim module-like object for compatibility
+        class jsonlogger:
+            JsonFormatter = _JsonFormatter
     except Exception:
-        jsonlogger = None
+        try:
+            # pythonjsonlogger v2.x (deprecated path)
+            from pythonjsonlogger import jsonlogger  # noqa: F401
+        except Exception:
+            jsonlogger = None
 
 
 def setup_logging():
