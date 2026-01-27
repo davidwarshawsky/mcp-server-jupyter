@@ -16,6 +16,17 @@ This project is composed of two main parts:
 1.  A **VS Code Extension** (`vscode-extension`) that provides the user interface and frontend logic.
 2.  A **Jupyter Server Backend** (`tools/mcp-server-jupyter`) that manages kernels, state, and executes the "superpowers".
 
+### ⚙️ Architecture: Local-First by Design
+
+MCP Jupyter is **explicitly designed as a local-only tool**. This is not a limitation—it's a feature. By focusing exclusively on local kernel execution, we achieve:
+
+- **Simplicity:** No Docker, Kubernetes, or cloud orchestration complexity.
+- **Reliability:** Direct process management, no network-dependent orchestration.
+- **Developer Experience:** Instant feedback, no orchestration overhead or debugging.
+- **Security:** Kernels run as the current user with filesystem access they explicitly control.
+
+If you need cloud-native or containerized Jupyter execution, use standard JupyterHub, JupyterLab on cloud platforms, or managed services like SageMaker or Colab.
+
 | Before MCP Jupyter                               | After MCP Jupyter                                |
 | ------------------------------------------------ | ------------------------------------------------ |
 | 😭 Kernel crashes and lost work                  | 😎 **Automatic crash recovery**                     |

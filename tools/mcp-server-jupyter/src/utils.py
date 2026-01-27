@@ -1138,7 +1138,7 @@ def sanitize_outputs_resilient(
 # ============================================================================
 # PHASE 2: ENVIRONMENT LOCKFILE SYSTEM
 # ============================================================================
-async def update_lockfile(pod_name: str = "local", k8s_executor=None) -> tuple[bool, str]:
+async def update_lockfile(pod_name: str = "local") -> tuple[bool, str]:
     """
     Snapshots the current environment via 'pip freeze' and saves to `.mcp-requirements.lock`.
     Local-only implementation: non-local execution paths were removed with the local-first pivot.

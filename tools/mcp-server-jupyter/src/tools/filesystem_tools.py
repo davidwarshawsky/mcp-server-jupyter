@@ -27,7 +27,6 @@ def _validate_path(path_str: str) -> Path:
     2. No .. traversal escaping limits.
     """
     # Simple security check: resolve path and ensure it's within CWD (or allowed root)
-    # Ideally reuse logic from session.py _validate_mount_path but simpler here for tools
 
     cwd = Path.cwd().resolve()
     target = Path(path_str).resolve()

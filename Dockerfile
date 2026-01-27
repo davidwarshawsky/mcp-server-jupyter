@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     findutils \
     && rm -rf /var/lib/apt/lists/*
 
-# NOTE: We do not install kubectl in the server image by default. Port-forwarding
+# NOTE: We do not install cluster tooling (e.g., kubectl) in the server image by default. Port-forwarding
 # via subprocess is brittle; prefer direct pod networking (sidecar/proxy) in production.
 
 WORKDIR /app

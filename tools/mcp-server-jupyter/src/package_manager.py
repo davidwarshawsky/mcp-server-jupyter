@@ -24,8 +24,8 @@ class PackageManager:
         """
         Manages the full lifecycle of a package installation:
         1. Audit the package using the policy engine.
-        2. If approved, install it into the running kernel pod.
-        3. Append it to the requirements.txt in the user's persistent volume.
+        2. Install it locally via pip.
+        3. Append it to the requirements.txt in the current directory.
         """
         is_approved, reason, report = self.policy_engine.check_package(
             package_name, version
@@ -68,10 +68,8 @@ class PackageManager:
     ) -> Tuple[bool, str]:
         """
         [PHASE 2] Updates the lockfile by running 'pip freeze'.
-        Ensures exact reproducibility on restart.
+        Ensures exact reproducibility on restart (local mode only).
 
-        Args:
-        "pod_name: Ignored in local-first mode; package installs are performed locally."
         Returns:
             (success: bool, message: str)
         """
@@ -95,22 +93,7 @@ class PackageManager:
                 lockfile_path.write_text(result.stdout)
                 logger.info(f"Lockfile updated at {lockfile_path}")
                 return True, f"Lockfile updated at {lockfile_path}"
-            else:
-                # K8s mode: execute in pod
-                cmd = [
-                    "/bin/bash",
-                    "-c",
-                    "pip freeze > /home/jovyan/work/.mcp-requirements.lock",
-                ]
-                await self._execute_command_in_pod(pod_name, cmd)
-                logger.info(f"Lockfile updated in pod {pod_name}")
-                return True, f"Lockfile updated in pod {pod_name}"
 
         except Exception as e:
             logger.error(f"Failed to update lockfile: {e}")
             return False, f"Lockfile update failed: {e}"
-
-    # Kubernetes-specific package installation helpers removed.
-    # Use the local install implementation above (subprocess-based) for a
-    # local-first environment. If you need remote installs, implement an
-    # explicit executor and call _update_lockfile as needed.

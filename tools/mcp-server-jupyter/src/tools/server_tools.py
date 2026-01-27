@@ -40,7 +40,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
                 "features": {
                     "checkpoint": False,  # Removed for security (ROUND 2)
                     "git_integration": False,  # Removed for maintenance burden
-                    "docker_kernels": True,
                     "conda_kernels": True,
                     "multiuser": True,
                 },
@@ -85,7 +84,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
                     "health_monitoring",
                     "interrupt_escalation",
                     "checkpoint_recovery",
-                    "docker_isolation",
                     "sql_superpowers",
                 ],
                 "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",

@@ -35,7 +35,6 @@ def register_kernel_tools(mcp, session_manager):
     async def start_kernel(
         notebook_path: str,
         venv_path: str = "",
-        docker_image: str = "",
         timeout: int = 300,
         agent_id: Optional[str] = None,
     ):
@@ -43,13 +42,11 @@ def register_kernel_tools(mcp, session_manager):
         Boot a background process.
         Windows Logic: Looks for venv_path/Scripts/python.exe.
         Ubuntu Logic: Looks for venv_path/bin/python.
-        Docker Logic: If docker_image is set, runs kernel securely in container.
         Timeout: Seconds before killing long-running cells (default: 300).
         Output: "Kernel started (PID: 1234). Ready for execution."
         """
         with tracer.start_as_current_span("tool.start_kernel") as span:
             span.set_attribute("notebook_path", notebook_path)
-            span.set_attribute("docker_image", docker_image)
             # Capture the active session for notifications
             try:
                 ctx = mcp.get_context()
@@ -59,16 +56,9 @@ def register_kernel_tools(mcp, session_manager):
                 # Ignore if context not available (e.g. testing)
                 pass
 
-            # Security Check
-            if not docker_image:
-                logger.warning(
-                    f"Unsandboxed execution requested for {notebook_path}. All code runs with user privileges."
-                )
-
             return await session_manager.start_kernel(
                 notebook_path,
                 venv_path if venv_path else None,
-                docker_image if docker_image else None,
                 timeout,
                 agent_id=agent_id,
             )

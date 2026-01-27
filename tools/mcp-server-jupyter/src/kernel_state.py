@@ -226,25 +226,6 @@ class KernelStateManager:
 
                 # Server is dead -> Check kernel
 
-                # [REAPER FIX] Explicit container cleanup
-                env_info = data.get("env_info", {})
-                container_name = env_info.get("container_name")
-                if container_name:
-                    try:
-                        import subprocess
-
-                        logger.warning(
-                            f"[REAPER] Killing zombie container {container_name}"
-                        )
-                        subprocess.run(
-                            ["docker", "rm", "-f", container_name],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=5,
-                        )
-                    except Exception as e:
-                        logger.error(f"[REAPER] Docker cleanup failed: {e}")
-
                 if kernel_pid and psutil.pid_exists(kernel_pid):
                     try:
                         proc = psutil.Process(kernel_pid)

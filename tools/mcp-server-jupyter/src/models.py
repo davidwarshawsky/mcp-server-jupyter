@@ -32,9 +32,7 @@ class StartKernelArgs(SecureBaseModel):
     venv_path: Optional[str] = Field(
         default="", description="Path to Python virtual environment"
     )
-    docker_image: Optional[str] = Field(
-        default="", description="Docker image name for sandboxed execution"
-    )
+
     timeout: int = Field(
         default=300, ge=10, le=3600, description="Kernel startup timeout in seconds"
     )
@@ -56,19 +54,6 @@ class StartKernelArgs(SecureBaseModel):
         if not str(p).endswith(".ipynb"):
             raise ValueError("Notebook must have .ipynb extension")
         return str(p)
-
-    @field_validator("docker_image")
-    @classmethod
-    def validate_docker_image(cls, v):
-        """Validate Docker image format."""
-        if not v:
-            return v
-        # Docker image format: [registry/]name[:tag]
-        if any(c in v for c in [";", "|", "&", "`", "$", "\n", "\r"]):
-            raise ValueError("Shell metacharacters not allowed in Docker image")
-        if len(v) > 255:
-            raise ValueError("Docker image name too long (max 255 chars)")
-        return v
 
 
 class StopKernelArgs(SecureBaseModel):

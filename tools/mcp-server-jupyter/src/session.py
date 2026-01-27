@@ -523,79 +523,6 @@ class SessionManager:
         # Fallback
         return sys.executable
 
-    def _validate_mount_path(self, project_root: Path) -> Path:
-        """
-        [SECURITY] Validate Docker mount path to prevent container breakout attacks.
-
-        Ensures the mount path is within allowed directories and doesn't
-        escape via symlinks or .. traversal.
-
-        IIRB COMPLIANCE: Blocks mounting of root (/) or system paths.
-        """
-        resolved_root = project_root.resolve()
-
-        # [CRITICAL] Block mounting root separately (every path is_relative_to /)
-        if resolved_root == Path("/"):
-            raise ValueError(
-                "SECURITY VIOLATION: Cannot mount root directory /. "
-                "Mounting the root filesystem is forbidden."
-            )
-
-        # Block system paths (but /tmp is allowed for testing)
-        dangerous_paths = [
-            Path("/etc"),
-            Path("/var"),
-            Path("/usr"),
-            Path("/bin"),
-            Path("/sbin"),
-            Path("/boot"),
-            Path("/sys"),
-        ]
-        for dangerous in dangerous_paths:
-            if resolved_root == dangerous or resolved_root.is_relative_to(dangerous):
-                raise ValueError(
-                    f"SECURITY VIOLATION: Cannot mount system path {resolved_root}. "
-                    f"Mounting root or system directories is forbidden."
-                )
-
-        # Define allowed base paths (configurable via environment)
-        # [P0 FIX #2] Use config-based data directory as fallback
-        try:
-            from src.config import load_and_validate_settings
-
-            _cfg = load_and_validate_settings()
-            default_allowed = (
-                _cfg.get_data_dir().parent if _cfg.MCP_DATA_DIR else Path.home()
-            )
-        except Exception:
-            default_allowed = Path.home()
-
-        # Allow both configured path and /tmp (for testing)
-        allowed_bases = [
-            Path(os.environ.get("MCP_ALLOWED_ROOT", str(default_allowed))).resolve(),
-            Path("/tmp").resolve(),
-        ]
-
-        # Containment check - path must be under at least one allowed base
-        is_allowed = False
-        for allowed_base in allowed_bases:
-            try:
-                resolved_root.relative_to(allowed_base)
-                is_allowed = True
-                break
-            except ValueError:
-                continue
-
-        if not is_allowed:
-            raise ValueError(
-                f"Security Violation: Cannot mount path {resolved_root} "
-                f"outside of allowed bases. "
-                f"Set MCP_ALLOWED_ROOT environment variable to change this."
-            )
-
-        logger.info(f"[SECURITY] Validated mount path: {resolved_root}")
-        return resolved_root
-
     def get_session_by_pid(self, pid: int) -> Optional[str]:
         """
         [UI TOOL] Find notebook path associated with a specific kernel PID.
@@ -823,7 +750,6 @@ class SessionManager:
         self,
         nb_path: str,
         venv_path: Optional[str] = None,
-        docker_image: Optional[str] = None,
         timeout: Optional[int] = None,
         agent_id: Optional[str] = None,
     ):
@@ -836,7 +762,6 @@ class SessionManager:
         Args:
             nb_path: Path to the notebook file
             venv_path: Optional path to Python environment (venv/conda)
-            docker_image: Optional docker image to run kernel safely inside
             timeout: Execution timeout in seconds (default: 300)
             agent_id: Optional agent ID for workspace isolation
         """
@@ -847,7 +772,6 @@ class SessionManager:
         execution_timeout = (
             timeout if timeout is not None else self.default_execution_timeout
         )
-        container_name = None
 
         # Check for Dill (UX Fix)
         if not dill:
@@ -863,8 +787,6 @@ class SessionManager:
 
         # Start kernel with retries to mitigate transient port-binding failures
         last_error = None
-        # Ensure scoped_workdir is defined for non-docker kernels to avoid UnboundLocalError
-        scoped_workdir = None
         for attempt in range(3):
             try:
                 # [PHASE 2.1] Delegate kernel startup to KernelLifecycle
@@ -872,7 +794,6 @@ class SessionManager:
                     kernel_id=abs_path,
                     notebook_dir=notebook_dir,
                     venv_path=venv_path,
-                    docker_image=docker_image,
                     agent_id=agent_id,
                 )
 
@@ -914,196 +835,27 @@ class SessionManager:
                 f"Kernel failed to become ready after retries: {last_error}"
             )
 
-        if docker_image:
-            # [PHASE 4: Docker Support]
-            # Strategy: Use docker run to launch the kernel
-            # We must mount:
-            # 1. The workspace (so imports work)
-            # 2. The connection file (so we can talk to it)
+        # Local environment configuration
+        py_exe = sys.executable
+        env_name = "system"
+        kernel_env = os.environ.copy()  # Default: inherit current environment
 
-            # [FINAL PUNCH LIST #1] Inject unique UUID for 100% reliable reaping
-            kernel_uuid = str(uuid.uuid4())
-            container_name = f"mcp-kernel-{kernel_uuid}"
-            logger.info(f"[KERNEL] Assigning UUID (Docker): {kernel_uuid}")
+        # [FINAL PUNCH LIST #1] Inject unique UUID for 100% reliable reaping
+        kernel_uuid = str(uuid.uuid4())
+        kernel_env["MCP_KERNEL_ID"] = kernel_uuid
+        logger.info(f"[KERNEL] Assigning UUID: {kernel_uuid}")
 
-            # Locate workspace root for proper relative imports
-            project_root = utils.get_project_root(Path(notebook_dir))
-
-            # [FIX #5] Validate mount path to prevent path traversal
-            project_root = self._validate_mount_path(project_root)
-
-            # Pre-flight scan for obviously sensitive files (e.g., .env, .ssh)
-            try:
-                from src.docker_security import validate_mount_source
-
-                validate_mount_source(project_root)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Mount source validation failed for {project_root}: {e}"
-                )
-
-            str(project_root)
-
-            # [DAY 3 - SCOPED MOUNTS] Create a temporary scoped workspace that only
-            # contains the notebook file and an optional 'data/' folder. This reduces
-            # blast radius when mounting into containers.
-            import tempfile
+        # Resource limits: on POSIX, prefer to use `prlimit` if available to bound address space
+        try:
             import shutil
 
-            scoped_workdir = None
-            try:
-                # [FIX: DOCKER MOUNT ERRORS]
-                # Create a temporary scoped workspace INSIDE project root (not /tmp)
-                # This avoids Docker Desktop permission errors on mounted volumes
-                import tempfile
-                import shutil
-
-                # [DAY 3 OPT 3.1] Define sensitive file filter
-                def sensitive_file_filter(src, names):
-                    """Filter function to exclude sensitive files during copytree."""
-                    ignored = []
-                    for name in names:
-                        # Block hidden files (except .gitignore), env files, key files, node_modules, __pycache__
-                        if (name.startswith('.') and name != '.gitignore') or \
-                           name.endswith('.env') or \
-                           'credentials' in name.lower() or \
-                           'secret' in name.lower() or \
-                           'api_key' in name.lower() or \
-                           'token' in name.lower() or \
-                           'password' in name.lower() or \
-                           name in ('node_modules', '__pycache__', '.git', '.venv', 'venv'):
-                            ignored.append(name)
-                    return ignored
-
-                # 1. Create .mcp_workspaces inside the project root
-                # This directory is likely already allowed in Docker File Sharing settings
-                workspaces_root = Path(project_root) / ".mcp_workspaces"
-                try:
-                    workspaces_root.mkdir(exist_ok=True)
-                except (PermissionError, OSError):
-                    # [FINAL FIX: READ-ONLY FALLBACK] Project root is read-only
-                    # Fall back to system temp directory
-                    logger.warning(f"[FS PERMISSION] Project root {project_root} is read-only. Using system temp.")
-                    workspaces_root = Path(tempfile.gettempdir()) / "mcp_workspaces_fallback"
-                    workspaces_root.mkdir(exist_ok=True)
-                
-                # 2. Add gitignore to prevent pollution
-                gitignore = workspaces_root / ".gitignore"
-                if not gitignore.exists():
-                    gitignore.write_text("*\n")
-
-                # 3. Create temp dir INSIDE .mcp_workspaces
-                tmpdir = Path(tempfile.mkdtemp(prefix=f"session_{kernel_uuid}_", dir=str(workspaces_root)))
-                
-                # Copy only the notebook file
-                nb_src = Path(nb_path)
-                nb_dest = tmpdir / nb_src.name
-                shutil.copy2(nb_src, nb_dest)
-
-                # Copy data/ folder if exists, applying sensitive file filter
-                data_src = Path(project_root) / "data"
-                if data_src.exists() and data_src.is_dir():
-                    shutil.copytree(
-                        data_src, 
-                        tmpdir / "data",
-                        ignore=sensitive_file_filter,  # Apply security filter
-                        dirs_exist_ok=True
-                    )
-
-                # Ensure assets directory exists
-                (tmpdir / "assets").mkdir(exist_ok=True)
-
-                scoped_workdir = tmpdir
-                # Override root for Docker mount
-                project_root = scoped_workdir
-                logger.info(f"[SCOPED MOUNTS] Created local workspace: {scoped_workdir}")
-            except Exception as e:
-                logger.warning(f"Failed to create local scoped workspace: {e}. Falling back to full mount.")
-
-            # [SECURITY] Implement "Sandbox Subdirectory" pattern
-            # Mount source code read-only, but provide a read-write sandbox for outputs.
-            sandbox_dir = project_root / ".mcp_sandbox"
-            sandbox_dir.mkdir(exist_ok=True)
-
-            # Calculate CWD inside container, which is now the sandbox
-            container_cwd = "/workspace/sandbox"
-
-            # Construct Docker Command
-            uid_args = ["-u", str(os.getuid())] if os.name != "nt" else ["-u", "1000"]
-            cmd = (
-                [
-                    "docker",
-                    "run",
-                    "--rm",  # Cleanup container on exit
-                    f"--name={container_name}",  # Explicit name for reaper
-                    "-i",  # Interactive (keeps stdin open)
-                    "--init",  # Ensure PID 1 forwards signals to children
-                    "--network",
-                    "none",  # [SECURITY] Disable networking
-                    "--security-opt",
-                    "no-new-privileges",
-                    "--read-only",
-                    "--tmpfs",
-                    "/tmp:rw,noexec,nosuid,size=1g",
-                    # Mount source code read-only for reference
-                    "-v",
-                    f"{project_root}:/workspace/source:ro",
-                    # Mount sandbox read-write for assets/outputs
-                    "-v",
-                    f"{sandbox_dir}:/workspace/sandbox:rw",
-                    "-v",
-                    "{connection_file}:/kernel.json:ro",
-                    "-w",
-                    container_cwd,  # CWD is the sandbox
-                ]
-                + uid_args
-                + [
-                    docker_image,
-                    "python",
-                    "-m",
-                    "ipykernel_launcher",
-                    "-f",
-                    "/kernel.json",
-                ]
+            prlimit_prefix = (
+                ["prlimit", "--as=4294967296"]
+                if (os.name != "nt" and shutil.which("prlimit"))
+                else []
             )
-
-            # Resource limit for Docker: cap memory to 4GB to avoid noisy neighbor OOMs
-            cmd.insert(2, "--memory")
-            cmd.insert(3, "4g")
-
-            km.kernel_cmd = cmd
-            logger.info(f"Configured Docker kernel: {cmd}")
-
-            # We explicitly do NOT activate local envs if using Docker
-            # Docker image is the environment
-            kernel_env = {}
-
-            # Set metadata for session tracking
-            py_exe = "python"  # Inside container
-            env_name = f"docker:{docker_image}"
-
-        else:
-            # 1. Handle Environment (Local)
-            py_exe = sys.executable
-            env_name = "system"
-            kernel_env = os.environ.copy()  # Default: inherit current environment
-
-            # [FINAL PUNCH LIST #1] Inject unique UUID for 100% reliable reaping
-            kernel_uuid = str(uuid.uuid4())
-            kernel_env["MCP_KERNEL_ID"] = kernel_uuid
-            logger.info(f"[KERNEL] Assigning UUID: {kernel_uuid}")
-
-            # Resource limits: on POSIX, prefer to use `prlimit` if available to bound address space
-            try:
-                import shutil
-
-                prlimit_prefix = (
-                    ["prlimit", "--as=4294967296"]
-                    if (os.name != "nt" and shutil.which("prlimit"))
-                    else []
-                )
-            except Exception:
-                prlimit_prefix = []
+        except Exception:
+            prlimit_prefix = []
 
             if venv_path:
                 venv_path_obj = Path(venv_path).resolve()
@@ -1221,12 +973,10 @@ class SessionManager:
             "stop_on_error": False,
             "execution_timeout": execution_timeout,
             "start_time": time.time(),
-            "scoped_workdir": str(scoped_workdir) if scoped_workdir else None,
             "env_info": {
                 "python_path": py_exe,
                 "env_name": env_name,
                 "start_time": datetime.datetime.now().isoformat(),
-                "container_name": container_name,
             },
         }
 
@@ -1973,17 +1723,6 @@ print(_inspect_var())
         await self.kernel_lifecycle.stop_kernel(abs_path)
 
         # Remove from sessions and clean up state
-        # Remove scoped workspace if created for Docker isolation
-        scoped_dir = session.get("scoped_workdir")
-        if scoped_dir:
-            try:
-                import shutil
-
-                shutil.rmtree(scoped_dir)
-                logger.info(f"[SCOPED MOUNTS] Removed scoped workspace: {scoped_dir}")
-            except Exception as e:
-                logger.warning(f"Failed to remove scoped workspace {scoped_dir}: {e}")
-
         del self.sessions[abs_path]
         self.state_manager.remove_session(abs_path)
 
