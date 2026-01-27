@@ -23,3 +23,8 @@ def get_logger(name: str = __name__):
 def get_tracer(name: str = "mcp.tracer"):
     """No-op tracer for compatibility."""
     return None
+
+
+def generate_request_id():
+    """Generate a unique request ID."""
+    return str(uuid.uuid4())

@@ -2,13 +2,13 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
-import { McpClient } from './mcpClient';
+import { MCPClient } from './mcpClient';
 import { VariableDashboardProvider } from './variableDashboard';
 import { ExecutionStatus, NotebookOutput } from './types';
 
 export class McpNotebookController {
   private controller: vscode.NotebookController;
-  private mcpClient: McpClient;
+  private mcpClient: MCPClient;
   private variableDashboard?: VariableDashboardProvider;
   private executionQueue = new Map<string, vscode.NotebookCellExecution>();
   private activeTaskIds = new Map<string, string>(); // execution key -> MCP task ID
@@ -16,13 +16,14 @@ export class McpNotebookController {
   private kernelStartPromises = new Map<string, Promise<void>>(); // track in-progress kernel starts
   private completionResolvers = new Map<string, (success: boolean) => void>();
   private activeExecutions = new Map<string, vscode.NotebookCellExecution>(); // taskId -> execution
+  private kernelMsgIdToExecution = new Map<string, vscode.NotebookCellExecution>(); // kernel msg_id -> execution
   private statusBar: vscode.StatusBarItem;
   private currentEnvironment?: { name: string; path: string; type: 'venv' | 'conda' | 'global' };
 
   // [WEEK 1] Track completed cells per notebook for state persistence
   private completedCells = new Map<string, Set<string>>();
 
-  constructor(mcpClient: McpClient) {
+  constructor(mcpClient: MCPClient) {
     this.mcpClient = mcpClient;
 
     // Subscribe to MCP notifications (Event-Driven Architecture)
@@ -61,7 +62,31 @@ export class McpNotebookController {
    * Handle incoming MCP notifications
    */
   private async handleNotification(event: { method: string, params: any }): Promise<void> {
-    if (event.method === 'notebook/output') {
+    // 1. Handle Execution Started (Bind the IDs)
+    if (event.method === 'notebook/cell_execution_started') {
+      const { exec_id, kernel_msg_id } = event.params;
+      const execution = this.activeExecutions.get(exec_id);
+      if (execution) {
+        // Map the Kernel's ID to our Active Execution
+        this.kernelMsgIdToExecution.set(kernel_msg_id, execution);
+      }
+    }
+
+    // 2. Handle Raw IOPub Messages (The New Protocol)
+    else if (event.method === 'notebook/iopub_message') {
+      const params = event.params;
+      const msgId = params.parent_header?.msg_id;
+
+      // Lookup the execution using the Kernel ID we bound earlier
+      const execution = this.kernelMsgIdToExecution.get(msgId);
+
+      if (execution) {
+        await this.processIOPubMessage(execution, params);
+      }
+    }
+
+    // Legacy handling for backward compatibility
+    else if (event.method === 'notebook/output') {
       const { exec_id, type, content } = event.params;
       const execution = this.activeExecutions.get(exec_id);
 
@@ -173,6 +198,63 @@ export class McpNotebookController {
           console.error('Failed to reconcile executions on reconnect:', e);
         }
       }
+    }
+  }
+
+  /**
+   * New Helper: Parse Raw Jupyter Messages -> VS Code Outputs
+   */
+  private async processIOPubMessage(execution: vscode.NotebookCellExecution, msg: any) {
+    const content = msg.content;
+
+    try {
+      switch (msg.msg_type) {
+        case 'stream':
+          await execution.appendOutput(new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.text(content.text, 'text/plain') // Handle stdout/stderr
+          ]));
+          break;
+
+        case 'display_data':
+        case 'execute_result':
+          const items: vscode.NotebookCellOutputItem[] = [];
+          // Convert Jupyter mime bundle to VS Code Items
+          for (const [mime, data] of Object.entries(content.data || {})) {
+            if (typeof data === 'string') {
+              // Handle Base64 images vs Plain Text
+              if (mime.startsWith('image/')) {
+                items.push(new vscode.NotebookCellOutputItem(Buffer.from(data, 'base64'), mime));
+              } else {
+                items.push(vscode.NotebookCellOutputItem.text(data, mime));
+              }
+            } else {
+              // JSON objects
+              items.push(vscode.NotebookCellOutputItem.json(data, mime));
+            }
+          }
+          await execution.appendOutput(new vscode.NotebookCellOutput(items, content.metadata || {}));
+          break;
+
+        case 'error':
+          await execution.appendOutput(new vscode.NotebookCellOutput([
+            vscode.NotebookCellOutputItem.error({
+              name: content.ename,
+              message: content.evalue,
+              stack: content.traceback?.join('\n') || ''
+            })
+          ]));
+          break;
+
+        case 'status':
+          if (content.execution_state === 'idle') {
+            // Cleanup
+            execution.end(true, Date.now());
+            this.kernelMsgIdToExecution.delete(msg.parent_header?.msg_id);
+          }
+          break;
+      }
+    } catch (e) {
+      console.error("Failed to process IOPub message", e);
     }
   }
 

@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { McpClient } from './mcpClient';
+import { MCPClient } from './mcpClient';
 
 /**
  * Week 4: Real-Time Execution View
@@ -38,7 +38,7 @@ export class ExecutionViewProvider implements vscode.TreeDataProvider<ExecutionT
   private completedExecutions: ActiveExecution[] = [];
   private updateInterval: NodeJS.Timeout | undefined;
 
-  constructor(private mcpClient: McpClient) {
+  constructor(private mcpClient: MCPClient) {
     // Subscribe to notebook status notifications
     mcpClient.onNotification(notification => {
       if (notification.method === 'notebook/status') {

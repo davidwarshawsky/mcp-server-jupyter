@@ -565,3 +565,19 @@ class SwitchKernelEnvironmentArgs(SecureBaseModel):
         if not v:
             raise ValueError("Notebook path cannot be empty")
         return v
+
+
+
+class GetTrainingTemplateArgs(SecureBaseModel):
+    """Arguments for get_training_template tool."""
+
+    library: str = Field(..., description="ML library (pytorch, tensorflow)")
+
+    @field_validator("library")
+    @classmethod
+    def validate_library(cls, v):
+        """Validate library name."""
+        valid = ["pytorch", "tensorflow"]
+        if v.lower() not in valid:
+            raise ValueError(f"Library must be one of: {valid}")
+        return v

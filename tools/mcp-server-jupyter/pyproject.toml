@@ -28,7 +28,7 @@ duckdb = ">=1.0.0"
 pandas = ">=2.2.0"
 numpy = ">=1.26.0"
 # Runtime dependencies for session persistence and runtime helpers
-dill = ">=0.3.6"
+# dill = ">=0.3.6"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.2.0"

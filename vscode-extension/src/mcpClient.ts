@@ -1,206 +1,205 @@
 import * as vscode from 'vscode';
-import { WebSocket } from 'ws';
-import { MCPKernel } from './mcpKernel';
+import { spawn } from 'child_process';
 
 // Define specific types for server communication
 interface MCPResponse {
-    request_id: string;
-    type: string;
-    message?: string;
-    data?: unknown;
+    jsonrpc: string;
+    id?: number | string;
+    result?: any;
+    error?: any;
+    method?: string;
+    params?: any;
 }
 
-interface ExecuteCodeRequest {
-    type: 'execute_code';
-    code: string;
-    cell_id: string;
-    request_id?: string;
+interface MCPRequest {
+    jsonrpc: string;
+    id: number | string;
+    method: string;
+    params?: any;
 }
-
-interface HandoffRequest {
-    type: 'request_handoff' | 'release_handoff';
-    request_id?: string;
-}
-
-interface DuckDBQueryRequest {
-    type: 'execute_duckdb_query';
-    query: string;
-    params: unknown[];
-    request_id?: string;
-}
-
-type MCPRequest = ExecuteCodeRequest | HandoffRequest | DuckDBQueryRequest;
 
 export class MCPClient {
-    private ws: WebSocket | null = null;
+    private process: any = null;
     private session_id: string;
-    private kernel: MCPKernel;
-    private requestQueue: Map<string, (response: MCPResponse) => void> = new Map();
+    private requestQueue = new Map<string | number, (response: MCPResponse) => void>();
     private static client: MCPClient | null = null;
     private outputChannel: vscode.OutputChannel;
     private status: 'stopped' | 'starting' | 'running' = 'stopped';
     private connectionState: 'disconnected' | 'connecting' | 'connected' = 'disconnected';
+    private notificationHandlers: ((event: { method: string, params: any }) => void)[] = [];
 
-    private constructor(serverUri: string, sessionId: string, kernel: MCPKernel) {
+    private constructor(pythonPath: string, sessionId: string) {
         this.session_id = sessionId;
-        this.kernel = kernel;
         this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter');
-        this.ws = new WebSocket(`${serverUri}/ws/${this.session_id}`);
 
-        this.ws.on('open', () => {
-            console.log('Connected to MCP server');
-            this.connectionState = 'connected';
-            this.status = 'running';
+        // Spawn the MCP server process
+        this.process = spawn(pythonPath, ['-m', 'mcp_server_jupyter'], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            env: { ...process.env, MCP_SESSION_ID: sessionId }
         });
 
-        this.ws.on('message', (data: Buffer | string) => {
-            const response: MCPResponse = JSON.parse(data.toString());
-            const { request_id } = response;
-
-            if (this.requestQueue.has(request_id)) {
-                const callback = this.requestQueue.get(request_id);
-                if (callback) {
-                    callback(response);
+        this.process.stdout.on('data', (data: Buffer) => {
+            const lines = data.toString().split('\n');
+            for (const line of lines) {
+                if (line.trim()) {
+                    try {
+                        const response: MCPResponse = JSON.parse(line);
+                        if (response.id && this.requestQueue.has(response.id)) {
+                            const callback = this.requestQueue.get(response.id)!;
+                            callback(response);
+                            this.requestQueue.delete(response.id);
+                        } else if (response.method && response.params) {
+                            // Notification
+                            this.notificationHandlers.forEach(handler => 
+                                handler({ method: response.method!, params: response.params })
+                            );
+                        }
+                    } catch (e) {
+                        console.error('Failed to parse MCP response:', e);
+                    }
                 }
-                this.requestQueue.delete(request_id);
             }
         });
 
-        this.ws.on('close', () => {
-            console.log('Disconnected from MCP server');
-            this.connectionState = 'disconnected';
-            this.status = 'stopped';
-            MCPClient.client = null; // Allow re-creation
+        this.process.stderr.on('data', (data: Buffer) => {
+            this.outputChannel.appendLine(data.toString());
         });
 
-        this.ws.on('error', (error: Error) => {
-            console.error('WebSocket error:', error);
-            this.outputChannel.appendLine(`WebSocket Error: ${error.message}`);
-            vscode.window.showErrorMessage(`MCP Server Error: ${error.message}`, 'Show Logs').then(choice => {
-                if (choice === 'Show Logs') {
-                    this.outputChannel.show();
-                }
-            });
+        this.process.on('close', (code: number) => {
+            console.log('MCP server process closed with code:', code);
             this.connectionState = 'disconnected';
             this.status = 'stopped';
-            MCPClient.client = null; // Allow re-creation
+            MCPClient.client = null;
         });
+
+        this.connectionState = 'connected';
+        this.status = 'running';
     }
 
-    public static getInstance(serverUri: string, sessionId: string, kernel: MCPKernel): MCPClient {
+    public static getInstance(pythonPath: string, sessionId: string): MCPClient {
         if (!MCPClient.client) {
-            MCPClient.client = new MCPClient(serverUri, sessionId, kernel);
+            MCPClient.client = new MCPClient(pythonPath, sessionId);
         }
         return MCPClient.client;
     }
 
-    public start(): Promise<void> {
-        this.status = 'starting';
-        this.connectionState = 'connecting';
-        // The connection is initiated in the constructor, so we just need to wait for it to open.
-        return new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
-                if (this.connectionState !== 'connected') {
-                    reject(new Error('Connection timeout'));
-                }
-            }, 10000);
+    public onNotification(handler: (event: { method: string, params: any }) => void): void {
+        this.notificationHandlers.push(handler);
+    }
 
-            this.ws.on('open', () => {
-                clearTimeout(timeout);
-                resolve();
-            });
+    private sendRequest(request: MCPRequest): Promise<MCPResponse> {
+        return new Promise((resolve, reject) => {
+            const requestJson = JSON.stringify(request) + '\n';
+            this.process.stdin.write(requestJson);
+            this.requestQueue.set(request.id, resolve);
+            
+            // Timeout
+            setTimeout(() => {
+                this.requestQueue.delete(request.id);
+                reject(new Error('Request timeout'));
+            }, 30000);
         });
+    }
+
+    public async runCellAsync(notebookPath: string, index: number, code: string, taskId: string): Promise<string> {
+        const response = await this.sendRequest({
+            jsonrpc: '2.0',
+            id: taskId,
+            method: 'tools/call',
+            params: {
+                name: 'run_cell_async',
+                arguments: {
+                    notebook_path: notebookPath,
+                    cell_index: index,
+                    code: code,
+                    exec_id: taskId
+                }
+            }
+        });
+        
+        // The server tool returns the kernel_msg_id
+        return response.result?.content?.[0]?.text || response.result;
+    }
+
+    public close(): void {
+        if (this.process) {
+            this.process.kill();
+        }
+    }
+
+    // Stub methods for compatibility - these will be replaced with proper MCP tool calls
+    public async startKernel(notebookPath: string, venvPath?: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async stopKernel(notebookPath: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async cancelExecution(notebookPath: string, taskId?: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async submitInput(notebookPath: string, input: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async callTool(name: string, args: any): Promise<any> {
+        const response = await this.sendRequest({
+            jsonrpc: '2.0',
+            id: `tool_${Date.now()}`,
+            method: 'tools/call',
+            params: {
+                name: name,
+                arguments: args
+            }
+        });
+        return response.result;
     }
 
     public getStatus(): 'stopped' | 'starting' | 'running' {
         return this.status;
     }
 
-    public getConnectionState(): 'disconnected' | 'connecting' | 'connected' {
-        return this.connectionState;
+    public async checkKernelResources(notebookPath: string): Promise<any> {
+        // TODO: Implement via MCP tool call
+        return {};
     }
 
-    public getOutputChannel(): vscode.OutputChannel {
-        return this.outputChannel;
-    }
-
-    public listEnvironments(): Promise<any[]> {
-        // This is a placeholder. A real implementation would send a request to the server.
-        return Promise.resolve(["Python 3.8", "Python 3.9"]);
-    }
-
-    private generateRequestId(): string {
-        return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-    }
-
-    private sendRequest(payload: MCPRequest): Promise<MCPResponse> {
-        return new Promise((resolve, reject) => {
-            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-                return reject(new Error('WebSocket is not connected.'));
-            }
-
-            const request_id = this.generateRequestId();
-            payload.request_id = request_id;
-
-            this.requestQueue.set(request_id, (response) => {
-                if (response.type === 'error') {
-                    reject(new Error(response.message));
-                } else {
-                    resolve(response);
-                }
-            });
-
-            this.ws.send(JSON.stringify(payload));
-
-            setTimeout(() => {
-                if (this.requestQueue.has(request_id)) {
-                    this.requestQueue.delete(request_id);
-                    reject(new Error('Request timed out'));
-                }
-            }, 30000); // 30-second timeout
-        });
-    }
-
-    public async executeCode(code: string, cellId: string): Promise<unknown> {
-        const response = await this.sendRequest({
-            type: 'execute_code',
-            code,
-            cell_id: cellId
-        });
-        return response.data;
-    }
-
-    public async requestHandoff(): Promise<boolean> {
-        const response = await this.sendRequest({ type: 'request_handoff' });
-        if (response.type === 'handoff_granted') {
-            this.kernel.isPrimary = true;
-            return true;
-        }
+    public async isKernelBusy(notebookPath: string): Promise<boolean> {
+        // TODO: Implement via MCP tool call
         return false;
     }
 
-    public async releaseHandoff(): Promise<boolean> {
-        const response = await this.sendRequest({ type: 'release_handoff' });
-        if (response.type === 'handoff_released') {
-            this.kernel.isPrimary = false;
-            return true;
-        }
-        return false;
+    public async getVariableManifest(notebookPath: string): Promise<any> {
+        // TODO: Implement via MCP tool call
+        return {};
     }
 
-    public async executeDuckDBQuery(query: string, params?: unknown[]): Promise<unknown> {
-        const response = await this.sendRequest({
-            type: 'execute_duckdb_query',
-            query: query,
-            params: params || []
-        });
-
-        return response.data;
+    public async persistExecutionState(notebookPath: string, cellIds: string[]): Promise<void> {
+        // TODO: Implement via MCP tool call
     }
 
-    public close(): void {
-        if (this.ws) {
-            this.ws.close();
-        }
+    public async restoreExecutionState(): Promise<any> {
+        // TODO: Implement via MCP tool call
+        return {};
+    }
+
+    public async detectSyncNeeded(notebookPath: string): Promise<any> {
+        // TODO: Implement via MCP tool call
+        return {};
+    }
+
+    public async syncStateFromDisk(notebookPath: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async reconcileExecutions(ids: string[], notebookPath: string): Promise<void> {
+        // TODO: Implement via MCP tool call
+    }
+
+    public async getAssetContent(assetPath: string): Promise<any> {
+        // TODO: Implement via MCP tool call
+        return {};
     }
 }

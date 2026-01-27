@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import { McpClient } from './mcpClient';
+import { MCPClient } from './mcpClient';
 
 interface VariableInfo {
   name: string;
@@ -23,7 +23,7 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
   // [STATE CONTAMINATION] Status bar item for CWD warnings
   private cwdStatusBarItem: vscode.StatusBarItem | undefined;
 
-  constructor(private mcpClient: McpClient) { }
+  constructor(private mcpClient: MCPClient) { }
 
   /**
    * Start polling for variables when kernel is idle

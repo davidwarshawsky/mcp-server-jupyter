@@ -359,12 +359,4 @@ def get_startup_code() -> str:
     Following the "Don't Touch My Bootloader" philosophy, we only inject
     essential autoreload functionality and nothing else.
     """
-    return """
-# Minimal startup: Only autoreload for development convenience
-try:
-    from IPython import get_ipython
-    get_ipython().run_line_magic('load_ext', 'autoreload')
-    get_ipython().run_line_magic('autoreload', '2')
-except Exception:
-    pass
-"""
+    return ""

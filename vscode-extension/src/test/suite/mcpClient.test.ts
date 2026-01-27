@@ -2,10 +2,10 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import * as sinon from 'sinon';
 import WebSocket, { WebSocketServer } from 'ws';
-import { McpClient } from '../../mcpClient';
+import { MCPClient } from '../../mcpClient';
 
 suite('McpClient Test Suite', () => {
-    let client: McpClient;
+    let client: MCPClient;
     let outputChannelStub: any;
 
     setup(() => {
@@ -24,7 +24,7 @@ suite('McpClient Test Suite', () => {
         // Stub window.createOutputChannel
         sinon.stub(vscode.window, 'createOutputChannel').returns(outputChannelStub);
         
-        client = new McpClient();
+        client = new MCPClient();
     });
 
     teardown(() => {

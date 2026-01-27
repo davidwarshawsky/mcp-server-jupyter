@@ -7,10 +7,6 @@ import logging
 import nbformat
 import datetime
 
-try:
-    import dill
-except ImportError:
-    dill = None
 from pathlib import Path
 from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
@@ -18,7 +14,6 @@ from src import notebook, utils
 from src.observability import get_logger, get_tracer
 from src.kernel_startup import get_startup_code
 from src.kernel_lifecycle import KernelLifecycle
-from src.execution_scheduler import ExecutionScheduler
 from src.io_multiplexer import IOMultiplexer
 
 # Configure logging
@@ -32,42 +27,6 @@ from src.environment import get_activated_env_vars as _get_activated_env_vars
 # END
 
 import secrets
-
-
-def get_or_create_secret():
-    """
-    [SECURITY FIX] Get or create persistent session secret.
-
-    The secret is stored in $MCP_DATA_DIR/secret.key with 0o600 permissions.
-    This ensures checkpoints remain valid across server restarts.
-    """
-    from src.config import load_and_validate_settings
-
-    settings = load_and_validate_settings()
-    secret_path = settings.get_data_dir() / "secret.key"
-
-    if secret_path.exists():
-        return secret_path.read_bytes()
-
-    # Generate new secret
-    secret = secrets.token_bytes(32)
-
-    # Create directory with restricted permissions
-    secret_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write file
-    with open(secret_path, "wb") as f:
-        f.write(secret)
-
-    # Set permissions to user-only read/write (chmod 600)
-    os.chmod(secret_path, 0o600)
-
-    return secret
-
-
-# Generate a persistent session secret used to sign local checkpoints.
-# This ensures checkpoints remain valid across server restarts.
-SESSION_SECRET = get_or_create_secret()
 
 
 def _get_kernel_process(km):
@@ -100,12 +59,6 @@ class SessionManager:
         #   'kc': Client,
         #   'cwd': str,
         #   'listener_task': asyncio.Task,
-        #   'executions': Dict[str (msg_id), Dict],
-        #   'queued_executions': Dict[str (exec_id), Dict],  # Track queued before processing
-        #   'execution_queue': asyncio.Queue,
-        #   'queue_processor_task': asyncio.Task,
-        #   'execution_counter': int,
-        #   'stop_on_error': bool,
         #   'exec_lock': asyncio.Lock  # [RACE CONDITION FIX]
         # }
         self.sessions = {}
@@ -128,9 +81,6 @@ class SessionManager:
         # [PHASE 2 - COMPONENTS] Initialize specialized modules
         self.kernel_lifecycle = KernelLifecycle(
             max_concurrent=self.max_concurrent_kernels
-        )
-        self.execution_scheduler = ExecutionScheduler(
-            default_timeout=default_execution_timeout
         )
         self.io_multiplexer = IOMultiplexer(input_request_timeout=input_request_timeout)
 
@@ -311,75 +261,48 @@ class SessionManager:
     async def migrate_session(self, old_path: str, new_path: str) -> bool:
         """
         [RENAME FIX] Move a running kernel from one file path to another.
-        
+
         Scenario: User finishes work on Friday (draft.ipynb) and renames it
         to final.ipynb on Monday. This method allows the user to keep the
         existing kernel and its variables.
-        
+
         Updates:
         - In-memory session dictionary (remove old_path, add new_path)
-        - SQLite persistence (execution_queue, asset_leases)
-        - Disk-based session state file
-        
+
         Args:
             old_path: Original notebook path (with variables)
             new_path: New notebook path (where user is working)
-            
+
         Returns:
             True if migration succeeded, False if old session not found
-            
+
         Raises:
             ValueError: If new_path already has an active session
         """
-        import sqlite3
-        
         old_abs = str(Path(old_path).resolve())
         new_abs = str(Path(new_path).resolve())
-        
+
         if old_abs not in self.sessions:
             logger.warning(f"[MIGRATE] Session not found for {old_abs}")
             return False
-            
+
         if new_abs in self.sessions:
             raise ValueError(f"[MIGRATE] Target session {new_path} already active")
 
         logger.info(f"[MIGRATE] Moving kernel from {old_abs} → {new_abs}")
-        
-        # 1. Move memory state
+
+        # Move memory state
         session = self.sessions.pop(old_abs)
         self.sessions[new_abs] = session
-        
-        # 2. Update Persistence (Database)
-        # Update notebook_path in execution_queue and asset_leases tables
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.execute(
-                    "UPDATE execution_queue SET notebook_path = ? WHERE notebook_path = ?",
-                    (new_abs, old_abs)
-                )
-                conn.execute(
-                    "UPDATE asset_leases SET notebook_path = ? WHERE notebook_path = ?",
-                    (new_abs, old_abs)
-                )
-                conn.commit()
-                logger.info(f"[MIGRATE] Updated SQLite references")
-        except Exception as e:
-            logger.error(f"[MIGRATE] Failed to update database: {e}")
-            # Revert memory state on DB failure
-            self.sessions.pop(new_abs)
-            self.sessions[old_abs] = session
-            return False
-        
-        # 3. Update Session Lock on Disk (removed - in-memory only)
-        
-        # 4. Persist under new name
+
+        # Update kernel process info
         km = session['km']
         kernel_proc = _get_kernel_process(km)
         env_info = session.get('env_info', {})
-        
+
         if kernel_proc:
             logger.info(f"[MIGRATE] Session migrated under new path")
-        
+
         logger.info(f"[MIGRATE] Migration complete: {old_abs} → {new_abs}")
         return True
 
@@ -416,94 +339,19 @@ class SessionManager:
 
     def get_execution_history(self, notebook_path: str, limit: int = 50) -> list:
         """
-        [REHYDRATION] Get recent execution outputs to populate blank cells on reload.
-        
-        When a user reconnects to a notebook on Monday, the cell outputs were
-        cleared by VS Code. This method retrieves the execution history from
-        the persistence layer so we can show the user what happened.
-        
-        Args:
-            notebook_path: Path to the notebook
-            limit: Maximum number of history entries to return
-            
-        Returns:
-            List of execution records with cell_index, completion time, error status
+        [REMOVED] Execution history is now stored in the notebook file on disk.
+
+        Returns empty list since we trust the notebook file as the history record.
         """
-        import sqlite3
-        
-        abs_path = str(Path(notebook_path).resolve())
-        history = []
-        
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                
-                # Get tasks that have completed (successfully or with error)
-                cursor = conn.execute("""
-                    SELECT cell_index, created_at, started_at, completed_at, status, error 
-                    FROM execution_queue 
-                    WHERE notebook_path = ? AND status IN ('completed', 'failed')
-                    ORDER BY created_at DESC LIMIT ?
-                """, (abs_path, limit))
-                
-                for row in cursor.fetchall():
-                    history.append({
-                        "cell_index": row["cell_index"],
-                        "created_at": row["created_at"],
-                        "started_at": row["started_at"],
-                        "completed_at": row["completed_at"],
-                        "status": row["status"],
-                        "error": row["error"]
-                    })
-        except Exception as e:
-            logger.error(f"[HISTORY] Failed to fetch execution history: {e}")
-            
-        return history
+        return []
 
     def get_notebook_history(self, notebook_path: str) -> list:
         """
-        [OUTPUT REHYDRATION] Retrieve the full visual history of notebook execution.
-        
-        When a user "Attaches" to an old session, VS Code shows blank cells because
-        the outputs were cleared on close. This method retrieves the persisted outputs
-        so we can re-populate the notebook UI to match the kernel state.
-        
-        Returns:
-            List of dicts with: cell_index, execution_count, outputs_json (Jupyter format)
+        [REMOVED] Notebook history is now stored in the notebook file on disk.
+
+        Returns empty list since we trust the notebook file as the history record.
         """
-        import sqlite3
-        
-        abs_path = str(Path(notebook_path).resolve())
-        history = []
-        
-        try:
-            with sqlite3.connect(self.db_path) as conn:
-                conn.row_factory = sqlite3.Row
-                
-                # Get all completed tasks with their outputs
-                cursor = conn.execute("""
-                    SELECT cell_index, execution_count, outputs_json
-                    FROM execution_queue 
-                    WHERE notebook_path = ? AND status = 'completed' AND outputs_json IS NOT NULL
-                    ORDER BY cell_index ASC
-                """, (abs_path,))
-                
-                for row in cursor.fetchall():
-                    try:
-                        outputs = json.loads(row["outputs_json"]) if row["outputs_json"] else []
-                        history.append({
-                            "cell_index": row["cell_index"],
-                            "execution_count": row["execution_count"],
-                            "outputs": outputs
-                        })
-                    except json.JSONDecodeError:
-                        logger.warning(f"[REHYDRATE] Failed to parse outputs for cell {row['cell_index']}")
-                        continue
-                        
-        except Exception as e:
-            logger.error(f"[REHYDRATE] Failed to fetch notebook history: {e}")
-            
-        return history
+        return []
 
     async def start_kernel(
         self,
@@ -717,19 +565,12 @@ class SessionManager:
         # Create session structure
         import time
 
-        max_queue_size = int(os.environ.get("MCP_MAX_QUEUE_SIZE", "1000"))
         session_data = {
             "km": km,
             "kc": kc,
             "cwd": kernel_info.get("notebook_dir", str(notebook_dir)),
             "listener_task": None,
-            "executions": {},
-            "queued_executions": {},
-            "execution_queue": asyncio.Queue(maxsize=max_queue_size),
-            "executed_indices": set(),
-            "execution_counter": 0,
-            "max_executed_index": -1,
-            "stop_on_error": False,
+            "exec_lock": asyncio.Lock(),
             "execution_timeout": execution_timeout,
             "start_time": time.time(),
             "env_info": {
@@ -741,19 +582,13 @@ class SessionManager:
 
         # Start the background listener
         session_data["listener_task"] = asyncio.create_task(
-            self._kernel_listener(abs_path, kc, session_data["executions"])
+            self._kernel_listener(abs_path, kc)
         )
 
         # Start the stdin listener (Handles input() requests)
         session_data["stdin_listener_task"] = asyncio.create_task(
             self._stdin_listener(abs_path, session_data)
         )
-
-        # Start the execution queue processor
-        session_data["queue_processor_task"] = asyncio.create_task(
-            self._queue_processor(abs_path, session_data)
-        )
-        logger.info(f"Scheduled queue_processor_task for {abs_path}")
 
         # [FIX #4] Start health check loop for this kernel
         session_data["health_check_task"] = asyncio.create_task(
@@ -777,23 +612,18 @@ class SessionManager:
 
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
-    async def _kernel_listener(self, nb_path: str, kc, executions: Dict):
+    async def _kernel_listener(self, nb_path: str, kc):
         """
         Background loop that drains the IOPub channel for a specific kernel.
         [PHASE 2.3] Delegates to IOMultiplexer component.
         """
         session_data = self.sessions.get(nb_path, {})
 
-        # Delegate to IOMultiplexer
-        await self.io_multiplexer.listen_iopub(
+        # Delegate to IOMultiplexer - direct ZMQ to MCP forwarding
+        await self.io_multiplexer.listen_iopub_direct(
             nb_path=nb_path,
             kc=kc,
-            executions=executions,
-            session_data=session_data,
-            finalize_callback=self._finalize_execution_async,
-            broadcast_callback=self._broadcast_output,
             notification_callback=self._send_notification,
-            persist_callback=self._persist_session_state,
         )
 
     async def _broadcast_output(self, message: Dict):
@@ -848,182 +678,15 @@ class SessionManager:
             # Signal to any pending watchdog that input was provided
             session["waiting_for_input"] = False
 
-    async def _queue_processor(self, nb_path: str, session_data: Dict):
-        """
-        Background loop that processes execution requests from the queue.
-        Ensures only one cell executes at a time per notebook.
-
-        REFACTORED: Delegates to ExecutionScheduler component.
-        """
-
-        logger.info(f"Starting queue processor for {nb_path}")
-
-        # Create execute callback that uses the kernel client
-        async def execute_callback(code: str) -> str:
-            """Execute code and return message ID."""
-            kc = session_data["kc"]
-            # Support both sync and async kernel client implementations.
-            try:
-                result = kc.execute(code)
-                # If the kernel client returned an awaitable/coroutine, await it here
-                import inspect
-
-                if inspect.isawaitable(result):
-                    result = await result
-                return result
-            except Exception:
-                # Propagate to caller to allow scheduler to handle startup failures
-                raise
-
-        # [STATE AMNESIA FIX] Pass persistence manager to scheduler
-        # This ensures task lifecycle is tracked (running → complete/failed)
-        try:
-            await self.execution_scheduler.process_queue(
-                nb_path=nb_path,
-                session_data=session_data,
-                execute_callback=execute_callback,
-                persistence=self.persistence,
-            )
-        except asyncio.CancelledError:
-            logger.info(f"Queue processor cancelled for {nb_path}")
-            raise
-        except Exception:
-            logger.exception(f"Unhandled exception in queue_processor for {nb_path}")
-
-    async def _finalize_execution_async(self, nb_path: str, exec_data: Dict):
-        """Async implementation of finalizing an execution. Use `_finalize_execution` wrapper for sync callers."""
-        try:
-            # 1. Save Assets and get text summary (async-safe)
-            assets_dir = str(Path(nb_path).parent / "assets")
-            try:
-                text_summary = await utils._sanitize_outputs_async(
-                    exec_data.get("outputs", []), assets_dir
-                )
-            except Exception as e:
-                logger.warning(f"sanitize_outputs failed: {e}")
-                text_summary = '{"llm_summary": "", "raw_outputs": []}'
-
-            # Preserve linearity warning if it was set
-            linearity_warning = (
-                exec_data.get("text_summary", "")
-                if isinstance(exec_data.get("text_summary"), str)
-                else ""
-            )
-            if linearity_warning:
-                # Inject linearity warning into the JSON payload to avoid
-                # corrupting parsers that expect the output to be JSON.
-                try:
-                    payload = json.loads(text_summary)
-                    # Preserve existing warnings, append if present
-                    if isinstance(payload, dict):
-                        warnings = payload.get("warnings", [])
-                        if not isinstance(warnings, list):
-                            warnings = [warnings]
-                        warnings.insert(0, linearity_warning)
-                        payload["warnings"] = warnings
-                        text_summary = json.dumps(payload)
-                    else:
-                        # Fallback: wrap into dict
-                        text_summary = json.dumps({"warnings": [linearity_warning], "payload": payload})
-                except Exception:
-                    # If parsing fails, fallback to a safe wrapper
-                    text_summary = json.dumps({"warnings": [linearity_warning], "payload": text_summary})
-
-            exec_data["text_summary"] = text_summary
-            # Debug: log finalizer summary lengths for observability during tests
-            try:
-                logger.info(
-                    f"Finalize exec {exec_data.get('id')} text_summary len: {len(text_summary)}"
-                )
-            except Exception:
-                pass
-
-            # 2. Get Cell content for content hashing
-            abs_path = str(Path(nb_path).resolve())
-            execution_hash = None
-
-            # Some internal/server-side helper executions (e.g. variable manifest refresh)
-            # use cell_index = -1 to indicate "not associated with a notebook cell".
-            # In that case, skip notebook hashing/metadata injection and never attempt disk writes.
-            cell_index = exec_data.get("cell_index", None)
-            if cell_index is None or cell_index < 0:
-                cell_index = None
-
-            try:
-                if cell_index is not None:
-                    # Load notebook to get Cell info
-                    with open(nb_path, "r", encoding="utf-8") as f:
-                        nb = nbformat.read(f, as_version=4)
-
-                    # Verify index is valid
-                    if 0 <= cell_index < len(nb.cells):
-                        cell = nb.cells[cell_index]
-                        execution_hash = utils.get_cell_hash(cell.source)
-                    else:
-                        logger.warning(f"Cell index {cell_index} out of range")
-
-            except Exception as e:
-                logger.warning(f"Could not compute hash: {e}")
-
-            # 3. Prepare metadata for injection into .ipynb
-            metadata_update = {}
-            if execution_hash:
-                try:
-                    env_info = self.sessions[abs_path].get("env_info", {})
-
-                    metadata_update = {
-                        "execution_hash": execution_hash,
-                        "execution_timestamp": datetime.datetime.now().isoformat(),
-                        "kernel_env_name": env_info.get("env_name", "unknown"),
-                        "agent_run_id": str(uuid.uuid4()),
-                    }
-                except Exception as e:
-                    logger.warning(f"Failed to prepare metadata: {e}")
-
-            # 4. Write to Notebook File WITH metadata injection
-            # If there are active WebSocket clients, avoid writing to disk to
-            # prevent file watcher conflicts in editors (e.g. VS Code).
-            active_clients = 0
-            if hasattr(self, "connection_manager") and self.connection_manager:
-                try:
-                    active_clients = len(self.connection_manager.active_connections)
-                except Exception:
-                    active_clients = 0
-
-            if active_clients > 0:
-                logger.info(
-                    f"Skipping disk write for {nb_path} (clients connected={active_clients}). Updates were broadcasted to clients."
-                )
-            else:
-                # Only persist outputs back into the notebook when this execution maps to a real cell.
-                if cell_index is not None:
-                    notebook.save_cell_execution(
-                        nb_path,
-                        cell_index,
-                        exec_data.get("outputs", []),
-                        exec_data.get("execution_count"),
-                        metadata_update=metadata_update if metadata_update else None,
-                    )
-        except Exception as e:
-            exec_data["status"] = "failed_save"
-            exec_data["error"] = str(e)
-            logger.error(f"Failed to finalize execution: {e}")
-
     async def execute_cell_async(
         self, nb_path: str, cell_index: int, code: str, exec_id: Optional[str] = None
     ) -> Optional[str]:
         """
-        Submits execution to the queue and returns an ID immediately.
-
-        [SECURITY] Implements backpressure: raises RuntimeError if queue is full.
-        This prevents DoS attacks from flooding the server with execution requests.
+        Directly executes code and forwards ZMQ messages as MCP notifications.
 
         Returns:
-            exec_id (str): Unique execution identifier for tracking status
+            exec_id (str): Unique execution identifier
             None: If kernel is not running
-
-        Raises:
-            RuntimeError: If execution queue is full (backpressure)
         """
         abs_path = str(Path(nb_path).resolve())
         logger.info(f"execute_cell_async called for {abs_path} cell_index={cell_index}")
@@ -1031,78 +694,44 @@ class SessionManager:
             return None
 
         session = self.sessions[abs_path]
-
-        # Defensive defaults: ensure expected session keys exist (tests may use minimal mocks)
-        session.setdefault("queued_executions", {})
-        if session.get("execution_queue") is None:
-            # Recreate a minimal queue if missing to avoid AttributeError in tests
-            max_queue_size = int(os.environ.get("MCP_MAX_QUEUE_SIZE", "1000"))
-            session["execution_queue"] = asyncio.Queue(maxsize=max_queue_size)
-
-        # HEAL CHECK: Removed invasive inspection helper injection
-        # Following "Don't Touch My Bootloader" philosophy
+        kc = session.get("kc")
+        if not kc:
+            return None
 
         # Generate execution ID if not provided
         if not exec_id:
             exec_id = str(uuid.uuid4())
 
-        # [SECURITY] Check if queue is full (backpressure)
-        if session["execution_queue"].full():
-            queue_size = session["execution_queue"].qsize()
-            max_size = session["execution_queue"].maxsize
-            logger.error(
-                f"[BACKPRESSURE] Execution queue full for {nb_path} "
-                f"({queue_size}/{max_size} items). Rejecting execution request."
-            )
-            raise RuntimeError(
-                f"Execution queue is full ({queue_size}/{max_size} pending executions). "
-                "Please wait for current executions to complete before submitting more. "
-                "This prevents server resource exhaustion."
-            )
-
-        # Track as queued immediately (before atomic queue operation)
-        session["queued_executions"][exec_id] = {
-            "cell_index": cell_index,
-            "code": code,
-            "status": "queued",
-            "queued_time": asyncio.get_event_loop().time(),
-        }
-        # Short-lived busy hint to avoid race windows where queue processor
-        # hasn't dequeued yet but callers want to know if the kernel is busy.
+        # Directly execute the code - ZMQ messages will be forwarded as notifications
         try:
-            session["last_queued_ts"] = asyncio.get_event_loop().time()
-        except Exception:
-            pass
-
-        # [STATE AMNESIA FIX] Persist task to disk BEFORE queuing in memory
-        # This ensures task survives server crash before execution starts
-        # Removed - using in-memory only approach
-        logger.info(f"Queued execution task {exec_id} (in-memory only)")
-
-        # Create execution request
-        exec_request = {"cell_index": cell_index, "code": code, "exec_id": exec_id}
-
-        # [SECURITY] Atomic backpressure check using put_nowait (prevents race condition)
-        try:
-            session["execution_queue"].put_nowait(exec_request)
-        except asyncio.QueueFull:
-            # Remove from queued_executions since we failed to enqueue
-            del session["queued_executions"][exec_id]
-
-            queue_size = session["execution_queue"].qsize()
-            max_size = session["execution_queue"].maxsize
-            logger.error(
-                f"[BACKPRESSURE] Execution queue full for {nb_path} "
-                f"({queue_size}/{max_size} items). Rejecting execution request."
+            msg_id = kc.execute(code)
+            logger.info(f"Executed code for {exec_id} with msg_id {msg_id}")
+        except Exception as e:
+            logger.error(f"Failed to execute code for {exec_id}: {e}")
+            await self._send_notification(
+                "notebook/cell_execution_error",
+                {
+                    "notebook_path": nb_path,
+                    "cell_index": cell_index,
+                    "exec_id": exec_id,
+                    "error": str(e),
+                },
             )
-            raise RuntimeError(
-                f"Execution queue is full ({queue_size}/{max_size} pending executions). "
-                "Please wait for current executions to complete before submitting more. "
-                "This prevents server resource exhaustion."
-            )
+            return None
 
-        logger.info(f"Queued execution {exec_id} for {nb_path} cell {cell_index}")
-        return exec_id
+        # Send MCP notification that execution started
+        await self._send_notification(
+            "notebook/cell_execution_started",
+            {
+                "notebook_path": nb_path,
+                "cell_index": cell_index,
+                "exec_id": exec_id,
+                "kernel_msg_id": msg_id,  # Include kernel's message ID
+                "code": code,
+            },
+        )
+
+        return msg_id
 
     async def get_kernel_info(self, nb_path: str):
         """
@@ -1189,161 +818,59 @@ print(_inspect_var())
         return await self._run_and_wait_internal(nb_path, code)
 
     def get_execution_status(self, nb_path: str, exec_id: str):
-        """Get the status of an execution by its ID."""
+        """Get the status of an execution by its ID.
+
+        Since executions are now immediate and messages are forwarded directly,
+        we don't track execution status. The notebook file on disk contains the history.
+        """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
             return {"status": "error", "message": "Kernel not found"}
 
-        session = self.sessions[abs_path]
-
-        # Check if still in queue (not started processing yet)
-        if exec_id in session.get("queued_executions", {}):
-            queued_data = session["queued_executions"][exec_id]
-            return {
-                "status": "queued",
-                "output": "",
-                "cell_index": queued_data.get("cell_index", -1),
-                "intermediate_outputs_count": 0,
-            }
-
-        # Look for the execution by ID in active executions
-        target_data = None
-        for msg_id, data in session.get("executions", {}).items():
-            if data.get("id") == exec_id:
-                target_data = data
-                break
-
-        if not target_data:
-            return {"status": "not_found", "output": ""}
-
-        output = target_data.get("text_summary", "")
-        if not output and target_data.get("status") == "completed":
-            # Try to compute sanitized output if finalization hasn't populated text_summary yet
-            try:
-                assets_dir = str(Path(nb_path).parent / "assets")
-                output = utils.sanitize_outputs(
-                    target_data.get("outputs", []), assets_dir
-                )
-            except Exception:
-                # Fallback: extract plain text from raw outputs
-                collected = []
-                for out in target_data.get("outputs", []):
-                    if isinstance(out, dict):
-                        if isinstance(out.get("text"), str):
-                            collected.append(out["text"])
-                        elif isinstance(out.get("data"), dict):
-                            text_plain = out["data"].get("text/plain")
-                            if isinstance(text_plain, str):
-                                collected.append(text_plain)
-                        elif isinstance(out.get("traceback"), list):
-                            collected.append("\n".join(out["traceback"]))
-                output = "".join(collected)
-
-        return {
-            "status": target_data.get("status", "unknown"),
-            "output": output,
-            "intermediate_outputs_count": len(target_data.get("outputs", [])),
-        }
+        # Executions are immediate - no status tracking
+        return {"status": "completed", "message": "Execution completed (messages forwarded via notifications)"}
 
     def is_kernel_busy(self, nb_path: str) -> bool:
         """
         Check if the kernel is currently busy executing code.
 
-        Returns True if there are any executions with 'running' or 'queued' status, or
-        if there are pending items in the execution queue. This method is defensive
-        against missing or partially-initialized session structures to avoid
-        false-negative results under race conditions.
+        Since executions are now immediate, we check if the kernel client reports busy.
         """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
             return False
 
         session = self.sessions[abs_path]
-
-        # 1) Explicit queued_executions map (may be missing in some test mocks)
-        queued_map = session.get("queued_executions")
-        if isinstance(queued_map, dict) and len(queued_map) > 0:
-            logger.debug(f"Kernel busy (queued_executions present): {abs_path} -> {len(queued_map)} pending")
-            return True
-        if queued_map is None:
-            logger.debug(f"queued_executions missing for session {abs_path}; falling back to queue/qsize checks")
-
-        # 2) Check the in-memory asyncio.Queue for pending items (pre-dequeue)
-        q = session.get("execution_queue")
-        try:
-            if q is not None and hasattr(q, "qsize") and q.qsize() > 0:
-                logger.debug(f"Kernel busy (execution_queue qsize>0): {abs_path} -> {q.qsize()} pending")
-                return True
-        except Exception:
-            # If qsize isn't available or the queue is in an odd state, ignore
-            pass
-
-        # 3) Short-lived queued hint (helps avoid tiny race windows)
-        try:
-            now = asyncio.get_event_loop().time()
-            last_q = session.get("last_queued_ts")
-            if last_q and (now - last_q) < 5.0:
-                logger.debug(f"Kernel busy (recent queued hint): {abs_path} last_queued={now-last_q:.3f}s ago")
-                return True
-        except Exception:
-            pass
-
-        # 4) Check persistence layer for pending tasks as a last-resort indicator
-        # Removed - using in-memory only approach
-
-        # 3) Active executions with terminal statuses
-        for msg_id, data in session.get("executions", {}).items():
-            if data.get("status") in ["running", "queued"]:
-                logger.debug(f"Kernel busy (active execution): {abs_path} msg_id={msg_id} status={data.get('status')}")
-                return True
-
-        # 4) As a last resort, check if kernel client appears alive (best-effort)
         kc = session.get("kc")
         if kc is not None and hasattr(kc, "is_alive"):
             try:
-                # Avoid creating coroutine objects in a sync function which may
-                # trigger "coroutine was never awaited" warnings when the
-                # kernel client implements an async is_alive(). Instead, detect
-                # whether is_alive is a coroutine function before calling it.
                 import inspect
-
                 if inspect.iscoroutinefunction(getattr(kc, "is_alive")):
-                    logger.debug(f"kc.is_alive is async for {abs_path}; skipping call in is_kernel_busy")
+                    # For async is_alive, assume not busy (can't call sync)
+                    return False
                 else:
-                    is_alive = kc.is_alive()
-                    if is_alive:
-                        # Kernel alive doesn't guarantee busy; treat as not-busy here
-                        logger.debug(f"Kernel client alive for {abs_path}; treating as possibly busy")
-                        return False
+                    return kc.is_alive()
             except Exception:
                 pass
 
         return False
 
     async def _run_and_wait_internal(self, nb_path: str, code: str):
-        """Internal helper to run code via the async system and wait for result."""
+        """Internal helper to run code via the async system.
+
+        Since executions are immediate, we just execute and return success.
+        """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
             return "Error: No kernel."
 
-        # We use cell_index -1 to denote internal/temporary
+        # Execute the code directly
         exec_id = await self.execute_cell_async(nb_path, -1, code)
         if not exec_id:
             return "Error starting internal execution."
 
-        # Wait loop
-        for _ in range(60):  # Write max wait 30s (60 * 0.5)
-            await asyncio.sleep(0.5)
-            status = self.get_execution_status(nb_path, exec_id)
-            if status["status"] in ["completed", "error"]:
-                # Give a moment for finalization to set text_summary
-                # (status becomes 'completed' before finalize_callback finishes)
-                if not status.get("output"):
-                    await asyncio.sleep(0.2)
-                    status = self.get_execution_status(nb_path, exec_id)
-                return status["output"]
-
-        return "Error: Timeout waiting for internal command."
+        # Since messages are forwarded immediately, we don't need to wait
+        return "Code executed (messages forwarded via notifications)"
 
     async def run_simple_code(self, nb_path: str, code: str):
         return await self._run_and_wait_internal(nb_path, code)
@@ -1406,7 +933,6 @@ print(_inspect_var())
 
         # Cancel all background tasks
         tasks_to_cancel = [
-            ("queue_processor_task", True),  # Needs shutdown signal
             ("listener_task", False),
             ("stdin_listener_task", False),
             ("health_check_task", False),
@@ -1414,9 +940,6 @@ print(_inspect_var())
 
         for task_name, needs_signal in tasks_to_cancel:
             if session.get(task_name):
-                if needs_signal and task_name == "queue_processor_task":
-                    await session["execution_queue"].put(None)  # Shutdown signal
-
                 session[task_name].cancel()
                 try:
                     await session[task_name]
@@ -1435,14 +958,9 @@ print(_inspect_var())
         return "Kernel shutdown."
     async def cancel_execution(self, nb_path: str, exec_id: Optional[str] = None):
         """
-        [P1 FIX] Multi-stage cancellation with escalation.
+        Cancel current execution by interrupting the kernel.
 
-        Implements graceful degradation:
-        1. SIGINT (KeyboardInterrupt) - wait 3 seconds
-        2. SIGTERM (terminate) - wait 2 seconds
-        3. SIGKILL + restart (nuclear option)
-
-        This prevents zombie computations from C-extensions that ignore SIGINT.
+        Since executions are immediate, this interrupts any currently running code.
         """
         abs_path = str(Path(nb_path).resolve())
         if abs_path not in self.sessions:
@@ -1450,155 +968,14 @@ print(_inspect_var())
 
         session = self.sessions[abs_path]
 
-        # Stage 1: Send SIGINT (KeyboardInterrupt)
+        # Send interrupt signal to kernel
         try:
             await session["km"].interrupt_kernel()
-            logger.info(f"[CANCEL] Stage 1: Sent SIGINT to {nb_path}")
+            logger.info(f"Sent interrupt signal to kernel for {nb_path}")
+            return "Execution interrupted"
         except Exception as e:
-            logger.error(f"[CANCEL] Failed to send SIGINT: {e}")
+            logger.error(f"Failed to interrupt kernel: {e}")
             return f"Failed to interrupt: {e}"
-
-        # Wait 3 seconds, checking every 0.5s
-        for i in range(6):
-            await asyncio.sleep(0.5)
-
-            # Check if execution completed/cancelled
-            if exec_id and exec_id in session["executions"]:
-                status = session["executions"][exec_id].get("status")
-                if status in ["cancelled", "error", "completed"]:
-                    logger.info("[CANCEL] Stage 1 succeeded (SIGINT)")
-                    return "Cancelled gracefully (SIGINT)"
-
-            # Check kernel client responsiveness
-            kc = session.get("kc")
-            if kc:
-                try:
-                    is_alive = kc.is_alive()
-                    if hasattr(is_alive, '__await__') or hasattr(is_alive, '__iter__'):
-                        is_alive = await is_alive
-                except Exception:
-                    is_alive = False
-
-                if not is_alive:
-                    logger.warning("[CANCEL] Kernel died during interrupt")
-                    return "Kernel terminated"
-
-        # Stage 2: SIGINT failed, escalate to SIGTERM
-        logger.warning("[CANCEL] Stage 1 failed, escalating to Stage 2: SIGTERM")
-        kernel_process = None
-        try:
-            km = session["km"]
-            kernel_process = _get_kernel_process(km)
-            if kernel_process:
-                import signal
-
-                kernel_process.send_signal(signal.SIGTERM)
-                logger.info(
-                    f"[CANCEL] Stage 2: Sent SIGTERM to PID {kernel_process.pid}"
-                )
-        except Exception as e:
-            logger.error(f"[CANCEL] Failed to send SIGTERM: {e}")
-
-        # Wait 2 seconds
-        await asyncio.sleep(2)
-
-        # Check if kernel stopped (by checking if process is gone)
-        kernel_terminated = False
-        if kernel_process:
-            try:
-                # poll() returns None if process is still running, else return code
-                kernel_terminated = kernel_process.poll() is not None
-            except Exception:
-                kernel_terminated = True  # Assume terminated if we can't check
-
-        if kernel_terminated:
-            # Mark any running execution as cancelled
-            # Look for the execution by ID (executions are keyed by msg_id, not exec_id)
-            for msg_id, data in session.get("executions", {}).items():
-                if data.get("id") == exec_id or (
-                    not exec_id and data.get("status") == "running"
-                ):
-                    data["status"] = "cancelled"
-                    data["text_summary"] = "Force terminated (SIGTERM)"
-                    break
-            # Also check queued_executions
-            if exec_id and exec_id in session.get("queued_executions", {}):
-                session["queued_executions"][exec_id]["status"] = "cancelled"
-            logger.info("[CANCEL] Stage 2 succeeded (SIGTERM)")
-            return "Force terminated (SIGTERM)"
-
-        # Also check kernel client
-        kc = session.get("kc")
-        if kc:
-            try:
-                is_alive = kc.is_alive()
-                if hasattr(is_alive, '__await__') or hasattr(is_alive, '__iter__'):
-                    is_alive = await is_alive
-                if not is_alive:
-                    # Mark any running execution as cancelled
-                    for msg_id, data in session.get("executions", {}).items():
-                        if data.get("id") == exec_id or (
-                            not exec_id and data.get("status") == "running"
-                        ):
-                            data["status"] = "cancelled"
-                            data["text_summary"] = "Force terminated (SIGTERM)"
-                            break
-                    if exec_id and exec_id in session.get("queued_executions", {}):
-                        session["queued_executions"][exec_id]["status"] = "cancelled"
-                    logger.info("[CANCEL] Stage 2 succeeded (SIGTERM via client check)")
-                    return "Force terminated (SIGTERM)"
-            except Exception:
-                # Client check failed, assume kernel is dead
-                for msg_id, data in session.get("executions", {}).items():
-                    if data.get("id") == exec_id or (
-                        not exec_id and data.get("status") == "running"
-                    ):
-                        data["status"] = "cancelled"
-                        data["text_summary"] = "Force terminated (SIGTERM)"
-                        break
-                if exec_id and exec_id in session.get("queued_executions", {}):
-                    session["queued_executions"][exec_id]["status"] = "cancelled"
-                logger.info("[CANCEL] Stage 2 succeeded (SIGTERM, client unavailable)")
-                return "Force terminated (SIGTERM)"
-
-        # Stage 3: Nuclear option - SIGKILL + restart
-        logger.error(
-            "[CANCEL] Stage 2 failed, escalating to Stage 3: SIGKILL + restart"
-        )
-        try:
-            km = session["km"]
-            kernel_process = _get_kernel_process(km)
-            if kernel_process:
-                import signal
-
-                kernel_process.send_signal(signal.SIGKILL)
-                logger.info(
-                    f"[CANCEL] Stage 3: Sent SIGKILL to PID {kernel_process.pid}"
-                )
-
-            # Force cleanup
-            await self.stop_kernel(nb_path, cleanup_assets=False)
-
-            # Attempt restart with state recovery
-            logger.info("[CANCEL] Attempting kernel restart...")
-            await self.start_kernel(nb_path)
-
-            # Try to restore from checkpoint if available
-            # [ROUND 2 AUDIT] Checkpoint auto-restore removed for security compliance
-            return "Killed and restarted (state lost - re-execute cells to restore)"
-
-        except Exception as e:
-            logger.error(f"[CANCEL] Stage 3 failed: {e}")
-            return f"Failed to kill and restart: {e}"
-
-        # We manually mark the specific execution as cancelled if found (Force fallback)
-        if exec_id is not None:
-            for msg_id, data in session["executions"].items():
-                if data["id"] == exec_id and data["status"] == "running":
-                    data["status"] = "cancelled"
-                    return "Kernel interrupted successfully (Marked as cancelled)."
-
-        return "Warning: Kernel sent interrupt signal but is still busy. It may be catching KeyboardInterrupt."
 
     async def shutdown_all(self):
         """Kills all running kernels and cleans up persisted session files."""

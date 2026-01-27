@@ -11,7 +11,7 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { McpClient } from './mcpClient';
+import { MCPClient } from './mcpClient';
 
 export class SessionViewProvider implements vscode.TreeDataProvider<SessionItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<
@@ -22,7 +22,7 @@ export class SessionViewProvider implements vscode.TreeDataProvider<SessionItem>
   private sessions: SessionItem[] = [];
   private autoRefresh: NodeJS.Timeout | undefined;
 
-  constructor(private mcpClient: McpClient) {
+  constructor(private mcpClient: MCPClient) {
     // Refresh every 5 seconds to show new/removed kernels
     this.autoRefresh = setInterval(() => this.refresh(), 5000);
   }

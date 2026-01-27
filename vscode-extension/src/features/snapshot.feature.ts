@@ -8,7 +8,7 @@ import { SnapshotViewer } from '../snapshotViewer';
 export class SnapshotFeature implements IFeature {
     private dbManager: DatabaseManager | undefined;
 
-    activate(context: vscode.ExtensionContext): void {
+    activate(context: vscode.ExtensionContext, mcpClient: any): void {
         this.dbManager = new DatabaseManager();
         const snapshotTreeDataProvider = new SnapshotTreeDataProvider(this.dbManager);
         const snapshotViewer = new SnapshotViewer(this.dbManager);

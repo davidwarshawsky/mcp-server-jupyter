@@ -15,10 +15,16 @@ const features: IFeature[] = [
 export function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "mcp-jupyter" is now active!');
 
-    // Check if Python path is configured
-    const pythonPath = vscode.workspace.getConfiguration('python').get('pythonPath') ||
-                      vscode.workspace.getConfiguration('python').get('defaultInterpreterPath');
-    
+    // Get the active Python interpreter
+    const pythonExtension = vscode.extensions.getExtension('ms-python.python');
+    if (!pythonExtension) {
+        vscode.window.showErrorMessage('Python extension is not installed. Please install ms-python.python.');
+        return;
+    }
+
+    const pythonApi = pythonExtension.exports;
+    const pythonPath = pythonApi.settings.getExecutionDetails().execCommand[0];
+
     if (!pythonPath) {
         vscode.window.showInformationMessage(
             'MCP Jupyter: Please configure a Python interpreter in VS Code settings.',
@@ -28,16 +34,27 @@ export function activate(context: vscode.ExtensionContext) {
                 vscode.commands.executeCommand('workbench.action.openSettings', 'python.pythonPath');
             }
         });
+        return;
     }
 
-    // Activate all features
+    // Check if mcp-server-jupyter is installed
+    const terminal = vscode.window.createTerminal('MCP Check');
+    terminal.sendText(`${pythonPath} -c "import mcp_server_jupyter"`);
+    terminal.sendText('exit');
+    
+    // For now, assume it's installed or prompt
+    // TODO: Add proper check and install prompt
+
+    // Create MCP client with stdio
+    const sessionId = 'vscode-session';
+    const mcpClient = MCPClient.getInstance(pythonPath, sessionId);
+
+    // Activate features
     features.forEach(feature => {
         try {
-            feature.activate(context);
+            feature.activate(context, mcpClient);
         } catch (err) {
             console.error(`Error activating feature: ${err.message}`);
-            // Optionally, show a VS Code error message to the user
-            // vscode.window.showErrorMessage(`Failed to activate a feature. See console for details.`);
         }
     });
 }

@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
-import { McpClient } from './mcpClient';
+import { MCPClient } from './mcpClient';
 
 export class SyncCodeLensProvider implements vscode.CodeLensProvider {
   private _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
   public readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
   private notebookSyncStatus = new Map<string, boolean>();
 
-  constructor(private mcpClient: McpClient) {}
+  constructor(private mcpClient: MCPClient) {}
 
   public setSyncNeeded(notebookPath: string, needed: boolean): void {
     this.notebookSyncStatus.set(notebookPath, needed);

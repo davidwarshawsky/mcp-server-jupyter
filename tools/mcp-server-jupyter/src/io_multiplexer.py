@@ -144,6 +144,80 @@ class IOMultiplexer:
         except asyncio.CancelledError:
             logger.info(f"IOPub listener cancelled for {nb_path}")
 
+    async def listen_iopub_direct(
+        self,
+        nb_path: str,
+        kc,
+        notification_callback: Optional[Callable] = None,
+    ):
+        """
+        Listen for IOPub messages and directly forward them as MCP notifications.
+
+        This simplified version doesn't track executions or buffer messages.
+        All IOPub messages are immediately converted to MCP notifications.
+
+        Args:
+            nb_path: Notebook path
+            kc: Jupyter kernel client
+            notification_callback: Async callback to send MCP notifications
+        """
+        logger.info(f"Starting direct IOPub listener for {nb_path}")
+        consecutive_errors = 0
+
+        try:
+            while True:
+                try:
+                    # Retrieve message from IOPub channel
+                    msg = await kc.get_iopub_msg()
+
+                    # Immediately forward as MCP notification
+                    if notification_callback:
+                        msg_type = msg.get("msg_type", "unknown")
+                        content = msg.get("content", {})
+                        parent_header = msg.get("parent_header", {})
+                        msg_id = parent_header.get("msg_id", "unknown")
+
+                        await notification_callback(
+                            "notebook/iopub_message",
+                            {
+                                "notebook_path": nb_path,
+                                "msg_type": msg_type,
+                                "msg_id": msg_id,
+                                "content": content,
+                                "parent_header": parent_header,
+                            },
+                        )
+
+                    # Reset error counter on success
+                    consecutive_errors = 0
+
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    # Circuit breaker: prevent CPU spin on errors
+                    consecutive_errors += 1
+                    logger.error(
+                        f"Direct listener error for {nb_path}: {e} "
+                        f"(consecutive errors: {consecutive_errors})"
+                    )
+
+                    if consecutive_errors >= 5:
+                        logger.critical(
+                            f"[CIRCUIT BREAKER] Direct listener for {nb_path} hit 5 consecutive errors. "
+                            f"Exiting to prevent resource exhaustion."
+                        )
+                        break
+                    else:
+                        # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                        backoff_seconds = min(2 ** (consecutive_errors - 1), 16)
+                        logger.warning(
+                            f"[CIRCUIT BREAKER] Backing off for {backoff_seconds}s before retry"
+                        )
+                        await asyncio.sleep(backoff_seconds)
+
+        except asyncio.CancelledError:
+            logger.info(f"Direct IOPub listener cancelled for {nb_path}")
+
     async def _route_message(
         self,
         nb_path: str,

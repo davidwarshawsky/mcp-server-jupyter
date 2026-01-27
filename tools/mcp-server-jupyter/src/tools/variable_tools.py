@@ -147,9 +147,75 @@ print(json.dumps(manifest))
         if not variable_name.isidentifier():
             return f"Error: '{variable_name}' is not a valid Python identifier. Cannot inspect."
 
-        # SECURITY FIX: Use pre-defined helper function instead of sending code blocks
-        # Logic is defined in session.py startup_code as _mcp_inspect(name)
-        code = f"_mcp_inspect('{variable_name}')"
+        # Lazy Loading: Inject the inspection logic NOW, not at startup
+        code = f"""
+import sys
+_val = locals().get('{variable_name}') or globals().get('{variable_name}')
+if _val is None:
+    print("Variable not found")
+else:
+    t_name = type(_val).__name__
+    output = [f"### Type: {{t_name}}"]
+    
+    # Check for pandas/numpy without importing if not already imported
+    is_pd_df = 'pandas' in sys.modules and isinstance(_val, sys.modules['pandas'].DataFrame)
+    is_pd_series = 'pandas' in sys.modules and isinstance(_val, sys.modules['pandas'].Series)
+    is_numpy = 'numpy' in sys.modules and hasattr(_val, 'shape') and hasattr(_val, 'dtype')
+    
+    # Safe Primitives
+    if isinstance(_val, (int, float, bool, str, bytes, type(None))):
+         output.append(f"- Value: {{str(_val)[:500]}}")
+
+    # Pandas DataFrame
+    elif is_pd_df:
+        df = _val
+        output.append(f"- Shape: {{df.shape}}")
+        output.append(f"- Columns: {{list(df.columns)[:10]}}")
+        output.append(f"- Memory Usage: {{df.memory_usage(deep=True).sum() / 1024 / 1024:.2f}} MB")
+        output.append(f"- Sample:")
+        output.append(f"```")
+        output.append(str(df.head(3)))
+        output.append(f"```")
+    
+    # Pandas Series
+    elif is_pd_series:
+        series = _val
+        output.append(f"- Length: {{len(series)}}")
+        output.append(f"- Dtype: {{series.dtype}}")
+        output.append(f"- Sample: {{series.head(3).to_dict()}}")
+    
+    # Numpy Array
+    elif is_numpy:
+        arr = _val
+        output.append(f"- Shape: {{arr.shape}}")
+        output.append(f"- Dtype: {{arr.dtype}}")
+        output.append(f"- Size (MB): {{arr.nbytes / 1024 / 1024:.2f}}")
+        if arr.size <= 100:
+            output.append(f"- Values: {{arr}}")
+        else:
+            output.append(f"- Sample: {{arr.flat[:10]}}...")
+    
+    # Generic Objects
+    else:
+        # Size estimation
+        import sys
+        size = sys.getsizeof(_val)
+        if hasattr(_val, '__len__'):
+            try:
+                length = len(_val)
+                output.append(f"- Length: {{length}}")
+            except:
+                pass
+        output.append(f"- Size: {{size}} bytes")
+        
+        # String representation (truncated)
+        str_repr = str(_val)
+        if len(str_repr) > 500:
+            str_repr = str_repr[:500] + "..."
+        output.append(f"- Repr: {{str_repr}}")
+    
+    print("\\n".join(output))
+"""
 
         return await session_manager.run_simple_code(notebook_path, code)
 

@@ -1101,17 +1101,15 @@ def sanitize_outputs_resilient(
                     try:
                         img_bytes = base64.b64decode(content)
 
-                        if len(img_bytes) > MAX_IMAGE_BYTES:
+                        if len(img_bytes) > 1024 * 1024:  # 1MB
                             ext = mime.split("/")[-1].split("+")[0]
                             content_hash = hashlib.sha256(img_bytes).hexdigest()[:16]
                             asset_name = f"img_{content_hash}.{ext}"
                             (asset_path_obj / asset_name).write_bytes(img_bytes)
 
-                            # Replace with standard HTML IMG tag
-                            img_html = (
-                                f'<img src="assets/{asset_name}" alt="Large Image"/>'
-                            )
-                            new_data["text/html"] = img_html
+                            # Replace with Markdown link (relative to notebook)
+                            md_link = f"![Large Image](assets/{asset_name})"
+                            new_data["text/markdown"] = md_link
                             del new_data[mime]  # Remove heavy base64
                             llm_summary.append(
                                 f"[Large image offloaded: assets/{asset_name}]"
@@ -1121,6 +1119,43 @@ def sanitize_outputs_resilient(
                             )
                     except Exception as e:
                         logger.warning(f"Failed to process image data: {e}")
+
+                # C. Handle Plotly Charts
+                elif mime.startswith("application/vnd.plotly"):
+                    # content is plotly json
+                    try:
+                        content_str = json.dumps(content) if isinstance(content, dict) else str(content)
+                        content_hash = hashlib.sha256(content_str.encode()).hexdigest()[:16]
+                        asset_name = f"plotly_{content_hash}.json"
+                        (asset_path_obj / asset_name).write_text(content_str)
+
+                        # Try to render thumbnail
+                        try:
+                            # Convert json to html for rendering
+                            import plotly.io as pio
+                            fig = pio.from_json(content_str)
+                            html = pio.to_html(fig, include_plotlyjs=False)
+                            png_path = _render_plotly_chart(html, str(asset_path_obj))
+                            if png_path:
+                                png_name = Path(png_path).name
+                                # Return static thumbnail + link
+                                md_content = f"![Plotly Chart Thumbnail](assets/{png_name})\n\n[Interactive Plotly Chart](assets/{asset_name})"
+                                new_data["text/markdown"] = md_content
+                                llm_summary.append(f"[Plotly chart: thumbnail assets/{png_name}, interactive assets/{asset_name}]")
+                            else:
+                                md_link = f"[Interactive Plotly Chart](assets/{asset_name})"
+                                new_data["text/markdown"] = md_link
+                                llm_summary.append(f"[Plotly chart offloaded: assets/{asset_name}]")
+                        except Exception as e:
+                            logger.warning(f"Failed to render Plotly thumbnail: {e}")
+                            md_link = f"[Interactive Plotly Chart](assets/{asset_name})"
+                            new_data["text/markdown"] = md_link
+                            llm_summary.append(f"[Plotly chart offloaded: assets/{asset_name}]")
+
+                        del new_data[mime]  # Remove heavy json
+                        logger.debug(f"Offloaded Plotly chart to {asset_name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to process Plotly data: {e}")
 
             out_dict["data"] = new_data
 

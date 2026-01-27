@@ -7,14 +7,14 @@
 
 import * as assert from 'assert';
 import * as sinon from 'sinon';
-import { McpClient } from '../mcpClient';
+import { MCPClient } from '../mcpClient';
 
 suite('Connection Resilience Tests', () => {
-  let client: McpClient;
+  let client: MCPClient;
   let clock: sinon.SinonFakeTimers;
 
   setup(() => {
-    client = new McpClient();
+    client = new MCPClient();
     clock = sinon.useFakeTimers();
   });
 
