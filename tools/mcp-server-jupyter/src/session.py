@@ -16,12 +16,10 @@ from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
 from src.observability import get_logger, get_tracer
-from src.kernel_state import KernelStateManager
 from src.kernel_startup import get_startup_code
 from src.kernel_lifecycle import KernelLifecycle
 from src.execution_scheduler import ExecutionScheduler
 from src.io_multiplexer import IOMultiplexer
-from src.persistence import PersistenceManager  # [STATE AMNESIA FIX]
 
 # Configure logging
 logger = get_logger()
@@ -127,15 +125,7 @@ class SessionManager:
         # [BROADCASTER] Connection manager for multi-user support (set by main.py)
         self.connection_manager = None
 
-        # Session persistence directory (12-Factor compliant)
-        from src.config import load_and_validate_settings
-
-        _settings = load_and_validate_settings()
-        self.persistence_dir = _settings.get_data_dir() / "sessions"
-        self.persistence_dir.mkdir(parents=True, exist_ok=True)
-
         # [PHASE 2 - COMPONENTS] Initialize specialized modules
-        self.state_manager = KernelStateManager(self.persistence_dir)
         self.kernel_lifecycle = KernelLifecycle(
             max_concurrent=self.max_concurrent_kernels
         )
@@ -143,70 +133,13 @@ class SessionManager:
             default_timeout=default_execution_timeout
         )
         self.io_multiplexer = IOMultiplexer(input_request_timeout=input_request_timeout)
-        
-        # [STATE AMNESIA FIX] Initialize SQLite persistence layer
-        self.db_path = self.persistence_dir / "state.db"
-        self.persistence = PersistenceManager(self.db_path)
-        logger.info(f"[PERSISTENCE] Initialized with database at {self.db_path}")
 
         # [PHASE 2.3] Asset cleanup task - deferred to avoid "no running event loop" error
         # [IIRB OPS FIX P1] "Infinite Disk" - continuous asset pruning
         self._asset_cleanup_task = None
         self._continuous_cleanup_started = False
 
-        # Restore persisted sessions on startup if event loop is available.
-        # If SessionManager is constructed before the event loop exists (e.g., in import-time during tests),
-        # we defer restoration until later.
-        self._restore_pending = False
-        try:
-            # Try to schedule restoration (will raise RuntimeError if no running loop)
-            import asyncio
-
-            asyncio.get_running_loop()
-            try:
-                asyncio.create_task(self.restore_persisted_sessions())
-                logger.info("Scheduled restore of persisted sessions on startup")
-            except Exception as e:
-                logger.warning(f"Could not schedule restore_persisted_sessions immediately: {e}")
-        except RuntimeError:
-            # No running loop - set flag to start restoration later
-            self._restore_pending = True
-            logger.info("Event loop not present; will restore persisted sessions when loop starts")
-
-    def _ensure_asset_cleanup_task(self):
-        """Start the asset cleanup task if not already running."""
-        if self._asset_cleanup_task is None or self._asset_cleanup_task.done():
-            try:
-                # [IIRB OPS FIX P1] Start continuous asset pruner (1h interval)
-                # This ensures disk doesn't fill up on long-running servers
-                self._asset_cleanup_task = asyncio.create_task(
-                    self._asset_cleanup_loop(interval=3600)
-                )
-                self._continuous_cleanup_started = True
-                logger.info("[OPS] Continuous asset pruner started (interval: 1h)")
-            except RuntimeError:
-                # No running event loop - task will be started later
-                pass
-
-    def set_mcp_server(self, mcp_server):
-        """Set the MCP server instance to enable notifications."""
-        self.mcp_server = mcp_server
-        # [BROADCASTER] Optional connection manager for multi-user support
-        self.connection_manager = None
-
-        # If restore was pending due to missing event loop at construction time,
-        # schedule it now that the server is wiring things up and the loop should be running.
-        if getattr(self, "_restore_pending", False):
-            try:
-                import asyncio
-
-                asyncio.create_task(self.restore_persisted_sessions())
-                self._restore_pending = False
-                logger.info("Deferred restore_persisted_sessions scheduled via set_mcp_server")
-            except Exception as e:
-                logger.warning(f"Failed to schedule deferred restore: {e}")
-
-    def register_session(self, session):
+        # Removed session restoration logic (in-memory only)
         """Register a client session for sending notifications."""
         if not hasattr(self, "active_sessions"):
             self.active_sessions = set()
@@ -335,135 +268,6 @@ class SessionManager:
                 logger.error(f"[HEALTH CHECK] Unhandled error: {e}")
                 await asyncio.sleep(check_interval)
 
-    async def restore_persisted_sessions(self):
-        """
-        Attempt to restore sessions from disk on server startup.
-
-        Checks if kernel PIDs are still alive and reconnects if possible.
-        Cleans up stale session files for dead kernels.
-        """
-        restored_count = 0
-        cleaned_count = 0
-
-        for session_file in self.state_manager.get_persisted_sessions():
-            try:
-                with open(session_file, "r") as f:
-                    session_data = json.load(f)
-
-                nb_path = session_data["notebook_path"]
-                pid = session_data["pid"]
-                connection_file = session_data["connection_file"]
-                saved_create_time = session_data.get("pid_create_time")
-
-                # Check if kernel process is still alive
-                try:
-                    # Simplified session restoration - no PID validation
-                    if Path(connection_file).exists():
-                        # Try to reconnect to existing kernel
-                        logger.info(
-                            f"Attempting to restore session for {nb_path}"
-                        )
-
-                        try:
-                            # Create kernel manager from existing connection file
-                            km = AsyncKernelManager(connection_file=connection_file)
-                            km.load_connection_file()
-
-                            # Create client and connect
-                            kc = km.client()
-                            kc.start_channels()
-
-                            # Test if kernel is responsive
-                            await asyncio.wait_for(
-                                kc.wait_for_ready(timeout=10), timeout=15
-                            )
-
-                            # Get notebook directory for CWD
-                            notebook_dir = str(Path(nb_path).parent.resolve())
-
-                            # Restore session structure
-                            abs_path = str(Path(nb_path).resolve())
-                            # [SECURITY] Bounded queue prevents DoS from runaway executions
-                            max_queue_size = int(
-                                os.environ.get("MCP_MAX_QUEUE_SIZE", "1000")
-                            )
-
-                            # [SMART SYNC FIX] Restore executed_indices from persisted state
-                            restored_indices = set(
-                                session_data.get("executed_indices", [])
-                            )
-
-                            session_dict = {
-                                "km": km,
-                                "kc": kc,
-                                "cwd": notebook_dir,
-                                "listener_task": None,
-                                "executions": {},
-                                "queued_executions": {},
-                                "execution_queue": asyncio.Queue(
-                                    maxsize=max_queue_size
-                                ),
-                                "execution_counter": 0,
-                                "stop_on_error": False,
-                                "exec_lock": asyncio.Lock(),  # [RACE CONDITION FIX]
-                                "executed_indices": restored_indices,  # [SMART SYNC FIX]
-                                "env_info": session_data.get(
-                                    "env_info",
-                                    {
-                                        "python_path": "unknown",
-                                        "env_name": "unknown",
-                                        "start_time": session_data.get(
-                                            "created_at", "unknown"
-                                        ),
-                                    },
-                                ),
-                            }
-
-                            # Start background tasks
-                            session_dict["listener_task"] = asyncio.create_task(
-                                self._kernel_listener(
-                                    abs_path, kc, session_dict["executions"]
-                                )
-                            )
-                            session_dict["queue_processor_task"] = asyncio.create_task(
-                                self._queue_processor(abs_path, session_dict)
-                            )
-
-                            self.sessions[abs_path] = session_dict
-                            restored_count += 1
-                            logger.info(f"Successfully restored session for {nb_path}")
-
-                        except Exception as reconnect_error:
-                            logger.warning(
-                                f"Failed to reconnect to kernel PID {pid}: {reconnect_error}"
-                            )
-                            # Clean up the stale session file
-                            session_file.unlink()
-                            cleaned_count += 1
-                    else:
-                        # Kernel is dead or connection file missing, clean up
-                        logger.info(
-                            f"Kernel session file for {nb_path} is stale, cleaning up"
-                        )
-                        session_file.unlink()
-                        cleaned_count += 1
-                except ImportError:
-                    logger.warning("psutil not available, skipping session restoration")
-                    break
-
-            except Exception as e:
-                logger.warning(f"Failed to restore session from {session_file}: {e}")
-                # Clean up corrupted session file
-                try:
-                    session_file.unlink()
-                except:
-                    pass
-
-        if restored_count > 0:
-            logger.info(f"Restored {restored_count} sessions from disk")
-        if cleaned_count > 0:
-            logger.info(f"Cleaned up {cleaned_count} stale session files")
-
     def get_python_path(self, venv_path: Optional[str]) -> str:
         """Cross-platform venv resolver"""
         if not venv_path:
@@ -566,8 +370,7 @@ class SessionManager:
             self.sessions[old_abs] = session
             return False
         
-        # 3. Update Session Lock on Disk
-        self.state_manager.remove_session(old_abs)
+        # 3. Update Session Lock on Disk (removed - in-memory only)
         
         # 4. Persist under new name
         km = session['km']
@@ -575,13 +378,7 @@ class SessionManager:
         env_info = session.get('env_info', {})
         
         if kernel_proc:
-            self.state_manager.persist_session(
-                new_abs,
-                km.connection_file,
-                kernel_proc.pid,
-                env_info
-            )
-            logger.info(f"[MIGRATE] Persisted session under new path")
+            logger.info(f"[MIGRATE] Session migrated under new path")
         
         logger.info(f"[MIGRATE] Migration complete: {old_abs} → {new_abs}")
         return True
@@ -974,16 +771,9 @@ class SessionManager:
         if hasattr(km, "connection_file"):
             connection_file = km.connection_file
 
-        # Persist session info to prevent zombie kernels after server restart
+        # Session info tracked in memory only
         if pid != "unknown" and connection_file != "unknown":
-            self.state_manager.persist_session(
-                abs_path,
-                connection_file,
-                pid,
-                session_data["env_info"],
-                kernel_uuid,
-                session_data.get("executed_indices", set()),
-            )
+            logger.info(f"Kernel session tracked in memory: {abs_path}")
 
         return f"Kernel started (PID: {pid}). CWD set to: {notebook_dir}"
 
@@ -1017,34 +807,8 @@ class SessionManager:
 
         Called after each cell execution to ensure Smart Sync survives server restarts.
         """
-        try:
-            session = self.sessions.get(nb_path)
-            if not session:
-                return
-
-            # Get kernel info for persistence
-            km = session.get("km")
-            pid = "unknown"
-            connection_file = "unknown"
-
-            kernel_process = _get_kernel_process(km)
-            if kernel_process:
-                pid = getattr(kernel_process, "pid", "unknown")
-            if hasattr(km, "connection_file"):
-                connection_file = km.connection_file
-
-            if pid != "unknown" and connection_file != "unknown":
-                # Re-persist with updated executed_indices
-                self.state_manager.persist_session(
-                    nb_path,
-                    connection_file,
-                    pid,
-                    session.get("env_info", {}),
-                    getattr(km, "kernel_id", None),
-                    session.get("executed_indices", set()),
-                )
-        except Exception as e:
-            logger.warning(f"Failed to persist session state for {nb_path}: {e}")
+        # Removed persistence - using in-memory only approach
+        pass
 
     async def _stdin_listener(self, nb_path: str, session_data: Dict):
         """
@@ -1312,17 +1076,8 @@ class SessionManager:
 
         # [STATE AMNESIA FIX] Persist task to disk BEFORE queuing in memory
         # This ensures task survives server crash before execution starts
-        try:
-            self.persistence.enqueue_execution(
-                notebook_path=nb_path,
-                cell_index=cell_index,
-                code=code,
-                task_id=exec_id
-            )
-        except Exception as e:
-            logger.error(f"[PERSISTENCE] Failed to persist task {exec_id}: {e}")
-            # Log but don't fail - allow execution to proceed without persistence
-            # (degraded mode, but doesn't block user)
+        # Removed - using in-memory only approach
+        logger.info(f"Queued execution task {exec_id} (in-memory only)")
 
         # Create execution request
         exec_request = {"cell_index": cell_index, "code": code, "exec_id": exec_id}
@@ -1534,15 +1289,7 @@ print(_inspect_var())
             pass
 
         # 4) Check persistence layer for pending tasks as a last-resort indicator
-        try:
-            if hasattr(self, "persistence") and self.persistence:
-                pending = self.persistence.get_pending_tasks(abs_path)
-                if pending:
-                    logger.debug(f"Kernel busy (persistence pending tasks): {abs_path} -> {len(pending)}")
-                    return True
-        except Exception:
-            # If persistence is unavailable or errors, ignore
-            pass
+        # Removed - using in-memory only approach
 
         # 3) Active executions with terminal statuses
         for msg_id, data in session.get("executions", {}).items():
@@ -1684,7 +1431,6 @@ print(_inspect_var())
 
         # Remove from sessions and clean up state
         del self.sessions[abs_path]
-        self.state_manager.remove_session(abs_path)
 
         return "Kernel shutdown."
     async def cancel_execution(self, nb_path: str, exec_id: Optional[str] = None):
@@ -1861,8 +1607,7 @@ print(_inspect_var())
                 session["listener_task"].cancel()
             try:
                 await session["km"].shutdown_kernel(now=True)
-                # Remove persisted session info
-                self.state_manager.remove_session(abs_path)
+                # Session cleanup handled by clearing sessions dict
             except Exception as e:
                 logging.error(f"Error shutting down kernel for {abs_path}: {e}")
         self.sessions.clear()
@@ -2079,9 +1824,8 @@ print(_inspect_var())
         """
         [CRUCIBLE] Startup Task: Kill orphan kernels from dead server processes.
         """
-        # Delegated to new KernelStateManager
-        if hasattr(self, "state_manager"):
-            self.state_manager.reconcile_zombies()
+        # Removed - let OS handle process cleanup (local-first approach)
+        pass
 
 
 # --- Compatibility wrapper for finalizing executions synchronously ---
