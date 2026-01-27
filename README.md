@@ -1,428 +1,143 @@
-# MCP Jupyter Server
+# MCP Jupyter: The Superpowered VS Code Extension
 
 <div align="center">
 
-[![PyPI version](https://badge.fury.io/py/mcp-server-jupyter.svg)](https://badge.fury.io/py/mcp-server-jupyter)
-[![Tests](https://github.com/yourusername/mcp-jupyter-server/actions/workflows/test.yml/badge.svg)](https://github.com/yourusername/mcp-jupyter-server/actions)
-[![Documentation](https://img.shields.io/badge/docs-mkdocs-blue)](https://yourusername.github.io/mcp-jupyter-server)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![VS Code Extension](https://img.shields.io/visual-studio-marketplace/v/yourpublisher.mcp-agent-kernel)](https://marketplace.visualstudio.com/items?itemName=yourpublisher.mcp-agent-kernel)
-
-**Production-grade Jupyter with Superpowers: SQL queries on DataFrames, Auto-EDA, Git-Safe Workflows, and AI Agent tools**
-
-[**📖 Documentation**](https://yourusername.github.io/mcp-jupyter-server) | [**🚀 Quick Start**](docs/QUICKSTART.md) | [**✨ Superpowers**](#superpowers) | [**🔥 Try in Codespaces**](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
+**Stop losing work to crashed kernels. Stop wrestling with pandas. Start using superpowers.**
 
 </div>
 
 ---
 
-## 🎬 See It In Action
+## 👋 What is MCP Jupyter?
 
-<div align="center">
+MCP Jupyter is a free, open-source VS Code extension that gives you **superpowers** for your Jupyter notebooks. It is designed to provide a more resilient, powerful, and user-friendly data science experience within VS Code.
 
-![MCP Jupyter Demo](docs/media/mcp-jupyter-demo.png)
+This project is composed of two main parts:
+1.  A **VS Code Extension** (`vscode-extension`) that provides the user interface and frontend logic.
+2.  A **Jupyter Server Backend** (`tools/mcp-server-jupyter`) that manages kernels, state, and executes the "superpowers".
 
-*MCP Agent Kernel running in VS Code with DuckDB SQL magic and Variable Dashboard*
-
-**[▶️ Watch the Full Demo Video](docs/media/mcp-jupyter-demo.webm)** | **[📖 Quick Start Guide →](docs/QUICKSTART.md)**
-
-</div>
-
----
-
-## 🚀 Interactive Scenarios (Test & Verify)
-
-We provide automated scenarios to verify the extension's functionality in a clean environment. You can run these yourself using Docker!
-
-### Scenario 1: Setup & Connection
-Shows the initial kernel selection and successful connection to the MCP server.
-[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-01-setup.spec.ts)
-
-### Scenario 2: Standard Features
-Demonstrates running Python cells and inspecting variables in the real-time Variable Dashboard.
-[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-02-standard.spec.ts)
-
-### Scenario 3: Superpowers (DuckDB & Auto-EDA)
-Showcases the `%%duckdb` magic for SQL on DataFrames and the `/prompt auto-analyst` for instant EDA.
-[**View Scenario Script**](scripts/demo-recording/demo-tests/scenario-03-superpowers.spec.ts)
+| Before MCP Jupyter                               | After MCP Jupyter                                |
+| ------------------------------------------------ | ------------------------------------------------ |
+| 😭 Kernel crashes and lost work                  | 😎 **Automatic crash recovery**                     |
+| 🐌 Browser freezes with large outputs            | ⚡️ **No-freeze large outputs**                    |
+| 🤯 Complex pandas code for simple queries        | 🔮 **SQL queries on your DataFrames**            |
+|  tedious boilerplate for EDA                    | 🤖 **60-second automated EDA**                   |
 
 ---
 
-## The One-Line Pitch
+## 🏛️ Architecture
 
+MCP Jupyter uses a service-oriented architecture. The VS Code extension acts as a client to the `mcp-server-jupyter` backend.
 
-**Standard Jupyter crashes. Outputs freeze browsers. Agents struggle. MCP Jupyter Server solves this.**
+1.  The **VS Code Extension** is responsible for the UI, including the session view, variable dashboard, and rendering notebook outputs.
+2.  The **`mcp-server-jupyter`** is a Python-based server that manages the lifecycle of Jupyter kernels. It handles state persistence, allowing for features like crash recovery. It also provides the "superpowers" like SQL-on-DataFrame queries and automated EDA.
+
+This separation of concerns makes the system more robust and scalable. The extension communicates with the server via a well-defined protocol.
+
+---
+
+## 🚀 Getting Started (for Developers)
+
+As this project is under active development, it is not yet published on the VS Code Marketplace. To use it, you will need to build it from source.
+
+### Prerequisites
+
+*   [Node.js and npm](https://nodejs.org/en/download/)
+*   [Python 3.8+](https://www.python.org/downloads/)
+*   [Visual Studio Code](https://code.visualstudio.com/)
+
+### 1. Build the Backend
+
+The `mcp-server-jupyter` is a Python package.
 
 ```bash
-# The "Trust Me" Install
-pip install "mcp-server-jupyter[superpowers]" && code --install-extension mcp-agent-kernel
+# Navigate to the server directory
+cd tools/mcp-server-jupyter
+
+# Install dependencies (using poetry or pip from pyproject.toml)
+pip install poetry
+poetry install
+
+# Build the wheel
+poetry build
 ```
 
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
+### 2. Build and Install the Frontend
+
+The VS Code extension bundles the backend server.
+
+```bash
+# Navigate to the extension directory
+cd ../../vscode-extension
+
+# Install npm dependencies
+npm install
+
+# The `prepublish` script should automatically copy the backend wheel.
+# If not, you may need to run scripts manually.
+# Now, package the extension into a .vsix file
+npm install -g @vscode/vsce
+vsce package
+
+# In VS Code, open the Extensions view (Ctrl+Shift+X)
+# Click the "..." menu in the top-right corner and select "Install from VSIX..."
+# Choose the .vsix file you just created.
+```
+
+### 3. Using the Extension
+
+1.  After installing, reload VS Code.
+2.  Open a Jupyter Notebook (`.ipynb` file).
+3.  Click the kernel selector in the top-right corner.
+4.  Choose "**MCP Agent Kernel**".
+5.  You can now try the superpowers!
 
 ---
 
-## The Problem
+## ✨ Superpowers
 
-<table>
-<tr>
-<td width="50%">
+### 🔮 SQL on DataFrames: The 10x Easier Way to Query
 
-**Standard Jupyter**
+Stop writing verbose pandas code. Start writing clean, readable SQL.
 
-```python
-# Complex pandas GROUP BY (8-12 lines)
-result = (df.groupby(['region', 'product'])
-            .agg({'revenue': 'sum', 'units': 'sum'})
-            .reset_index()
-            .sort_values('revenue', ascending=False)
-            .head(10))
+**Why it's a superpower:**
 
-# Kernel crashes → lose all work
-# 100MB output → browser freezes
-# EDA → 30 minutes of boilerplate
-```
+*   **Zero-copy:** In-memory SQL on your DataFrames. No data duplication.
+*   **Readable:** 10x more readable than complex pandas code.
+*   **Familiar:** If you know SQL, you know how to use it.
 
-</td>
-<td width="50%">
+### 🤖 Auto-EDA: Exploratory Data Analysis in 60 Seconds
 
-**MCP Jupyter (With Superpowers)**
-
-```python
-# SQL query (1 line, 10x easier)
-query_dataframes("""
-    SELECT region, SUM(revenue) as total
-    FROM df GROUP BY region
-    ORDER BY total DESC LIMIT 10
-""")
-
-# Kernel crashes → auto-recovery (Reaper)
-# 100MB output → asset offloading (no freeze)
-# EDA → /prompt auto-analyst (60 seconds)
-```
-
-</td>
-</tr>
-</table>
-
----
-
-## Superpowers
-
-### 🎯 DuckDB SQL: Query DataFrames Like a Database
-
-```python
-# Before: Verbose pandas
-grouped = df[df['age'] > 25].groupby('city')['income'].mean().sort_values(ascending=False)
-
-# After: Clean SQL
-query_dataframes("SELECT city, AVG(income) FROM df WHERE age > 25 GROUP BY city ORDER BY AVG(income) DESC")
-```
-
-**Why**: Zero-copy in-memory SQL. 10x more readable. Familiar syntax for SQL users.
-
-### 📊 Auto-EDA: 60-Second Exploratory Data Analysis
+Stop writing matplotlib and seaborn boilerplate. Start getting instant insights. In a cell, type:
 
 ```python
 /prompt auto-analyst
 ```
 
-**Generates**:
+**What it does:**
 
-- Data health check (missing values, outliers)
-- 3+ visualizations (distributions, correlations, trends)
-- Statistical summary with recommendations
+*   **Data Health Check:** Finds missing values and outliers.
+*   **Visualizations:** Generates 3+ plots (distributions, correlations, etc.).
+*   **Summary & Recommendations:** Tells you what to look for next.
 
-**Why**: Eliminates 30 minutes of matplotlib/seaborn boilerplate.
+### 🛡️ The Reaper: Your Guardian Against Crashed Kernels
 
-### 🔄 Git-Safe Workflows: Stable Cell IDs for Version Control
+Stop losing your work when a kernel crashes. The Reaper automatically brings it back to life.
 
-```python
-# Cell IDs persist across sessions (nbformat 4.5)
-get_notebook_outline("analysis.ipynb")  # Returns stable IDs
-edit_cell(id="abc-123", content="...")  # Works after git pull
-```
+**How it works:**
 
-**Why**: Reliable notebook addressing survives server restarts and git operations. Enables team collaboration without merge conflicts.
+*   **Monitors:** Keeps an eye on your kernel.
+*   **Revives:** Restarts it in <2 seconds if it crashes.
+*   **Recovers:** Restores your notebook's state.
 
 ---
 
-## Why MCP Jupyter Wins
+## 🤝 Contributing
 
-| Feature | Standard Jupyter | JupyterLab | Datalayer | **MCP Jupyter** |
-|---------|------------------|------------|-----------|-----------------|
-| **Kernel Crash Recovery** | ❌ Manual restart | ❌ Manual restart | ⚠️ Partial | ✅ **Automatic (Reaper)** |
-| **100MB Outputs** | ❌ Browser crash | ⚠️ Slow render | ✅ | ✅ **Asset offloading** |
-| **SQL on DataFrames** | ❌ | ❌ | ❌ | ✅ **DuckDB (zero-copy)** |
-| **Auto-EDA** | ❌ 30min manual | ❌ 30min manual | ❌ | ✅ **60-second AI** |
-| **Git-Safe Cell IDs** | ❌ | ❌ | ❌ | ✅ **nbformat 4.5** |
-| **Agent Tools** | ⚠️ 5-10 basic | ⚠️ 5-10 basic | ⚠️ 10-15 | ✅ **32 specialized** |
-| **Consumer Prompts** | ❌ | ❌ | ❌ | ✅ **3 pre-built personas** |
-| **Offline Install** | ✅ | ✅ | ❌ Requires cloud | ✅ **Fat VSIX (26MB)** |
-| **Real-Time Collab** | ❌ | ⚠️ Extension | ✅ **Built-in** | ⚠️ Planned |
-
-**[📊 Full Comparison Table →](https://yourusername.github.io/mcp-jupyter-server/comparison/jupyter/)**
+We welcome contributions! Please see our [**Contributing Guide**](CONTRIBUTING.md) to get started.
 
 ---
 
-## Quick Start
-
-> 📺 **New to MCP Jupyter?** Check out the **[🚀 Visual Quick Start Guide](docs/QUICKSTART.md)** with screenshots and video demos!
-
-### 1. Install (One Command)
-
-```bash
-pip install "mcp-server-jupyter[superpowers]"
-```
-
-### 2. Try It Instantly (GitHub Codespaces)
-
-[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://github.com/codespaces/new?repo=yourusername/mcp-jupyter-server)
-
-**Zero setup required.** Codespaces pre-installs everything: Python server, VS Code extension, demo notebooks.
-
-### 3. Or Run Locally (VS Code)
-
-1. **Install VS Code Extension**:
-   - Open Extensions (`Ctrl+Shift+X`)
-   - Search "MCP Agent Kernel"
-   - Click Install
-
-2. **Launch Quick Start Wizard** (New Users):
-   - Press `Ctrl+Shift+P`
-   - Type "MCP Jupyter: Quick Start"
-   - Choose setup mode (managed server, existing server, or remote)
-   - Done in <2 minutes!
-
-3. **Or Configure Manually**:
-   - Open a Notebook: `code demo.ipynb`
-   - Click kernel selector (top-right)
-   - Choose "MCP Agent Kernel"
-
-4. **Try a Superpower**:
-   ```python
-   /prompt auto-analyst
-   ```
-
-### Connection Resilience
-
-The extension includes enterprise-grade connection features:
-
-- **Auto-Reconnection**: Exponential backoff (1s → 32s, up to 10 attempts)
-- **Heartbeat Monitoring**: Ping/pong every 30s, auto-reconnect on 3 missed beats
-- **Connection Status**: Visual indicator in status bar (🟢 Connected, 🟡 Reconnecting, 🔴 Disconnected)
-- **State Persistence**: Pending executions saved to `.vscode/mcp-state.json` and restored after reconnect
-
----
-
-## Architecture: The Crucible
-
-Standard Jupyter kernels crash and lose state. **MCP Jupyter has the Reaper**.
-
-```mermaid
-graph TB
-    A[VS Code Extension] -->|WebSocket| B[MCP Server]
-    B --> C[SessionManager]
-    C --> D[Notebook State]
-    C --> E[AsyncKernelManager]
-    
-    F[Reaper] -->|Monitors| E
-    F -->|Revives| E
-    
-    G[Asset Offloading] -->|>100MB outputs| H[Disk Storage]
-    
-    I[DuckDB SQL] --> E
-    J[Git-Safe IDs] --> K[Cell Addressing]
-    
-    style F fill:#f96,stroke:#333,stroke-width:2px
-    style G fill:#f96,stroke:#333,stroke-width:2px
-    style I fill:#9f6,stroke:#333,stroke-width:2px
-    style J fill:#9f6,stroke:#333,stroke-width:2px
-```
-
-**What Makes It Bulletproof**:
-
-- **Reaper**: Auto-restarts crashed kernels in <2 seconds
-- **Asset Offloading**: 100MB+ outputs stream to disk (no browser freeze)
-- **Error Recovery**: Self-healing on bad code
-- **Output Truncation**: Massive logs handled gracefully
-
-**[🏗️ Architecture Deep Dive →](https://yourusername.github.io/mcp-jupyter-server/architecture/crucible/)**
-
----
-
-## Observability & Diagnostics
-
-### Error Transparency (Week 3)
-
-The extension classifies all connection errors into 6 types with actionable recovery steps:
-
-- **AUTH_FAILED**: Invalid API key → Check credentials in settings
-- **NETWORK_ERROR**: Connection timeout → Verify server URL and firewall
-- **SERVER_CRASH**: Kernel died → Check server logs for Python errors
-- **PORT_IN_USE**: Port conflict → Kill process or change port
-- **TIMEOUT**: Server not responding → Increase timeout or check server load
-- **UNKNOWN**: Unclassified error → View full logs
-
-**Privacy-Preserving Telemetry**: All errors logged to `.vscode/mcp-telemetry.jsonl` (no PII, auto-rotates at 1000 entries)
-
-### Execution Dashboard (Week 4)
-
-**Active Executions View**:
-- Real-time tree view showing running cells
-- Elapsed time for each execution
-- Notebook name and cell index
-- Auto-refresh every 2 seconds
-
-**Audit Log Viewer**:
-- Filter by kernel ID, event type, or time range
-- CSV export for compliance reporting
-- Color-coded events (🔴 security, 🟢 kernel, 🔵 execution)
-- Command: `Ctrl+Shift+P` → "MCP Jupyter: Show Audit Log"
-
----
-
-## Real-World Use Cases
-
-### Data Science
-
-```python
-# Load 50M row dataset
-df = pd.read_parquet("huge_dataset.parquet")  # Takes 5 minutes
-
-# Try complex analysis (with auto-recovery)
-result = df.merge(other_df).groupby(...).apply(custom_func)
-
-# If kernel crashes → Reaper restarts automatically in <2s
-# Notebook state preserved via atomic writes + git-safe Cell IDs
-```
-
-### LLM Agent Development
-
-```python
-# Agent-ready tools (32 available)
-truncate_output(massive_log)  # Context window protection
-inspect_variable("df")  # JSON metadata (not full df)
-search_notebook("TODO")  # Grep without loading file
-install_package("scikit-learn")  # Smart pip with sys.executable
-```
-
-### Business Intelligence
-
-```python
-# SQL instead of pandas (familiar syntax for SQL users)
-query_dataframes("""
-    SELECT product_category,
-           COUNT(*) as transactions,
-           SUM(revenue) as total_revenue,
-           AVG(profit_margin) as avg_margin
-    FROM sales_data
-    WHERE transaction_date >= '2024-01-01'
-    GROUP BY product_category
-    HAVING total_revenue > 100000
-    ORDER BY total_revenue DESC
-"""
-)
-```
-
----
-
-## Consumer Prompts for Claude Desktop
-
-Pre-built personas for common workflows:
-
-```python
-# 1. Safe Co-Pilot
-/prompt jupyter-expert
-# Uses detect_sync_needed, prefers edit_and_run_cell, never drops cells
-
-# 2. Autonomous Researcher
-/prompt autonomous-researcher
-# OODA loop: Observe → Orient → Decide → Act
-# Self-healing, no memory bombs
-
-# 3. Auto-Analyst
-/prompt auto-analyst
-# 60-second EDA: health check, plots, correlations, recommendations
-```
-
-**[🤖 Full Prompt Documentation →](https://yourusername.github.io/mcp-jupyter-server/prompts/)**
-
----
-
-## Production-Grade Quality
-
-- ✅ **120+ Python unit tests** (all passing)
-- ✅ **6 real-world integration tests** (TypeScript ↔ Python ↔ WebSocket)
-- ✅ **VSIX verification script** (69 wheels, 26MB, cross-platform)
-- ✅ **No deprecation warnings** (Pydantic V2 compliant)
-- ✅ **SQL injection safe** (uses parameterized queries, see `tools/mcp-server-jupyter/src/duckdb_utils.py`)
-- ✅ **Cross-platform tested** (Linux, macOS ARM/Intel, Windows)
-
-**[🧪 Testing Guide →](https://yourusername.github.io/mcp-jupyter-server/development/testing/)**
-
----
-
-## Documentation
-
-📖 **[Full Documentation](https://yourusername.github.io/mcp-jupyter-server)**
-
-- [🚀 Quick Start Guide](docs/QUICKSTART.md) ← **Start here!**
-- [Getting Started](https://yourusername.github.io/mcp-jupyter-server/getting-started/installation/)
-- [Superpowers Guide](https://yourusername.github.io/mcp-jupyter-server/superpowers/)
-- [Architecture Deep Dive](https://yourusername.github.io/mcp-jupyter-server/architecture/)
-- [API Reference](https://yourusername.github.io/mcp-jupyter-server/api/session/)
-- [Comparison vs Alternatives](https://yourusername.github.io/mcp-jupyter-server/comparison/jupyter/)
-
----
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-**Quick Start for Contributors**:
-
-```bash
-git clone https://github.com/yourusername/mcp-jupyter-server.git
-cd mcp-jupyter-server/tools/mcp-server-jupyter
-pip install -e ".[superpowers]"
-pytest tests/ -v
-```
-
----
-
-## License
+## 📄 License
 
 MIT License. See [LICENSE](LICENSE) for details.
-
----
-
-## The Honest Take
-
-**We don't claim to be better at everything.**
-
-- **Real-time collaboration?** Use [Datalayer](https://datalayer.io).
-- **Browser-only workflow?** Use [JupyterLab](https://jupyterlab.readthedocs.io).
-- **Simple learning?** Standard Jupyter is fine.
-
-**We're better at**:
-
-- 🛡️ Crash recovery
-- 📦 Large output handling (>100MB)
-- 🤖 AI agent integration
-- 🔍 SQL on DataFrames
-- ⚡ VS Code workflows
-
-If you need those, **MCP Jupyter is the right choice**.
-
----
-
-<div align="center">
-
-**Built with ❤️ by the MCP Jupyter community**
-
-[![GitHub stars](https://img.shields.io/github/stars/yourusername/mcp-jupyter-server?style=social)](https://github.com/yourusername/mcp-jupyter-server)
-[![Twitter Follow](https://img.shields.io/twitter/follow/yourhandle?style=social)](https://twitter.com/yourhandle)
-
-</div>
