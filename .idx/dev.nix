@@ -5,5 +5,6 @@
     pkgs.python3 
     pkgs.poetry
     pkgs.stdenv.cc.cc.lib # Add the C++ standard library for zmq
+    pkgs.gcc # Add the GCC toolchain for compiling from source
   ];
 }
