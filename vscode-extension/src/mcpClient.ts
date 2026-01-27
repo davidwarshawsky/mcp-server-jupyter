@@ -37,14 +37,20 @@ export class MCPClient {
     private kernel: MCPKernel;
     private requestQueue: Map<string, (response: MCPResponse) => void> = new Map();
     private static client: MCPClient | null = null;
+    private outputChannel: vscode.OutputChannel;
+    private status: 'stopped' | 'starting' | 'running' = 'stopped';
+    private connectionState: 'disconnected' | 'connecting' | 'connected' = 'disconnected';
 
     private constructor(serverUri: string, sessionId: string, kernel: MCPKernel) {
         this.session_id = sessionId;
         this.kernel = kernel;
+        this.outputChannel = vscode.window.createOutputChannel('MCP Jupyter');
         this.ws = new WebSocket(`${serverUri}/ws/${this.session_id}`);
 
         this.ws.on('open', () => {
             console.log('Connected to MCP server');
+            this.connectionState = 'connected';
+            this.status = 'running';
         });
 
         this.ws.on('message', (data: Buffer | string) => {
@@ -62,25 +68,21 @@ export class MCPClient {
 
         this.ws.on('close', () => {
             console.log('Disconnected from MCP server');
+            this.connectionState = 'disconnected';
+            this.status = 'stopped';
             MCPClient.client = null; // Allow re-creation
         });
 
         this.ws.on('error', (error: Error) => {
             console.error('WebSocket error:', error);
-            // [DUH FIX: WHERE ARE MY LOGS] Add "Show Logs" button on errors
-            const errorMsg = error.message.toLowerCase();
-            if (errorMsg.includes('error') || errorMsg.includes('traceback') || errorMsg.includes('failed')) {
-                vscode.window.showErrorMessage(
-                    `MCP Server Error: ${error.message}`,
-                    'Show Logs'
-                ).then(choice => {
-                    if (choice === 'Show Logs') {
-                        vscode.commands.executeCommand('mcp-jupyter.showServerLogs');
-                    }
-                });
-            } else {
-                vscode.window.showErrorMessage(`WebSocket Error: ${error.message}`);
-            }
+            this.outputChannel.appendLine(`WebSocket Error: ${error.message}`);
+            vscode.window.showErrorMessage(`MCP Server Error: ${error.message}`, 'Show Logs').then(choice => {
+                if (choice === 'Show Logs') {
+                    this.outputChannel.show();
+                }
+            });
+            this.connectionState = 'disconnected';
+            this.status = 'stopped';
             MCPClient.client = null; // Allow re-creation
         });
     }
@@ -90,6 +92,41 @@ export class MCPClient {
             MCPClient.client = new MCPClient(serverUri, sessionId, kernel);
         }
         return MCPClient.client;
+    }
+
+    public start(): Promise<void> {
+        this.status = 'starting';
+        this.connectionState = 'connecting';
+        // The connection is initiated in the constructor, so we just need to wait for it to open.
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
+                if (this.connectionState !== 'connected') {
+                    reject(new Error('Connection timeout'));
+                }
+            }, 10000);
+
+            this.ws.on('open', () => {
+                clearTimeout(timeout);
+                resolve();
+            });
+        });
+    }
+
+    public getStatus(): 'stopped' | 'starting' | 'running' {
+        return this.status;
+    }
+
+    public getConnectionState(): 'disconnected' | 'connecting' | 'connected' {
+        return this.connectionState;
+    }
+
+    public getOutputChannel(): vscode.OutputChannel {
+        return this.outputChannel;
+    }
+
+    public listEnvironments(): Promise<any[]> {
+        // This is a placeholder. A real implementation would send a request to the server.
+        return Promise.resolve(["Python 3.8", "Python 3.9"]);
     }
 
     private generateRequestId(): string {
@@ -115,7 +152,6 @@ export class MCPClient {
 
             this.ws.send(JSON.stringify(payload));
 
-            // Timeout for the request
             setTimeout(() => {
                 if (this.requestQueue.has(request_id)) {
                     this.requestQueue.delete(request_id);
@@ -131,7 +167,7 @@ export class MCPClient {
             code,
             cell_id: cellId
         });
-        return response.data; // Assuming the server sends back a data field
+        return response.data;
     }
 
     public async requestHandoff(): Promise<boolean> {
@@ -152,12 +188,6 @@ export class MCPClient {
         return false;
     }
 
-    /**
-     * Executes a DuckDB query on the server using parameterized queries to prevent injection.
-     * @param query The SQL query string, with '?' for placeholders.
-     * @param params An array of parameters to substitute for the placeholders.
-     * @returns The query result from the server.
-     */
     public async executeDuckDBQuery(query: string, params?: unknown[]): Promise<unknown> {
         const response = await this.sendRequest({
             type: 'execute_duckdb_query',
