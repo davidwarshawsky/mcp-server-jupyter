@@ -5,7 +5,6 @@ Server Tools - Server info, status, and health check endpoints.
 import json
 import sys
 from starlette.responses import JSONResponse
-from src.audit_log import audit_tool
 
 # Version for capability negotiation
 __version__ = "0.3.0"
@@ -15,7 +14,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
     """Register server-related tools with the MCP server."""
 
     @mcp.tool()
-    @audit_tool
     def get_server_info():
         """
         [FINAL PUNCH LIST #5] Get server version and capabilities for handshake.
@@ -30,7 +28,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
             {
                 "version": __version__,
                 "capabilities": [
-                    "audit_logs",  # Code execution audit trail
                     "sandbox",  # DuckDB sandboxing
                     "uuid_reaper",  # UUID-based zombie reaping
                     "trace_id",  # Request tracing support
@@ -50,7 +47,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
         )
 
     @mcp.tool()
-    @audit_tool
     def get_server_status():
         """Check how many humans are connected to this session."""
         return json.dumps(
@@ -65,7 +61,6 @@ def register_server_tools(mcp, session_manager, connection_manager):
         )
 
     @mcp.tool()
-    @audit_tool
     async def get_version():
         """
         Get MCP server version for compatibility checking.
@@ -139,7 +134,6 @@ async def health_check(session_manager, version: str):
     # ═══════════════════════════════════════════════════════════════
 
     @mcp.tool()
-    @audit_tool
     def find_active_session(notebook_path: str):
         """
         [UI TOOL] Check if a kernel is already running for this notebook.
@@ -188,7 +182,6 @@ async def health_check(session_manager, version: str):
         return json.dumps({"found": False})
 
     @mcp.tool()
-    @audit_tool
     def list_all_sessions():
         """
         [UI TOOL] List all running kernels for the Sidebar UI.
@@ -214,7 +207,6 @@ async def health_check(session_manager, version: str):
         return json.dumps(sessions, indent=2)
 
     @mcp.tool()
-    @audit_tool
     async def attach_session(target_notebook_path: str, source_pid: int):
         """
         [RENAME FIX] Attach the current notebook view to an existing kernel process.
@@ -265,7 +257,6 @@ async def health_check(session_manager, version: str):
             })
 
     @mcp.tool()
-    @audit_tool
     def get_execution_history(notebook_path: str, limit: int = 50):
         """
         [REHYDRATION] Get recent execution outputs to populate blank cells on reload.
@@ -300,7 +291,6 @@ async def health_check(session_manager, version: str):
         return json.dumps(history, indent=2)
 
     @mcp.tool()
-    @audit_tool
     def get_notebook_history(notebook_path: str):
         """
         [OUTPUT REHYDRATION] Get full visual history with outputs for a notebook.
@@ -330,7 +320,6 @@ async def health_check(session_manager, version: str):
         return json.dumps(history, indent=2)
 
     @mcp.tool()
-    @audit_tool
     async def get_completions(notebook_path: str, code: str, cursor_pos: int):
         """
         [AUTOCOMPLETE PROXY] Get Jupyter kernel completions for a code position.

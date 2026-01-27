@@ -354,14 +354,17 @@ except ImportError:
 
 def get_startup_code() -> str:
     """
-    Returns the complete startup code to inject into a new kernel.
-
-    Returns:
-        str: Python code to execute in the kernel
+    Returns minimal startup code for clean kernel initialization.
+    
+    Following the "Don't Touch My Bootloader" philosophy, we only inject
+    essential autoreload functionality and nothing else.
     """
-    # Use simple replacement rather than str.format() to avoid interpreting
-    # arbitrary `{}` sequences inside embedded f-strings and templates.
-    result = KERNEL_STARTUP_TEMPLATE.replace(
-        "{INSPECT_HELPER_CODE}", INSPECT_HELPER_CODE
-    ).replace("{DUCKDB_MAGIC_CODE}", DUCKDB_MAGIC_CODE)
-    return result
+    return """
+# Minimal startup: Only autoreload for development convenience
+try:
+    from IPython import get_ipython
+    get_ipython().run_line_magic('load_ext', 'autoreload')
+    get_ipython().run_line_magic('autoreload', '2')
+except Exception:
+    pass
+"""

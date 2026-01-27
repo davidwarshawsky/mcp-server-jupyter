@@ -7,7 +7,6 @@ list_kernel_packages, list_available_environments, switch_kernel_environment
 """
 
 import json
-from src.audit_log import audit_tool
 from typing import Optional
 from src.observability import get_logger, get_tracer
 from src.validation import validated_tool
@@ -30,7 +29,6 @@ def register_kernel_tools(mcp, session_manager):
     """Register kernel lifecycle tools with the MCP server."""
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(StartKernelArgs)
     async def start_kernel(
         notebook_path: str,
@@ -64,7 +62,6 @@ def register_kernel_tools(mcp, session_manager):
             )
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(StopKernelArgs)
     async def stop_kernel(notebook_path: str):
         """
@@ -85,7 +82,6 @@ def register_kernel_tools(mcp, session_manager):
             return await session_manager.stop_kernel(notebook_path)
 
     @mcp.tool()
-    @audit_tool
     def list_kernels():
         """
         List all active kernel sessions.
@@ -115,21 +111,18 @@ def register_kernel_tools(mcp, session_manager):
         return json.dumps(result, indent=2)
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(InterruptKernelArgs)
     async def interrupt_kernel(notebook_path: str):
         """Stops the currently running cell immediately."""
         return await session_manager.interrupt_kernel(notebook_path)
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(RestartKernelArgs)
     async def restart_kernel(notebook_path: str):
         """Restarts the kernel, clearing all variables but keeping outputs."""
         return await session_manager.restart_kernel(notebook_path)
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(CheckWorkingDirectoryArgs)
     async def check_working_directory(notebook_path: str):
         """Checks the current working directory (CWD) of the active kernel."""
@@ -137,7 +130,6 @@ def register_kernel_tools(mcp, session_manager):
         return await session_manager.run_simple_code(notebook_path, code)
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(SetWorkingDirectoryArgs)
     async def set_working_directory(notebook_path: str, path: str):
         """Changes the CWD of the kernel."""
@@ -150,7 +142,6 @@ def register_kernel_tools(mcp, session_manager):
         return f"Working directory changed to: {result}"
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(ListKernelPackagesArgs)
     async def list_kernel_packages(notebook_path: str):
         """Lists packages installed in the active kernel's environment."""
@@ -164,14 +155,12 @@ for p, v in installed:
         return await session_manager.run_simple_code(notebook_path, code)
 
     @mcp.tool()
-    @audit_tool
     def list_available_environments():
         """Scans the system for Python environments (venvs, conda, etc)."""
         envs = session_manager.list_environments()
         return json.dumps(envs, indent=2)
 
     @mcp.tool()
-    @audit_tool
     @validated_tool(SwitchKernelEnvironmentArgs)
     async def switch_kernel_environment(notebook_path: str, venv_path: str):
         """

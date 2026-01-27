@@ -17,7 +17,7 @@ from jupyter_client.manager import AsyncKernelManager
 from src import notebook, utils
 from src.observability import get_logger, get_tracer
 from src.kernel_state import KernelStateManager
-from src.kernel_startup import INSPECT_HELPER_CODE, get_startup_code
+from src.kernel_startup import get_startup_code
 from src.kernel_lifecycle import KernelLifecycle
 from src.execution_scheduler import ExecutionScheduler
 from src.io_multiplexer import IOMultiplexer
@@ -357,31 +357,11 @@ class SessionManager:
 
                 # Check if kernel process is still alive
                 try:
-                    # Lazy import to avoid startup crashes
-                    import psutil
-
-                    # [REAPER FIX] Validate create_time to ensure PID wasn't recycled
-                    pid_valid = False
-                    if psutil.pid_exists(pid):
-                        try:
-                            proc = psutil.Process(pid)
-                            # If we have saved create_time, verify it matches
-                            if (
-                                saved_create_time is None
-                                or proc.create_time() == saved_create_time
-                            ):
-                                pid_valid = True
-                            else:
-                                logger.warning(
-                                    f"PID {pid} was reused. Skipping restoration."
-                                )
-                        except (psutil.NoSuchProcess, psutil.AccessDenied):
-                            pass
-
-                    if pid_valid and Path(connection_file).exists():
+                    # Simplified session restoration - no PID validation
+                    if Path(connection_file).exists():
                         # Try to reconnect to existing kernel
                         logger.info(
-                            f"Attempting to restore session for {nb_path} (PID: {pid})"
+                            f"Attempting to restore session for {nb_path}"
                         )
 
                         try:
@@ -462,27 +442,9 @@ class SessionManager:
                             cleaned_count += 1
                     else:
                         # Kernel is dead or connection file missing, clean up
-                        if not psutil.pid_exists(pid):
-                            logger.info(
-                                f"Kernel PID {pid} for {nb_path} is dead, cleaning up"
-                            )
-                        else:
-                            # [GRIM REAPER] If PID exists but we can't connect/verify, kill it to prevent zombies
-                            logger.warning(
-                                f"Kernel PID {pid} exists but connection file is missing/invalid. Killing zombie process."
-                            )
-                            try:
-                                proc = psutil.Process(pid)
-                                proc.terminate()
-                                # Give it a moment to die gracefully
-                                try:
-                                    proc.wait(timeout=2.0)
-                                except psutil.TimeoutExpired:
-                                    proc.kill()
-                            except Exception as cleanup_error:
-                                logger.warning(
-                                    f"Failed to kill zombie kernel {pid}: {cleanup_error}"
-                                )
+                        logger.info(
+                            f"Kernel session file for {nb_path} is stale, cleaning up"
+                        )
                         session_file.unlink()
                         cleaned_count += 1
                 except ImportError:
@@ -1313,10 +1275,8 @@ class SessionManager:
             max_queue_size = int(os.environ.get("MCP_MAX_QUEUE_SIZE", "1000"))
             session["execution_queue"] = asyncio.Queue(maxsize=max_queue_size)
 
-        # HEAL CHECK: If this is an inspection or system tool, ensure helper exists
-        # If the kernel restarted, we might not know, so we ensure it's available.
-        if "_mcp_inspect" in code and "def _mcp_inspect" not in code:
-            code = INSPECT_HELPER_CODE + "\n" + code
+        # HEAL CHECK: Removed invasive inspection helper injection
+        # Following "Don't Touch My Bootloader" philosophy
 
         # Generate execution ID if not provided
         if not exec_id:
