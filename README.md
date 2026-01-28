@@ -16,16 +16,13 @@ This project is composed of two main parts:
 1.  A **VS Code Extension** (`vscode-extension`) that provides the user interface and frontend logic.
 2.  A **Jupyter Server Backend** (`tools/mcp-server-jupyter`) that manages kernels, state, and executes the "superpowers".
 
-### ⚙️ Architecture: Local-First by Design
+## Our Philosophy: Do No Harm
 
-MCP Jupyter is **explicitly designed as a local-only tool**. This is not a limitation—it's a feature. By focusing exclusively on local kernel execution, we achieve:
+This tool is designed to be a lightweight, reliable companion that respects your development environment. Our core principles are:
 
-- **Simplicity:** No Docker, Kubernetes, or cloud orchestration complexity.
-- **Reliability:** Direct process management, no network-dependent orchestration.
-- **Developer Experience:** Instant feedback, no orchestration overhead or debugging.
-- **Security:** Kernels run as the current user with filesystem access they explicitly control.
-
-If you need cloud-native or containerized Jupyter execution, use standard JupyterHub, JupyterLab on cloud platforms, or managed services like SageMaker or Colab.
+-   **Works Out of the Box:** The base installation is minimal and has no heavy dependencies. It's designed to "just work."
+-   **Do No Harm:** We never automatically install heavy libraries or modify your environment. Advanced features requiring packages like `pandas` or `duckdb` are strictly opt-in.
+-   **Act as a Tool, Not a Server:** The extension runs as a simple tool under your control. It avoids complex background processes, ensuring it stays lightweight and predictable.
 
 | Before MCP Jupyter                               | After MCP Jupyter                                |
 | ------------------------------------------------ | ------------------------------------------------ |
@@ -33,17 +30,6 @@ If you need cloud-native or containerized Jupyter execution, use standard Jupyte
 | 🐌 Browser freezes with large outputs            | ⚡️ **No-freeze large outputs**                    |
 | 🤯 Complex pandas code for simple queries        | 🔮 **SQL queries on your DataFrames**            |
 |  tedious boilerplate for EDA                    | 🤖 **60-second automated EDA**                   |
-
----
-
-## 🏛️ Architecture
-
-MCP Jupyter uses a service-oriented architecture. The VS Code extension acts as a client to the `mcp-server-jupyter` backend.
-
-1.  The **VS Code Extension** is responsible for the UI, including the session view, variable dashboard, and rendering notebook outputs.
-2.  The **`mcp-server-jupyter`** is a Python-based server that manages the lifecycle of Jupyter kernels. It handles state persistence, allowing for features like crash recovery. It also provides the "superpowers" like SQL-on-DataFrame queries and automated EDA.
-
-This separation of concerns makes the system more robust and scalable. The extension communicates with the server via a well-defined protocol.
 
 ---
 
