@@ -54,7 +54,7 @@ def migrate_notebook_to_cell_ids(notebook_path: str) -> str:
     Returns:
         Status message with migration results
     """
-    from src.notebook import _atomic_write_notebook
+    from mcp_server_jupyter.notebook import _atomic_write_notebook
 
     path = Path(notebook_path)
     if not path.exists():
@@ -178,7 +178,7 @@ def edit_cell_by_id(
     Raises:
         StaleStateError: If cell moved or doesn't exist
     """
-    from src.notebook import _atomic_write_notebook
+    from mcp_server_jupyter.notebook import _atomic_write_notebook
 
     path = Path(notebook_path)
     if not path.exists():
@@ -245,7 +245,7 @@ def delete_cell_by_id(
     Raises:
         StaleStateError: If cell moved or doesn't exist
     """
-    from src.notebook import _atomic_write_notebook
+    from mcp_server_jupyter.notebook import _atomic_write_notebook
 
     path = Path(notebook_path)
     if not path.exists():
@@ -308,7 +308,7 @@ def insert_cell_by_id(
     Returns:
         Success message with new cell ID
     """
-    from src.notebook import _atomic_write_notebook
+    from mcp_server_jupyter.notebook import _atomic_write_notebook
 
     path = Path(notebook_path)
     if not path.exists():

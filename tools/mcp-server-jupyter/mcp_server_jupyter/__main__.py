@@ -8,11 +8,11 @@ import uvicorn
 import time
 from pathlib import Path
 
-from src.kernel_manager import KernelManager
-from src.package_manager import PackageManager
-from src.logging_config import setup_logging
-from src.config import config  # Import the config object
-from src.config import settings
+from mcp_server_jupyter.kernel_manager import KernelManager
+from mcp_server_jupyter.package_manager import PackageManager
+from mcp_server_jupyter.logging_config import setup_logging
+from mcp_server_jupyter.config import config  # Import the config object
+from mcp_server_jupyter.config import settings
 
 # Set up structured logging BEFORE creating the FastAPI app
 setup_logging()
@@ -88,7 +88,7 @@ kernel_manager = KernelManager()
 package_manager = PackageManager()
 
 # Session & Connection management (backwards-compatible exports for tests and tooling)
-from src.session import SessionManager
+from mcp_server_jupyter.session import SessionManager
 import time
 import json
 
@@ -223,10 +223,10 @@ connection_manager = ConnectionManager()
 
 
 # ---- Re-exported utilities for tests and tooling ----
-from src.tools.prompts_tools import _read_prompt
+from mcp_server_jupyter.tools.prompts_tools import _read_prompt
 import mcp.types as types
-from src.config import load_and_validate_settings
-from src.tools.asset_tools import read_asset
+from mcp_server_jupyter.config import load_and_validate_settings
+from mcp_server_jupyter.tools.asset_tools import read_asset
 
 
 async def query_dataframes(notebook_path: str, sql_query: str):
@@ -257,7 +257,7 @@ def _compute_proposal_store_file():
 
 PROPOSAL_STORE_FILE = _compute_proposal_store_file()
 
-from src.tools.server_tools import health_check as _health_check_tool, __version__ as _SERVER_VERSION
+from mcp_server_jupyter.tools.server_tools import health_check as _health_check_tool, __version__ as _SERVER_VERSION
 
 
 # Prompt helpers (tests expect functions available at src.main)
@@ -454,8 +454,8 @@ async def _stdio_server():
     notify_edit_result. Messages are newline-delimited JSON-RPC on stdin/stdout.
     """
     import sys
-    from src.notebook import create_notebook
-    from src.tools.proposal_tools import notify_edit_result
+    from mcp_server_jupyter.notebook import create_notebook
+    from mcp_server_jupyter.tools.proposal_tools import notify_edit_result
 
     # Write a small startup log to stderr for observability (not stdout)
     import sys

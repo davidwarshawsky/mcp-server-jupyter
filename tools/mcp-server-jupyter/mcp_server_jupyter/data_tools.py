@@ -5,12 +5,12 @@ These tools provide "superpowers" for data exploration by enabling SQL queries
 directly on Python variables in memory using DuckDB.
 """
 
-from src.utils import ToolResult
-from src import utils
+from mcp_server_jupyter.utils import ToolResult
+from mcp_server_jupyter import utils
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from src.session import SessionManager
+    from mcp_server_jupyter.session import SessionManager
 
 
 async def query_dataframes(
@@ -184,7 +184,7 @@ except Exception as e:
                 # Mitigation for large outputs: offload to assets if result is too large
                 from pathlib import Path
                 import hashlib
-                from src.asset_manager import ensure_assets_gitignored
+                from mcp_server_jupyter.asset_manager import ensure_assets_gitignored
 
                 MAX_RESULT_BYTES = 100 * 1024  # 100KB
 
