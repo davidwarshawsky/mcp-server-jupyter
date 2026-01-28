@@ -13,6 +13,18 @@ This extension acts as a "Proxy Kernel" for Jupyter notebooks in VSCode. Instead
 - **Real-time Streaming**: See outputs appear incrementally during long-running computations
 - **Zero Lock-in**: Works with standard `.ipynb` files - no proprietary formats
 
+## 🐍 Bring Your Own Python
+
+This extension uses your active VS Code Python interpreter. It does not create hidden environments. The MCP server runs as a subprocess of VS Code, connecting directly to the Python environment you have selected in VS Code's Python extension settings.
+
+**Why this approach?**
+- **Transparency**: You always know which Python environment is being used
+- **Compatibility**: Works with your existing conda environments, virtualenvs, or system Python
+- **Performance**: No overhead from managing separate environments
+- **Security**: No hidden processes or environments that could conflict with your setup
+
+If the required `mcp-server-jupyter` package is not installed in your selected Python environment, the extension will automatically offer to install it for you.
+
 ## 🚀 Features
 
 ### ⚡ Connection Resilience (Week 1 - NEW)

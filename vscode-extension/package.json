@@ -2,7 +2,7 @@
     "name": "mcp-jupyter-vscode",
     "displayName": "MCP Jupyter",
     "description": "",
-    "version": "0.0.1",
+    "version": "0.3.0",
     "engines": {
         "vscode": "^1.90.0"
     },

@@ -1,4 +1,7 @@
 import * as vscode from 'vscode';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+import { MCPClient } from './mcpClient';
 import { IFeature } from './features/feature.interface';
 import { SnapshotFeature } from './features/snapshot.feature';
 
@@ -12,41 +15,53 @@ const features: IFeature[] = [
  * This is the main entry point of the extension.
  * It orchestrates the activation of all registered features.
  */
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
     console.log('Congratulations, your extension "mcp-jupyter" is now active!');
 
-    // Get the active Python interpreter
+    const execAsync = promisify(exec);
+
+    // 1. Verify Python Environment
     const pythonExtension = vscode.extensions.getExtension('ms-python.python');
     if (!pythonExtension) {
         vscode.window.showErrorMessage('Python extension is not installed. Please install ms-python.python.');
         return;
     }
 
+    if (!pythonExtension.isActive) await pythonExtension.activate();
     const pythonApi = pythonExtension.exports;
     const pythonPath = pythonApi.settings.getExecutionDetails().execCommand[0];
 
     if (!pythonPath) {
-        vscode.window.showInformationMessage(
-            'MCP Jupyter: Please configure a Python interpreter in VS Code settings.',
-            'Open Settings'
-        ).then(choice => {
-            if (choice === 'Open Settings') {
-                vscode.commands.executeCommand('workbench.action.openSettings', 'python.pythonPath');
-            }
-        });
+        vscode.window.showErrorMessage('No Python interpreter selected. Please select one in VS Code.');
         return;
     }
 
-    // Check if mcp-server-jupyter is installed
-    const terminal = vscode.window.createTerminal('MCP Check');
-    terminal.sendText(`${pythonPath} -c "import mcp_server_jupyter"`);
-    terminal.sendText('exit');
-    
-    // For now, assume it's installed or prompt
-    // TODO: Add proper check and install prompt
+    // 2. Check for MCP Server & Install if missing
+    try {
+        await execAsync(`"${pythonPath}" -c "import mcp_server_jupyter"`);
+    } catch (e) {
+        const choice = await vscode.window.showWarningMessage(
+            `The "mcp-server-jupyter" package is required in your selected Python environment.\n\nInterpreter: ${pythonPath}`,
+            "Install via Pip", "Cancel"
+        );
 
-    // Create MCP client with stdio
-    const sessionId = 'vscode-session';
+        if (choice === "Install via Pip") {
+            await vscode.window.withProgress({
+                location: vscode.ProgressLocation.Notification,
+                title: "Installing MCP Server...",
+                cancellable: false
+            }, async () => {
+                // Install from PyPI (or local path for dev)
+                await execAsync(`"${pythonPath}" -m pip install mcp-server-jupyter`);
+            });
+            vscode.window.showInformationMessage("MCP Server installed! Reloading...");
+        } else {
+            return; // Exit if user declines
+        }
+    }
+
+    // 3. Start Client
+    const sessionId = 'vscode-session-' + Date.now();
     const mcpClient = MCPClient.getInstance(pythonPath, sessionId);
 
     // Activate features
