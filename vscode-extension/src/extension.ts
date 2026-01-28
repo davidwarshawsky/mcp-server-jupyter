@@ -20,43 +20,28 @@ export async function activate(context: vscode.ExtensionContext) {
 
     const execAsync = promisify(exec);
 
-    // 1. Verify Python Environment
-    const pythonExtension = vscode.extensions.getExtension('ms-python.python');
-    if (!pythonExtension) {
-        vscode.window.showErrorMessage('Python extension is not installed. Please install ms-python.python.');
-        return;
-    }
+    // 1. Get the Active Interpreter
+    const pythonExt = vscode.extensions.getExtension('ms-python.python');
+    if (!pythonExt) return;
+    if (!pythonExt.isActive) await pythonExt.activate();
+    
+    // Get the path the user has ALREADY selected for this notebook
+    const pythonPath = pythonExt.exports.settings.getExecutionDetails().execCommand?.[0];
+    if (!pythonPath) return;
 
-    if (!pythonExtension.isActive) await pythonExtension.activate();
-    const pythonApi = pythonExtension.exports;
-    const pythonPath = pythonApi.settings.getExecutionDetails().execCommand[0];
-
-    if (!pythonPath) {
-        vscode.window.showErrorMessage('No Python interpreter selected. Please select one in VS Code.');
-        return;
-    }
-
-    // 2. Check for MCP Server & Install if missing
+    // 2. Silent Check & Noisy Fix
     try {
         await execAsync(`"${pythonPath}" -c "import mcp_server_jupyter"`);
-    } catch (e) {
+    } catch {
         const choice = await vscode.window.showWarningMessage(
-            `The "mcp-server-jupyter" package is required in your selected Python environment.\n\nInterpreter: ${pythonPath}`,
-            "Install via Pip", "Cancel"
+            "The MCP features require a helper package in your Python environment.",
+            "Install Helper", "Ignore"
         );
-
-        if (choice === "Install via Pip") {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: "Installing MCP Server...",
-                cancellable: false
-            }, async () => {
-                // Install from PyPI (or local path for dev)
+        if (choice === "Install Helper") {
+            await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Installing..." }, async () => {
                 await execAsync(`"${pythonPath}" -m pip install mcp-server-jupyter`);
             });
-            vscode.window.showInformationMessage("MCP Server installed! Reloading...");
-        } else {
-            return; // Exit if user declines
+            vscode.commands.executeCommand('workbench.action.reloadWindow');
         }
     }
 

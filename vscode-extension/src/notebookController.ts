@@ -220,41 +220,28 @@ export class McpNotebookController {
           const items: vscode.NotebookCellOutputItem[] = [];
           const data = content.data || {};
 
-          // Order matters: VS Code picks the first one it can render.
-          // We want Rich > Image > Text.
-          const preferredMimeTypes = [
-              'application/vnd.mcp.asset+json', // Our custom asset type
+          // Priority Order: VS Code renders the FIRST valid mime it supports from this list
+          const mimePriority = [
+              'application/vnd.mcp.asset+json', // Our custom offloaded asset
               'application/vnd.plotly.v1+json',
               'text/html',
               'image/svg+xml',
               'image/png',
-              'image/jpeg',
               'text/plain'
           ];
 
-          // Add all available mime types
-          for (const mime of preferredMimeTypes) {
+          for (const mime of mimePriority) {
               if (data[mime]) {
-                  const value = data[mime];
-                  if (mime.startsWith('image/') && typeof value === 'string') {
-                       items.push(new vscode.NotebookCellOutputItem(Buffer.from(value, 'base64'), mime));
-                  } else if (typeof value === 'object') {
-                       items.push(vscode.NotebookCellOutputItem.json(value, mime));
+                  if (mime.startsWith('image/') && typeof data[mime] === 'string') {
+                      items.push(new vscode.NotebookCellOutputItem(Buffer.from(data[mime], 'base64'), mime));
                   } else {
-                       items.push(vscode.NotebookCellOutputItem.text(value.toString(), mime));
+                      items.push(vscode.NotebookCellOutputItem.text(typeof data[mime] === 'string' ? data[mime] : JSON.stringify(data[mime]), mime));
                   }
-              }
-          }
-          
-          // Add any remaining types not in our preferred list
-          for (const [mime, value] of Object.entries(data)) {
-              if (!preferredMimeTypes.includes(mime)) {
-                   items.push(vscode.NotebookCellOutputItem.text(JSON.stringify(value), mime));
               }
           }
 
           if (items.length > 0) {
-              await execution.appendOutput(new vscode.NotebookCellOutput(items, content.metadata || {}));
+              await execution.appendOutput(new vscode.NotebookCellOutput(items, content.metadata));
           }
           break;
 
