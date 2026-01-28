@@ -430,49 +430,6 @@ class SubmitInputArgs(SecureBaseModel):
 # ============================================================================
 
 
-class QueryDataframesArgs(SecureBaseModel):
-    """Arguments for query_dataframes tool (DuckDB)."""
-
-    notebook_path: str = Field(..., description="Path to notebook")
-    sql_query: str = Field(..., max_length=50_000, description="SQL query (max 50KB)")
-
-    @field_validator("sql_query")
-    @classmethod
-    def validate_sql(cls, v):
-        """Basic SQL validation."""
-        if not v or not v.strip():
-            raise ValueError("SQL query cannot be empty")
-
-        # Warn on dangerous patterns (but allow for read-only DuckDB)
-        dangerous = [
-            "DROP",
-            "DELETE",
-            "TRUNCATE",
-            "ALTER",
-            "CREATE TABLE",
-            "INSERT",
-            "UPDATE",
-        ]
-        query_upper = v.upper()
-        for keyword in dangerous:
-            if keyword in query_upper:
-                raise ValueError(
-                    f"Potentially dangerous SQL keyword detected: {keyword}"
-                )
-
-        if len(v) > 50_000:
-            raise ValueError("SQL query too long (max 50KB)")
-
-        return v.strip()
-
-    @field_validator("notebook_path")
-    @classmethod
-    def validate_path(cls, v):
-        if not v:
-            raise ValueError("Notebook path cannot be empty")
-        return v
-
-
 # ============================================================================
 # CHECKPOINT TOOLS (DEPRECATED - included for compatibility)
 # ============================================================================

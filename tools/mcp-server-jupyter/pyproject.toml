@@ -24,7 +24,9 @@ psutil = ">=5.9.0"
 pydantic = ">=2.7.0"
 pydantic-settings = ">=2.2.0"
 structlog = ">=24.1.0"
-# Superpowers (Optional but commonly used)
+
+[tool.poetry.group.superpowers.dependencies]
+# Optional superpowers for advanced data analysis
 duckdb = ">=1.0.0"
 pandas = ">=2.2.0"
 numpy = ">=1.26.0"

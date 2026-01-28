@@ -28,45 +28,11 @@ warnings.filterwarnings(
 )
 
 
-async def _run_startup_janitor():
-    """[DAY 3 OPT 3.2] Delete assets older than 24h on startup.
-    
-    If the server crashes hard (SIGKILL), check_asset_limits might not run,
-    leaving old assets forever. This janitor runs on startup to clean stale files.
-    """
-    try:
-        # Look for assets directory relative to current working directory
-        assets_dir = Path("assets")
-        
-        if assets_dir.exists():
-            now = time.time()
-            ttl = 24 * 3600  # 24 hours
-            deleted = 0
-            
-            for f in assets_dir.glob("*"):
-                if f.is_file():
-                    try:
-                        if now - f.stat().st_mtime > ttl:
-                            f.unlink()
-                            deleted += 1
-                    except Exception as e:
-                        # Silently skip files that can't be deleted (e.g., locked on Windows)
-                        logger.debug(f"[JANITOR] Skipped stale file {f.name}: {e}")
-            
-            if deleted > 0:
-                logger.info(f"[JANITOR] Cleaned up {deleted} stale assets on startup")
-    except Exception as e:
-        logger.warning(f"[JANITOR] Startup cleanup failed: {e}")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Run the previous startup logic here. Use lifespan instead of the
     # deprecated @app.on_event("startup").
     # Local-first deployment: no external orchestration checks on startup
-    
-    # [DAY 3 OPT 3.2] Run Janitor on startup
-    await _run_startup_janitor()
     
     # [FINAL FIX: LAPTOP SLEEP] Start heartbeat loop for sleep/wake resilience
     heartbeat_task = asyncio.create_task(connection_manager._heartbeat_loop())
@@ -225,13 +191,8 @@ connection_manager = ConnectionManager()
 # ---- Re-exported utilities for tests and tooling ----
 from src.tools.prompts_tools import _read_prompt
 import mcp.types as types
-from src.data_tools import query_dataframes as _query_dataframes
 from src.config import load_and_validate_settings
 from src.tools.asset_tools import read_asset
-
-
-async def query_dataframes(notebook_path: str, sql_query: str):
-    return await _query_dataframes(session_manager, notebook_path, sql_query)
 
 
 # Compute proposal store file dynamically so reloading `src.main` after

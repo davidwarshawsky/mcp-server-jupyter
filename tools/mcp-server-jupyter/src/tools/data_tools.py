@@ -1,13 +1,13 @@
 """
-Data Tools - SQL queries on DataFrames and package management.
+Data Tools - Package management.
 
-Includes: query_dataframes, install_package
+Includes: install_package
 """
 
 import time
 from src.utils import ToolResult
 from src.validation import validated_tool
-from src.models import QueryDataframesArgs, InstallPackageArgs
+from src.models import InstallPackageArgs
 from src.observability import get_logger
 
 logger = get_logger(__name__)
@@ -16,35 +16,6 @@ logger = get_logger(__name__)
 def register_data_tools(mcp, session_manager):
     """Register data-related tools with the MCP server."""
     from src.utils import offload_to_thread
-
-    @mcp.tool()
-    @offload_to_thread
-    @validated_tool(QueryDataframesArgs)
-    async def query_dataframes(notebook_path: str, sql_query: str):
-        """
-        [SUPERPOWER] Run SQL directly on active DataFrames using DuckDB.
-
-        Execute SQL queries against pandas/polars DataFrames in memory.
-        No data copying required - DuckDB reads directly from Python objects.
-
-        Args:
-            notebook_path: Path to notebook with running kernel
-            sql_query: SQL query (e.g., "SELECT * FROM df WHERE amount > 100")
-
-        Returns:
-            JSON with query results as markdown table
-
-        Example:
-            query_dataframes("analysis.ipynb", "SELECT region, SUM(revenue) FROM df_sales GROUP BY region")
-            # Returns: Markdown table with aggregated results
-
-        Wow Factor:
-            Users can explore data with SQL instead of pandas syntax.
-            "Show me top 5 users by revenue" becomes a simple SQL query.
-        """
-        from src.data_tools import query_dataframes as _query_df
-
-        return await _query_df(session_manager, notebook_path, sql_query)
 
     @mcp.tool()
     @validated_tool(InstallPackageArgs)

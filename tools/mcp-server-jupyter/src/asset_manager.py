@@ -132,15 +132,11 @@ def get_referenced_assets(notebook_path: str) -> Set[str]:
 
 def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, any]:
     """
-    Delete asset files not referenced in notebook outputs.
-    Implements "Reference Counting GC" for both images and text offload files.
-
-    Scans notebook for asset references, deletes orphaned files.
-    Safe to run periodically to clean up after cell deletions.
-    Automatically runs on kernel stop to maintain Git hygiene.
+    Delete asset files older than 24 hours.
+    Simplified timestamp-based GC to avoid complex reference tracking.
 
     Args:
-        notebook_path: Path to notebook file
+        notebook_path: Path to notebook file (for assets directory location)
         dry_run: If True, only report what would be deleted (don't actually delete)
 
     Returns:
@@ -149,6 +145,8 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, 
         - kept: List of kept filenames
         - total_size_freed: Bytes freed (or would be freed in dry_run)
     """
+    import time
+    
     path = Path(notebook_path)
     assets_dir = path.parent / "assets"
 
@@ -160,50 +158,42 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, 
             "message": f"No assets directory found at {assets_dir}",
         }
 
-    # Get referenced assets from notebook (now includes text_*.txt files)
-    referenced = get_referenced_assets(str(path))
-
-    # Get all asset files (both images and text offload files)
+    # Get all asset files
     all_assets = [
-        f.name
-        for f in assets_dir.iterdir()
+        f for f in assets_dir.iterdir()
         if f.is_file() and not f.name.startswith(".")
     ]
 
-    # FIXED: Only manage files created by the system (avoid deleting user-created files)
-    # Matches: asset_12chars.png, text_32chars.txt
-    managed_pattern = re.compile(r"^(?:text_|asset_)[a-f0-9]{12,32}\.[a-z]+$")
+    now = time.time()
+    ttl = 24 * 3600  # 24 hours
+    expired = []
+    kept = []
 
-    # Only consider system-managed files as candidates for deletion
-    managed_assets = [name for name in all_assets if managed_pattern.match(name)]
-
-    # Find orphaned managed assets (system-created files not referenced in the notebook)
-    orphaned = [f for f in managed_assets if f not in referenced]
-
-    # Kept should include any referenced assets (user or system)
-    kept = [f for f in all_assets if f in referenced]
+    for f in all_assets:
+        if now - f.stat().st_mtime > ttl:
+            expired.append(f)
+        else:
+            kept.append(f.name)
 
     total_size_freed = 0
     deleted = []
 
     if not dry_run:
-        for filename in orphaned:
-            file_path = assets_dir / filename
+        for file_path in expired:
             try:
                 size = file_path.stat().st_size
                 file_path.unlink()
                 total_size_freed += size
-                deleted.append(filename)
+                deleted.append(file_path.name)
             except Exception:
-                # Skip files that can't be deleted
+                # Skip files that can't be deleted (e.g., locked on Windows)
                 pass
     else:
         # Dry run - just calculate size
-        for filename in orphaned:
-            file_path = assets_dir / filename
+        for file_path in expired:
             try:
                 total_size_freed += file_path.stat().st_size
-                deleted.append(filename)
+                deleted.append(file_path.name)
             except Exception:
                 pass
 
@@ -215,9 +205,14 @@ def prune_unused_assets(notebook_path: str, dry_run: bool = False) -> Dict[str, 
     else:
         size_str = f"{total_size_freed / (1024 * 1024):.1f} MB"
 
-    message = f"{'Would delete' if dry_run else 'Deleted'} {len(deleted)} orphaned assets ({size_str}), kept {len(kept)} referenced assets"
+    message = f"{'Would delete' if dry_run else 'Deleted'} {len(deleted)} expired assets ({size_str}), kept {len(kept)} recent assets"
 
     return {
+        "deleted": deleted,
+        "kept": kept,
+        "total_size_freed": total_size_freed,
+        "message": message,
+    }
         "deleted": deleted,
         "kept": kept,
         "total_size_freed": total_size_freed,
