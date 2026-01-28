@@ -225,13 +225,26 @@ connection_manager = ConnectionManager()
 # ---- Re-exported utilities for tests and tooling ----
 from src.tools.prompts_tools import _read_prompt
 import mcp.types as types
-from src.data_tools import query_dataframes as _query_dataframes
 from src.config import load_and_validate_settings
 from src.tools.asset_tools import read_asset
 
 
 async def query_dataframes(notebook_path: str, sql_query: str):
-    return await _query_dataframes(session_manager, notebook_path, sql_query)
+    """
+    Executes a SQL query on pandas DataFrames in the kernel. This is a superpower that requires optional dependencies.
+    """
+    try:
+        # Dynamically import dependencies to keep the base installation lightweight.
+        import pandas as pd
+        import duckdb
+    except ImportError:
+        return {
+            "status": "error",
+            "message": "This feature requires pandas and duckdb. Please install them by running: pip install mcp-server-jupyter[superpowers]"
+        }
+
+    sm = get_session_manager()
+    return await sm.query_dataframes(notebook_path, sql_query)
 
 
 # Compute proposal store file dynamically so reloading `src.main` after
