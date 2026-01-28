@@ -64,25 +64,14 @@ export async function checkPythonDependencies(
   }
 
   // 2. Critical: Check if we can actually import the server module
-  // We check for 'mcp' AND 'src.main' (or the package name, but here we use src.main as our canonical check for the running code)
+  // We check for 'mcp_server_jupyter' package and its core dependencies
   const testImports = `
 import sys
 try:
-    import mcp
+    import mcp_server_jupyter
     import jupyter_client
-    # Try to import the server entry point to ensure package is installed
-    # If running from source, 'src' is current directory.
-    # If installed via pip, 'src' might be part of the package structure if package is poorly named, 
-    # BUT usually users install 'mcp-server-jupyter'. 
-    # Let's check for 'mcp' and 'jupyter_client' primarily.
-    # To really verify our specific server is there, we try 'import src.main' OR check if 'mcp_server_jupyter' is installed?
-    # Given the user pip installed current dir, 'src' is strictly inside that layout.
-    # Actually, pip install . installs the package 'mcp-server-jupyter'.
-    # Because layout is src-based, it might be installed as 'src' if not careful, OR 'mcp_server_jupyter' if pyproject configured right.
-    # Looking at pyproject.toml: packages = [{include = "src"}]
-    # This usually means top level import is 'src'. 
-    # Let's stick to the user provided snippet which checks src.main.
-    import src.main 
+    import fastapi
+    import uvicorn
     print("OK")
 except ImportError as e:
     print(f"MISSING: {e}")

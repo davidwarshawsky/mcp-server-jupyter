@@ -4,9 +4,9 @@ Variable Tools - Variable inspection tools.
 Includes: get_variable_info, list_variables, get_variable_manifest, inspect_variable
 """
 
-from src.observability import get_logger
-from src.validation import validated_tool
-from src.models import (
+from mcp_server_jupyter.observability import get_logger
+from mcp_server_jupyter.validation import validated_tool
+from mcp_server_jupyter.models import (
     GetVariableInfoArgs,
     ListVariablesArgs,
     GetVariableManifestArgs,
@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 def register_variable_tools(mcp, session_manager):
     """Register variable inspection tools with the MCP server."""
 
-    from src.utils import offload_to_thread
+    from mcp_server_jupyter.utils import offload_to_thread
 
     @mcp.tool()
     @offload_to_thread

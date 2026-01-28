@@ -4,9 +4,9 @@ Template Tools - Provide code templates for common tasks.
 Includes: get_training_template
 """
 
-from src.observability import get_logger
-from src.validation import validated_tool
-from src.models import (
+from mcp_server_jupyter.observability import get_logger
+from mcp_server_jupyter.validation import validated_tool
+from mcp_server_jupyter.models import (
     GetTrainingTemplateArgs,
 )
 

@@ -4,7 +4,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from mcp.server.fastmcp import FastMCP
-from src.utils import ToolResult
+from mcp_server_jupyter.utils import ToolResult
 
 
 class UploadFileRequest(BaseModel):

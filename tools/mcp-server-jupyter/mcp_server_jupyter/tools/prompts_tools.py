@@ -8,7 +8,7 @@ Provides system prompts that turn Claude into specialized Data Science personas:
 """
 
 from pathlib import Path
-import mcp.types as types
+from mcp_server_jupyter import mcp_types as types
 
 
 def _read_prompt(filename: str) -> str:

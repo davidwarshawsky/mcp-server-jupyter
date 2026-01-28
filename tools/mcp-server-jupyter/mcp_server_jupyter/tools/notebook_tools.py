@@ -8,8 +8,8 @@ save_notebook_clean, check_code_syntax
 
 import json
 from typing import Optional, List
-from src import notebook
-from src.observability import get_logger
+from mcp_server_jupyter import notebook
+from mcp_server_jupyter.observability import get_logger
 
 logger = get_logger(__name__)
 

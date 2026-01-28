@@ -8,8 +8,8 @@ edit_cell_by_id, delete_cell_by_id, insert_cell_by_id
 
 import json
 from typing import Optional, List
-from src import notebook
-from src.observability import get_logger
+from mcp_server_jupyter import notebook
+from mcp_server_jupyter.observability import get_logger
 
 logger = get_logger(__name__)
 

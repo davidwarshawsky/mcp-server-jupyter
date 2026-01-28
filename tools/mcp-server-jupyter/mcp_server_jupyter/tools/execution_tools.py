@@ -8,10 +8,10 @@ check_kernel_resources, run_all_cells, cancel_execution, submit_input
 import json
 import nbformat
 from typing import Optional
-from src import notebook
-from src.observability import get_logger
-from src.validation import validated_tool
-from src.models import (
+from mcp_server_jupyter import notebook
+from mcp_server_jupyter.observability import get_logger
+from mcp_server_jupyter.validation import validated_tool
+from mcp_server_jupyter.models import (
     RunCellArgs,
     RunAllCellsArgs,
     CancelExecutionArgs,
@@ -57,7 +57,7 @@ def register_execution_tools(mcp, session_manager):
         if not force:
             try:
                 # detect_sync_needed defined in main.py
-                from src.main import detect_sync_needed
+                from mcp_server_jupyter.main import detect_sync_needed
 
                 sync_resp = await detect_sync_needed(notebook_path)
                 try:

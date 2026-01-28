@@ -10,11 +10,11 @@ import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
 from jupyter_client.manager import AsyncKernelManager
-from src import notebook, utils
-from src.observability import get_logger, get_tracer
-from src.kernel_startup import get_startup_code
-from src.kernel_lifecycle import KernelLifecycle
-from src.io_multiplexer import IOMultiplexer
+from mcp_server_jupyter import notebook, utils
+from mcp_server_jupyter.observability import get_logger, get_tracer
+from mcp_server_jupyter.kernel_startup import get_startup_code
+from mcp_server_jupyter.kernel_lifecycle import KernelLifecycle
+from mcp_server_jupyter.io_multiplexer import IOMultiplexer
 
 # Configure logging
 logger = get_logger()
@@ -22,7 +22,7 @@ tracer = get_tracer(__name__)
 
 # START: Moved to environment.py but kept for backward compatibility if needed
 # Better to import it
-from src.environment import get_activated_env_vars as _get_activated_env_vars
+from mcp_server_jupyter.environment import get_activated_env_vars as _get_activated_env_vars
 
 # END
 
@@ -90,14 +90,6 @@ class SessionManager:
         self._continuous_cleanup_started = False
 
         # Removed session restoration logic (in-memory only)
-        """Register a client session for sending notifications."""
-        if not hasattr(self, "active_sessions"):
-            self.active_sessions = set()
-
-        self.active_sessions.add(session)
-        logger.info(
-            f"Registered new client session. Total active: {len(self.active_sessions)}"
-        )
 
     async def _send_notification(self, method: str, params: Any):
         """Helper to send notifications via available channels (Broadcast)."""
@@ -922,7 +914,7 @@ print(_inspect_var())
                             )
 
                 # Also run standard garbage collection
-                from src.asset_manager import prune_unused_assets
+                from mcp_server_jupyter.asset_manager import prune_unused_assets
 
                 cleanup_result = prune_unused_assets(abs_path, dry_run=False)
                 logger.info(
@@ -1067,7 +1059,7 @@ print(_inspect_var())
 
         # [ASSET CLEANUP] Run GC before restart
         try:
-            from src.asset_manager import prune_unused_assets
+            from mcp_server_jupyter.asset_manager import prune_unused_assets
 
             cleanup_result = prune_unused_assets(abs_path, dry_run=False)
             logger.info(
@@ -1102,7 +1094,7 @@ print(_inspect_var())
 
         # 2. Check common locations relative to user home
         try:
-            from src.config import load_and_validate_settings
+            from mcp_server_jupyter.config import load_and_validate_settings
 
             _cfg = load_and_validate_settings()
             home = _cfg.get_data_dir().parent if _cfg.MCP_DATA_DIR else Path.home()

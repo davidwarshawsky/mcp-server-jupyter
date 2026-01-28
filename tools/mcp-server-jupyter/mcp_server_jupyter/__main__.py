@@ -224,7 +224,7 @@ connection_manager = ConnectionManager()
 
 # ---- Re-exported utilities for tests and tooling ----
 from mcp_server_jupyter.tools.prompts_tools import _read_prompt
-import mcp.types as types
+from mcp_server_jupyter import mcp_types as types
 from mcp_server_jupyter.config import load_and_validate_settings
 from mcp_server_jupyter.tools.asset_tools import read_asset
 
@@ -448,83 +448,25 @@ async def main():
 
 
 async def _stdio_server():
-    """Minimal stdio JSON-RPC handler used by test harness.
-
-    Supports a small subset of tools required by tests: create_notebook and
-    notify_edit_result. Messages are newline-delimited JSON-RPC on stdin/stdout.
-    """
+    """Full stdio MCP server with registered tools."""
     import sys
-    from mcp_server_jupyter.notebook import create_notebook
-    from mcp_server_jupyter.tools.proposal_tools import notify_edit_result
+    from mcp.server.fastmcp import FastMCP
+    from mcp_server_jupyter.tools import register_all_tools
+
+    sm = get_session_manager()
+    mcp = FastMCP("mcp-server-jupyter")
+    register_all_tools(mcp, sm, connection_manager)
 
     # Write a small startup log to stderr for observability (not stdout)
-    import sys
     print("[MCPServer] stdio JSON-RPC server ready", file=sys.stderr, flush=True)
 
     try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                msg = json.loads(line)
-            except Exception:
-                continue
-
-            # Initialize handshake
-            if msg.get("method") == "initialize":
-                resp = {"jsonrpc": "2.0", "id": msg.get("id"), "result": {"server": "mcp-server-jupyter"}}
-                print(json.dumps(resp), flush=True)
-                continue
-
-            # Notification acknowledged
-            if msg.get("method") == "notifications/initialized":
-                continue
-
-            # Tool invocation
-            if msg.get("method") == "tools/call":
-                params = msg.get("params", {})
-                name = params.get("name")
-                arguments = params.get("arguments", {})
-
-                if name == "create_notebook":
-                    nb_path = arguments.get("notebook_path")
-                    try:
-                        create_notebook(nb_path)
-                        result = {"status": "created", "path": nb_path}
-                    except Exception as e:
-                        result = {"status": "error", "message": str(e)}
-
-                    resp = {"jsonrpc": "2.0", "id": msg.get("id"), "result": result}
-                    print(json.dumps(resp), flush=True)
-                    continue
-
-                if name == "notify_edit_result":
-                    try:
-                        nb_path = arguments.get("notebook_path")
-                        proposal_id = arguments.get("proposal_id")
-                        status = arguments.get("status")
-                        message = arguments.get("message")
-                        ack = notify_edit_result(nb_path, proposal_id, status, message)
-                        # notify_edit_result returns a JSON string; package it into expected structure
-                        resp = {"jsonrpc": "2.0", "id": msg.get("id"), "result": {"content": [{"text": ack}]}}
-                    except Exception as e:
-                        resp = {"jsonrpc": "2.0", "id": msg.get("id"), "error": {"message": str(e)}}
-
-                    print(json.dumps(resp), flush=True)
-                    continue
-
-            # Default: echo back a basic success to avoid hanging tests
-            resp = {"jsonrpc": "2.0", "id": msg.get("id"), "result": {"ok": True}}
-            print(json.dumps(resp), flush=True)
-    except Exception as e:
-        logger.error(f"Stdio loop error: {e}")
+        await mcp.run_stdio_async()
     finally:
         # [FIX: ZOMBIE SERVER]
         # When stdin closes (Extension host killed), this block runs.
         # We must explicitly shut down all kernels to release ports/processes.
         logger.info("Stdio pipe closed (EOF). Shutting down all kernels...")
-        sm = get_session_manager()
         if sm:
             await sm.shutdown_all()
         logger.info("Shutdown complete. Exiting.")

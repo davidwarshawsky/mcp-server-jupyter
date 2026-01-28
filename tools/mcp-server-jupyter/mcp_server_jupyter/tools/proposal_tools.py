@@ -10,8 +10,8 @@ import datetime
 from typing import Optional
 from collections import deque
 
-from src.config import load_and_validate_settings
-from src.observability import get_logger
+from mcp_server_jupyter.config import load_and_validate_settings
+from mcp_server_jupyter.observability import get_logger
 
 settings = load_and_validate_settings()
 

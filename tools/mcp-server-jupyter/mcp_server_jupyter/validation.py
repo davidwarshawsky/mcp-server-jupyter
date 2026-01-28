@@ -370,7 +370,7 @@ def safe_result_async(func):
 # --- Pydantic-backed validated tool decorator ---
 from functools import wraps
 from pydantic import ValidationError as PydanticValidationError
-from src.observability import get_logger, generate_request_id
+from mcp_server_jupyter.observability import get_logger, generate_request_id
 
 logger = get_logger()
 
@@ -394,7 +394,7 @@ def validated_tool(model_class):
 
             try:
                 # 2. Validate (offload to thread pool to avoid blocking the event loop)
-                from src.utils import offload_validation
+                from mcp_server_jupyter.utils import offload_validation
 
                 validated_data = await offload_validation(model_class, **kwargs)
 

@@ -8,9 +8,9 @@ list_kernel_packages, list_available_environments, switch_kernel_environment
 
 import json
 from typing import Optional
-from src.observability import get_logger, get_tracer
-from src.validation import validated_tool
-from src.models import (
+from mcp_server_jupyter.observability import get_logger, get_tracer
+from mcp_server_jupyter.validation import validated_tool
+from mcp_server_jupyter.models import (
     StartKernelArgs,
     StopKernelArgs,
     InterruptKernelArgs,
@@ -70,7 +70,7 @@ def register_kernel_tools(mcp, session_manager):
         with tracer.start_as_current_span("tool.stop_kernel") as span:
             span.set_attribute("notebook_path", notebook_path)
             # 1. Prune assets before stopping
-            from src.asset_manager import prune_unused_assets
+            from mcp_server_jupyter.asset_manager import prune_unused_assets
 
             try:
                 # Run cleanup. This ensures that if I delete a cell and close the notebook,

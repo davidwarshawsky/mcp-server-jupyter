@@ -12,8 +12,8 @@ import zipfile
 import tempfile
 import subprocess
 from pathlib import Path
-from src.observability import get_logger
-from src.config import load_and_validate_settings
+from mcp_server_jupyter.observability import get_logger
+from mcp_server_jupyter.config import load_and_validate_settings
 
 logger = get_logger(__name__)
 settings = load_and_validate_settings()

@@ -18,7 +18,6 @@ jupyter-client = ">=8.6.0"
 jupyter-core = ">=5.7.0"
 nbformat = ">=5.10.0"
 ipykernel = ">=6.29.0"
-mcp = ">=0.1.0"
 # Utilities
 psutil = ">=5.9.0"
 pydantic = ">=2.7.0"

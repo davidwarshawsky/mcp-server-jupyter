@@ -317,7 +317,7 @@ def get_notebook_outline(notebook_path: str) -> List[Dict[str, Any]]:
     if not os.path.exists(notebook_path):
         return []
 
-    from src.cell_id_manager import ensure_cell_ids
+    from mcp_server_jupyter.cell_id_manager import ensure_cell_ids
 
     path = Path(notebook_path)
     with open(path, "r", encoding="utf-8") as f:

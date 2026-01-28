@@ -5,17 +5,17 @@ Includes: install_package
 """
 
 import time
-from src.utils import ToolResult
-from src.validation import validated_tool
-from src.models import InstallPackageArgs
-from src.observability import get_logger
+from mcp_server_jupyter.utils import ToolResult
+from mcp_server_jupyter.validation import validated_tool
+from mcp_server_jupyter.models import InstallPackageArgs
+from mcp_server_jupyter.observability import get_logger
 
 logger = get_logger(__name__)
 
 
 def register_data_tools(mcp, session_manager):
     """Register data-related tools with the MCP server."""
-    from src.utils import offload_to_thread
+    from mcp_server_jupyter.utils import offload_to_thread
 
     @mcp.tool()
     @validated_tool(InstallPackageArgs)
@@ -142,7 +142,7 @@ print("RETURNCODE:", result.returncode)
 
                     # [HIDDEN DEPENDENCY TRAP] Check for requirements.txt to prompt user
                     from pathlib import Path
-                    from src.utils import get_project_root
+                    from mcp_server_jupyter.utils import get_project_root
 
                     project_root = get_project_root(Path(notebook_path).parent)
                     req_path = project_root / "requirements.txt"

@@ -12,7 +12,7 @@ from typing import List, Any, Optional
 
 # Global thread pool for CPU-bound tasks (JSON serialization, Pydantic validation)
 # Size is configurable via Settings (pydantic-settings). Update via environment variable MCP_IO_POOL_SIZE.
-from src.config import settings
+from mcp_server_jupyter.config import settings
 
 import os
 
@@ -252,7 +252,7 @@ def offload_to_thread(func):
 
         # If the result already looks like content list, return as-is
         try:
-            import mcp.types as _types
+            from mcp_server_jupyter import mcp_types as _types
 
             if (
                 isinstance(result, list)
@@ -266,7 +266,7 @@ def offload_to_thread(func):
         # If result is already JSON string, wrap and return
         if isinstance(result, str):
             try:
-                import mcp.types as _types
+                from mcp_server_jupyter import mcp_types as _types
 
                 return [_types.TextContent(type="text", text=result)]
             except Exception:
@@ -286,7 +286,7 @@ def offload_to_thread(func):
         json_str = await loop.run_in_executor(io_pool, _serialize)
 
         try:
-            import mcp.types as _types
+            from mcp_server_jupyter import mcp_types as _types
 
             return [_types.TextContent(type="text", text=json_str)]
         except Exception:
@@ -478,7 +478,7 @@ async def _sanitize_outputs_async(outputs: List[Any], asset_dir: str) -> str:
     Path(asset_dir).mkdir(parents=True, exist_ok=True)
 
     # Auto-gitignore assets/ to prevent pollution (Git-awareness)
-    from src.asset_manager import ensure_assets_gitignored
+    from mcp_server_jupyter.asset_manager import ensure_assets_gitignored
 
     try:
         ensure_assets_gitignored(asset_dir)
@@ -901,7 +901,7 @@ def get_project_root(start_path: Path) -> Path:
     current = start_path.resolve()
 
     try:
-        from src.config import load_and_validate_settings
+        from mcp_server_jupyter.config import load_and_validate_settings
 
         settings = load_and_validate_settings()
         home = (

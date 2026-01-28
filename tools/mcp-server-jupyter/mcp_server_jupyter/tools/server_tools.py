@@ -3,6 +3,7 @@ Server Tools - Server info, status, and health check endpoints.
 """
 
 import json
+import logging
 import sys
 from starlette.responses import JSONResponse
 
@@ -84,6 +85,36 @@ def register_server_tools(mcp, session_manager, connection_manager):
                 "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
             }
         )
+
+
+    @mcp.tool()
+    def set_log_level(level: str):
+        """
+        Set the logging level for the server.
+
+        Args:
+            level: The logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+        """
+        try:
+            numeric_level = getattr(logging, level.upper(), None)
+            if not isinstance(numeric_level, int):
+                raise ValueError(f"Invalid log level: {level}")
+            logging.getLogger().setLevel(numeric_level)
+            return json.dumps({
+                "logging": {
+                    "level": level.upper(),
+                    "success": True,
+                    "message": f"Log level set to {level.upper()}"
+                }
+            })
+        except Exception as e:
+            return json.dumps({
+                "logging": {
+                    "level": level.upper(),
+                    "success": False,
+                    "message": f"Failed to set log level: {str(e)}"
+                }
+            })
 
 
 async def health_check(session_manager, version: str):

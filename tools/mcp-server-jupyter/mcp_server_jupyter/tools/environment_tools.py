@@ -108,8 +108,8 @@ auto_detect_environment, create_venv
 import json
 import sys
 from typing import Optional
-from src import environment
-from src.observability import get_logger
+from mcp_server_jupyter import environment
+from mcp_server_jupyter.observability import get_logger
 
 logger = get_logger(__name__)
 

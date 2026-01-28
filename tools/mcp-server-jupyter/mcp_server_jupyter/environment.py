@@ -227,7 +227,7 @@ def find_conda_environments() -> List[Dict[str, Any]]:
 
     # Also check common conda locations
     try:
-        from src.config import load_and_validate_settings
+        from mcp_server_jupyter.config import load_and_validate_settings
 
         settings = load_and_validate_settings()
         home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()
@@ -277,7 +277,7 @@ def find_venv_environments() -> List[Dict[str, Any]]:
     environments = []
 
     try:
-        from src.config import load_and_validate_settings
+        from mcp_server_jupyter.config import load_and_validate_settings
 
         settings = load_and_validate_settings()
         home = settings.get_data_dir().parent if settings.MCP_DATA_DIR else Path.home()

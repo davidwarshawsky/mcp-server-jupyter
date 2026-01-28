@@ -1,8 +1,13 @@
 {
     "name": "mcp-jupyter-vscode",
     "displayName": "MCP Jupyter",
-    "description": "",
+    "description": "A VS Code extension for MCP Jupyter Server integration",
     "version": "0.3.0",
+    "publisher": "davidwarshawsky",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/davidwarshawsky/mcp-server-jupyter.git"
+    },
     "engines": {
         "vscode": "^1.90.0"
     },
@@ -91,32 +96,32 @@
                     "group": "inline"
                 }
             ]
-        },
-        "scripts": {
-            "vscode:prepublish": "npm run esbuild-base -- --minify",
-            "esbuild": "npm run esbuild-base -- --sourcemap --watch",
-            "esbuild-base": "node esbuild.renderer.mjs",
-            "build": "npm run esbuild-base",
-            "lint": "eslint src --ext ts",
-            "test": "node ./out/test/runTest.js",
-            "record:setup": "npx playwright test --config=./scripts/record_setup_walkthrough.ts",
-            "playwright:install": "npx playwright install --with-deps"
-        },
-        "devDependencies": {
-            "@playwright/test": "^1.43.1",
-            "@types/mocha": "^10.0.5",
-            "@types/node": "20.x",
-            "@types/vscode": "^1.90.0",
-            "@typescript-eslint/eslint-plugin": "^7.7.0",
-            "@typescript-eslint/parser": "^7.7.0",
-            "@vscode/test-cli": "^0.0.9",
-            "@vscode/test-electron": "^2.3.9",
-            "esbuild": "^0.27.2",
-            "eslint": "^8.57.0",
-            "typescript": "^5.4.5"
-        },
-        "dependencies": {
-            "@vscode/webview-ui-toolkit": "^1.4.0"
         }
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run esbuild-base -- --minify",
+        "esbuild": "npm run esbuild-base -- --sourcemap --watch",
+        "esbuild-base": "node esbuild.renderer.mjs",
+        "build": "npm run esbuild-base",
+        "lint": "eslint src --ext ts",
+        "test": "node ./out/test/runTest.js",
+        "record:setup": "npx playwright test --config=./scripts/record_setup_walkthrough.ts",
+        "playwright:install": "npx playwright install --with-deps"
+    },
+    "devDependencies": {
+        "@playwright/test": "^1.43.1",
+        "@types/mocha": "^10.0.5",
+        "@types/node": "20.x",
+        "@types/vscode": "^1.90.0",
+        "@typescript-eslint/eslint-plugin": "^7.7.0",
+        "@typescript-eslint/parser": "^7.7.0",
+        "@vscode/test-cli": "^0.0.9",
+        "@vscode/test-electron": "^2.3.9",
+        "esbuild": "^0.27.2",
+        "eslint": "^8.57.0",
+        "typescript": "^5.4.5"
+    },
+    "dependencies": {
+        "@vscode/webview-ui-toolkit": "^1.4.0"
     }
 }
