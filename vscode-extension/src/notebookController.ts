@@ -633,20 +633,27 @@ export class McpNotebookController {
           
           // Apply outputs to cell
           if (outputs.length > 0) {
-            const edit = new vscode.WorkspaceEdit();
-            const nbEdit = vscode.NotebookEdit.replaceOutput(cellIndex, outputs);
-            edit.set(notebook.uri, [nbEdit]);
-            await vscode.workspace.applyEdit(edit);
-            
-            // Set execution order if available
-            if (entry.execution_count !== null && entry.execution_count !== undefined) {
-              const nbEdit2 = vscode.NotebookEdit.updateCellMetadata(
-                cellIndex,
-                { custom: { executionCount: entry.execution_count } }
+            try {
+              const cell = notebook.cellAt(cellIndex);
+              const newCell = new vscode.NotebookCellData(
+                cell.kind,
+                cell.document.getText(),
+                cell.document.languageId
               );
-              const edit2 = new vscode.WorkspaceEdit();
-              edit2.set(notebook.uri, [nbEdit2]);
-              await vscode.workspace.applyEdit(edit2);
+              newCell.outputs = outputs;
+              if (entry.execution_count !== null && entry.execution_count !== undefined) {
+                newCell.executionSummary = { executionOrder: entry.execution_count };
+              }
+              
+              const edit = new vscode.WorkspaceEdit();
+              const nbEdit = vscode.NotebookEdit.replaceCells(
+                new vscode.NotebookRange(cellIndex, cellIndex + 1),
+                [newCell]
+              );
+              edit.set(notebook.uri, [nbEdit]);
+              await vscode.workspace.applyEdit(edit);
+            } catch (editError) {
+              console.warn(`[REHYDRATE] Failed to apply edit for cell ${cellIndex}:`, editError);
             }
           }
         } catch (e) {
@@ -1023,7 +1030,7 @@ export class McpNotebookController {
 
       // Load completed cells into memory
       for (const [notebookPath, cellIds] of Object.entries(state)) {
-        this.completedCells.set(notebookPath, new Set(cellIds));
+        this.completedCells.set(notebookPath, new Set(cellIds as string[]));
       }
 
       if (Object.keys(state).length > 0) {

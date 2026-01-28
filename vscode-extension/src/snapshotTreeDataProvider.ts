@@ -24,13 +24,15 @@ export class SnapshotTreeDataProvider implements vscode.TreeDataProvider<Snapsho
         const dbService = await this.dbManager.getActiveService();
         if (!dbService || !dbService.isInitialized()) {
             // Display a message when no workspace is open or DB is not initialized
-            return [new vscode.TreeItem('Open a folder to see snapshots', vscode.TreeItemCollapsibleState.None)];
+            const item = new vscode.TreeItem('Open a folder to see snapshots', vscode.TreeItemCollapsibleState.None);
+            return [item as any as SnapshotTreeItem];
         }
 
         try {
             const snapshots = await dbService.getSnapshots();
             if (snapshots.length === 0) {
-                return [new vscode.TreeItem('No snapshots saved for this workspace', vscode.TreeItemCollapsibleState.None)];
+                const item = new vscode.TreeItem('No snapshots saved for this workspace', vscode.TreeItemCollapsibleState.None);
+                return [item as any as SnapshotTreeItem];
             }
             return snapshots.map(snapshot => new SnapshotTreeItem(
                 snapshot,
@@ -38,7 +40,8 @@ export class SnapshotTreeDataProvider implements vscode.TreeDataProvider<Snapsho
             ));
         } catch (error) {
             console.error('Error fetching snapshots:', error);
-            return [new vscode.TreeItem('Error loading snapshots', vscode.TreeItemCollapsibleState.None)];
+            const item = new vscode.TreeItem('Error loading snapshots', vscode.TreeItemCollapsibleState.None);
+            return [item as any as SnapshotTreeItem];
         }
     }
 }
@@ -50,8 +53,8 @@ class SnapshotTreeItem extends vscode.TreeItem {
         public readonly collapsibleState: vscode.TreeItemCollapsibleState
     ) {
         super(snapshot.name, collapsibleState);
-        this.tooltip = `${snapshot.notebookPath}\n${new Date(snapshot.createdAt * 1000).toLocaleString()}`;
-        this.description = new Date(snapshot.createdAt * 1000).toLocaleDateString();
+        this.tooltip = `${snapshot.notebook_path}\n${new Date(parseInt(snapshot.created_at) * 1000).toLocaleString()}`;
+        this.description = new Date(parseInt(snapshot.created_at) * 1000).toLocaleDateString();
         this.command = {
             command: 'mcp-jupyter.viewSnapshot',
             title: 'View Snapshot',

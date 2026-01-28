@@ -27,10 +27,10 @@ export class SnapshotViewer {
     private getHtmlForWebview(snapshot: ISnapshot, variables: ISnapshotVariable[]): string {
         const variableRows = variables.map(v => `
             <tr>
-                <td>${v.name}</td>
-                <td>${v.type}</td>
-                <td>${v.preview}</td>
-                <td>${new Date(v.timestamp * 1000).toLocaleString()}</td>
+                <td>${v.var_name}</td>
+                <td>${v.var_type}</td>
+                <td>${v.var_value}</td>
+                <td>N/A</td>
             </tr>
         `).join('');
 
@@ -59,8 +59,8 @@ export class SnapshotViewer {
             </head>
             <body>
                 <h1>Snapshot: ${snapshot.name}</h1>
-                <p><strong>Notebook:</strong> ${snapshot.notebookPath}</p>
-                <p><strong>Created:</strong> ${new Date(snapshot.createdAt * 1000).toLocaleString()}</p>
+                <p><strong>Notebook:</strong> ${snapshot.notebook_path}</p>
+                <p><strong>Created:</strong> ${new Date(parseInt(snapshot.created_at) * 1000).toLocaleString()}</p>
                 <table>
                     <thead>
                         <tr>

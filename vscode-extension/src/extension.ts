@@ -54,7 +54,7 @@ export async function activate(context: vscode.ExtensionContext) {
         try {
             feature.activate(context, mcpClient);
         } catch (err) {
-            console.error(`Error activating feature: ${err.message}`);
+            console.error(`Error activating feature: ${err instanceof Error ? err.message : String(err)}`);
         }
     });
 }
@@ -69,7 +69,7 @@ export function deactivate() {
         try {
             feature.deactivate();
         } catch (err) {
-            console.error(`Error deactivating feature: ${err.message}`);
+            console.error(`Error deactivating feature: ${err instanceof Error ? err.message : String(err)}`);
         }
     });
 }

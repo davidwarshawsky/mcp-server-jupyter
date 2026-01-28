@@ -99,7 +99,7 @@ export class VariableDashboardProvider implements vscode.TreeDataProvider<Variab
       // We can also assume busy status from resources if implemented, 
       // but let's stick to isKernelBusy for busy check as it is more explicit
       const busyStatus = await this.mcpClient.isKernelBusy(this.currentNotebook);
-      if (busyStatus && busyStatus.is_busy) {
+      if (busyStatus && (busyStatus as any).is_busy) {
         // Kernel is busy, skip this poll cycle
         return;
       }

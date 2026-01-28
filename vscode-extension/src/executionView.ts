@@ -56,6 +56,8 @@ export class ExecutionViewProvider implements vscode.TreeDataProvider<ExecutionT
 
   private handleStatusUpdate(params: StatusUpdateParams): void {
     const taskId = params.exec_id || params.task_id;
+    if (!taskId) return;
+    
     const status = params.status;
 
     if (status === 'completed' || status === 'error' || status === 'cancelled') {
@@ -78,6 +80,8 @@ export class ExecutionViewProvider implements vscode.TreeDataProvider<ExecutionT
 
   private handleExecutingUpdate(params: ExecutingUpdateParams): void {
     const taskId = params.exec_id || params.task_id;
+    if (!taskId) return;
+    
     const notebookPath = params.notebook_path;
     const cellIndex = params.cell_index;
 
