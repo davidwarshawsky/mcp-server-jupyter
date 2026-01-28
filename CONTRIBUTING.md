@@ -792,7 +792,7 @@ Before submitting a PR:
 
 ## Getting Help
 
-- **Architecture Questions**: See [ARCHITECTURE_REMEDIATION.md](ARCHITECTURE_REMEDIATION.md)
+- **Architectural Principle**: Development is guided by a lightweight, "Do No Harm" philosophy.
 - **API Reference**: See [README.md](README.md)
 - **Issues**: Open a GitHub issue with `[debug-info]` label
 - **Discussions**: Start a discussion in GitHub Discussions
