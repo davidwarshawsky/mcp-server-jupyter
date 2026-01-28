@@ -24,7 +24,7 @@ def register_notebook_tools(mcp):
         kernel_display_name: Optional[str] = None,
         language: str = "python",
         python_version: Optional[str] = None,
-        initial_cells: Optional[str] = None,
+        initial_cells: Optional[List[dict]] = None,
     ):
         """
         Creates a new Jupyter notebook with proper metadata structure.
@@ -35,26 +35,18 @@ def register_notebook_tools(mcp):
             kernel_display_name: Display name for the kernel (defaults to kernel_name)
             language: Programming language (default: 'python')
             python_version: Python version string (e.g., '3.10.5'). Auto-detected if None.
-            initial_cells: JSON string with list of dicts containing 'type' and 'content' keys
+            initial_cells: List of dicts with 'type' ('code' or 'markdown') and 'content' keys
 
         Returns:
             Success message with notebook path
         """
-        # Parse initial_cells if provided
-        cells = None
-        if initial_cells:
-            try:
-                cells = json.loads(initial_cells)
-            except json.JSONDecodeError:
-                return "Error: initial_cells must be valid JSON"
-
         return notebook.create_notebook(
             notebook_path,
             kernel_name,
             kernel_display_name,
             language,
             python_version,
-            cells,
+            initial_cells,
         )
 
     @mcp.tool()
@@ -85,16 +77,11 @@ def register_notebook_tools(mcp):
         return json.dumps(metadata, indent=2)
 
     @mcp.tool()
-    def set_notebook_metadata(notebook_path: str, metadata_json: str):
+    def set_notebook_metadata(notebook_path: str, metadata: dict):
         """
         Sets the notebook-level metadata.
-        metadata_json: JSON string containing metadata to update
+        metadata: Dictionary containing metadata to update
         """
-        try:
-            metadata = json.loads(metadata_json)
-        except json.JSONDecodeError:
-            return "Error: metadata_json must be valid JSON"
-
         return notebook.set_notebook_metadata(notebook_path, metadata)
 
     @mcp.tool()

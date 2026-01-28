@@ -165,43 +165,28 @@ def register_cell_tools(mcp, session_manager):
         return json.dumps(metadata, indent=2)
 
     @mcp.tool()
-    def set_cell_metadata(notebook_path: str, index: int, metadata_json: str):
+    def set_cell_metadata(notebook_path: str, index: int, metadata: dict):
         """
         Sets metadata for a specific cell.
-        metadata_json: JSON string containing metadata to update
+        metadata: Dictionary containing metadata to update
         """
-        try:
-            metadata = json.loads(metadata_json)
-        except json.JSONDecodeError:
-            return "Error: metadata_json must be valid JSON"
-
         return notebook.set_cell_metadata(notebook_path, index, metadata)
 
     @mcp.tool()
-    def add_cell_tags(notebook_path: str, index: int, tags: str):
+    def add_cell_tags(notebook_path: str, index: int, tags: List[str]):
         """
         Adds tags to a cell's metadata.
-        tags: JSON array of tag strings, e.g., ["important", "todo"]
+        tags: Array of tag strings, e.g., ["important", "todo"]
         """
-        try:
-            tag_list = json.loads(tags)
-        except json.JSONDecodeError:
-            return "Error: tags must be valid JSON array"
-
-        return notebook.add_cell_tags(notebook_path, index, tag_list)
+        return notebook.add_cell_tags(notebook_path, index, tags)
 
     @mcp.tool()
-    def remove_cell_tags(notebook_path: str, index: int, tags: str):
+    def remove_cell_tags(notebook_path: str, index: int, tags: List[str]):
         """
         Removes tags from a cell's metadata.
-        tags: JSON array of tag strings, e.g., ["important", "todo"]
+        tags: Array of tag strings, e.g., ["important", "todo"]
         """
-        try:
-            tag_list = json.loads(tags)
-        except json.JSONDecodeError:
-            return "Error: tags must be valid JSON array"
-
-        return notebook.remove_cell_tags(notebook_path, index, tag_list)
+        return notebook.remove_cell_tags(notebook_path, index, tags)
 
     # Output operations
     @mcp.tool()

@@ -19,3 +19,6 @@ diff.txt
 digest.txt
 node_modules/
 safe_screenshots/
+
+# Cloned repositories for reference
+vscode-copilot-chat/
