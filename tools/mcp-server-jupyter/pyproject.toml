@@ -4,7 +4,7 @@ version = "0.3.0"
 description = "A server to manage Jupyter kernels for the MCP-Jupyter VS Code extension."
 authors = ["MCP Jupyter Team"]
 readme = "README.md"
-packages = [{include = "src"}]
+packages = [{include = "mcp_server_jupyter"}]
 
 [tool.poetry.dependencies]
 python = ">=3.10,<4.0"
@@ -51,7 +51,7 @@ mypy = ">=1.10.0"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-pythonpath = ["src"]
+pythonpath = ["mcp_server_jupyter"]
 testpaths = ["tests"]
 # Automatically rerun failed tests up to 5 times with 2 second delay
 # This helps with flaky kernel startup during parallel execution
