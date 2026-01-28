@@ -6,7 +6,7 @@
 
     ---
 
-    Query DataFrames with SQL. Generate comprehensive EDA in 60 seconds. Rollback kernel state on crashes.
+    Query DataFrames with SQL. Generate comprehensive EDA in 60 seconds.
 
     [:octicons-arrow-right-24: Explore Superpowers](superpowers/index.md)
 
@@ -14,7 +14,7 @@
 
     ---
 
-    Kernel crash recovery. Asset offloading for 100MB+ outputs. Error recovery. 120+ unit tests.
+    Asset offloading for 100MB+ outputs. Error recovery. 120+ unit tests.
 
     [:octicons-arrow-right-24: Architecture Deep Dive](architecture/index.md)
 
@@ -52,10 +52,10 @@ pip install "mcp-server-jupyter[superpowers]"
 
     ```python
     # Instead of this pandas nightmare:
-    result = df.groupby(['region', 'product'])\
-               .agg({'revenue': 'sum', 'units': 'sum'})\
-               .reset_index()\
-               .sort_values('revenue', ascending=False)\
+    result = df.groupby(['region', 'product'])\\\
+               .agg({'revenue': 'sum', 'units': 'sum'})\\\
+               .reset_index()\\\
+               .sort_values('revenue', ascending=False)\\\
                .head(10)
     
     # Write this:
@@ -85,35 +85,19 @@ pip install "mcp-server-jupyter[superpowers]"
     # In 60 seconds.
     ```
 
-=== "Time Travel"
-
-    ```python
-    # Before risky operation:
-    save_checkpoint("before_merge")
-    
-    # Try something dangerous:
-    df = df.merge(other_df, on='id')  # Oops, this crashes the kernel
-    
-    # Rollback instantly:
-    load_checkpoint("before_merge")
-    # df restored, kernel alive, no restart needed
-    ```
-
 ## Why This Wins
 
 | Feature | Standard Jupyter | JupyterLab | **MCP Jupyter** |
 |---------|------------------|------------|-----------------|
-| **Kernel Crash Recovery** | ❌ Manual restart | ❌ Manual restart | ✅ Automatic (Reaper) |
 | **100MB Outputs** | ❌ Browser crash | ⚠️ Slow rendering | ✅ Asset offloading |
 | **SQL on DataFrames** | ❌ None | ❌ None | ✅ DuckDB (zero-copy) |
 | **Autonomous EDA** | ❌ Manual | ❌ Manual | ✅ 60-second protocol |
-| **State Rollback** | ❌ None | ❌ None | ✅ Time Travel |
 | **Agent Tools** | ⚠️ Basic | ⚠️ Basic | ✅ 32 specialized tools |
 | **Consumer Prompts** | ❌ None | ❌ None | ✅ 3 pre-built personas |
 
 !!! success "Production-Grade"
-    - **Safety**: Reaper (kernel recovery), Asset Offloading (100MB outputs), Error recovery
-    - **Power**: DuckDB SQL, Auto-EDA, Time Travel, Smart inspection
+    - **Safety**: Asset Offloading (100MB outputs), Error recovery
+    - **Power**: DuckDB SQL, Auto-EDA, Smart inspection
     - **Testing**: 120+ Python unit tests, 6 integration tests, VSIX verification
     - **Documentation**: 7 comprehensive guides, 1,500+ lines
 
@@ -165,20 +149,16 @@ graph TB
     B --> C[SessionManager<br/>Manages Kernels]
     C --> D[Notebook<br/>nbformat operations]
     C --> E[AsyncKernelManager<br/>jupyter_client]
-    B --> F[Reaper<br/>Crash Recovery]
     B --> G[Asset Manager<br/>Offload Large Outputs]
     B --> H[Data Tools<br/>DuckDB SQL]
-    B --> I[Git Tools<br/>Time Travel]
     
     style B fill:#0af,stroke:#333,stroke-width:4px
-    style F fill:#f96,stroke:#333,stroke-width:2px
     style G fill:#f96,stroke:#333,stroke-width:2px
     style H fill:#9f6,stroke:#333,stroke-width:2px
-    style I fill:#9f6,stroke:#333,stroke-width:2px
 ```
 
 !!! tip "The Crucible"
-    The Reaper + Asset Offloading architecture makes this server **bulletproof**. Standard Jupyter kernels die silently; we revive them automatically. Standard notebooks freeze on 100MB outputs; we stream them to disk.
+    The Asset Offloading architecture makes this server **robust**. Standard notebooks freeze on 100MB outputs; we stream them to disk.
 
 ## What's Next?
 
@@ -190,11 +170,11 @@ graph TB
 
 -   [**Superpowers →**](superpowers/index.md)
     
-    Deep dive into DuckDB SQL, Auto-EDA, and Time Travel
+    Deep dive into DuckDB SQL and Auto-EDA
 
 -   [**Architecture →**](architecture/index.md)
     
-    How the Reaper, Asset Offloading, and WebSocket transport work
+    How Asset Offloading and WebSocket transport work
 
 -   [**API Reference →**](api/session.md)
     
